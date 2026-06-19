@@ -1,0 +1,191 @@
+{
+  "info": {
+    "_postman_id": "893c52a0-4ff6-42d4-a133-c88f34606fef",
+    "name": "DARFUS Jewellery ERP API Collection",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "User Login",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"admin@admin.com\",\n  \"password\": \"123456\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "login"]
+            }
+          }
+        },
+        {
+          "name": "Token Refresh",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{refresh_token}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/refresh",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "refresh"]
+            }
+          }
+        },
+        {
+          "name": "Get User Profile",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Company-ID",
+                "value": "CMP-DEMO"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/me",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "me"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Gold Prices",
+      "item": [
+        {
+          "name": "Get Live Gold Price Feed",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/gold/live",
+              "host": ["{{base_url}}"],
+              "path": ["gold", "live"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Inventory Assets",
+      "item": [
+        {
+          "name": "List Assets",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Company-ID",
+                "value": "CMP-DEMO"
+              },
+              {
+                "key": "X-Branch-ID",
+                "value": "فرع دبي مول"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/assets?page=1&pageSize=25",
+              "host": ["{{base_url}}"],
+              "path": ["assets"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "pageSize", "value": "25" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Create Asset",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Company-ID",
+                "value": "CMP-DEMO"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"خاتم ألماس جديد\",\n  \"type\": \"diamond\",\n  \"category\": \"خواتم\",\n  \"karat\": 18,\n  \"grossWeight\": 5.2,\n  \"netWeight\": 4.8,\n  \"price\": 8500,\n  \"cost\": 5200,\n  \"location\": \"معرض A · رف 01\",\n  \"barcode\": \"6291009999999\",\n  \"branch\": \"فرع دبي مول\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/assets",
+              "host": ["{{base_url}}"],
+              "path": ["assets"]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000/api/v1",
+      "type": "string"
+    },
+    {
+      "key": "access_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "refresh_token",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}
