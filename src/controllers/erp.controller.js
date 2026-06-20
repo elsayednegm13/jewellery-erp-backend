@@ -17,6 +17,22 @@ const NUMERIC_TYPE_NAMES = new Set([
   "INTEGER", "BIGINT", "FLOAT", "REAL", "DOUBLE", "DECIMAL", "NUMBER"
 ]);
 
+// Invoice lifecycle fields. These are owned by the dedicated invoice lifecycle
+// endpoints (draft/post/cancel) and must NEVER be set or changed through the
+// generic CRUD routes — not even postingStatus:"posted" (let the column default
+// fill it). Both camelCase and snake_case are listed so a request cannot slip a
+// value through under the DB column name.
+const INVOICE_LIFECYCLE_FIELDS = [
+  "postingStatus", "posting_status",
+  "postedAt", "posted_at",
+  "cancelledAt", "cancelled_at",
+  "cancelReason", "cancel_reason"
+];
+
+function invoiceLifecycleFieldInBody(body = {}) {
+  return INVOICE_LIFECYCLE_FIELDS.some((f) => Object.prototype.hasOwnProperty.call(body, f));
+}
+
 function isNumericAttribute(attribute) {
   return !!(attribute && attribute.type && NUMERIC_TYPE_NAMES.has(attribute.type.constructor.name));
 }
@@ -167,6 +183,23 @@ class ErpController {
         }
       }
 
+      // Invoices: by default the list returns ONLY posted invoices, so drafts
+      // and cancelled drafts never leak into financial lists / report + dashboard
+      // aggregates that are computed from this endpoint. Drafts stay reachable on
+      // demand: ?postingStatus=draft|posted|cancelled, or ?postingStatus=all /
+      // ?includeDrafts=true to see every lifecycle state. An explicit
+      // filters={postingStatus:...} (handled above) also wins.
+      if (this.model.name === "Invoice" && whereClause.postingStatus === undefined) {
+        const requested = req.query.postingStatus;
+        if (["draft", "posted", "cancelled"].includes(requested)) {
+          whereClause.postingStatus = requested;
+        } else if (requested === "all" || req.query.includeDrafts === "true") {
+          // no lifecycle filter — caller explicitly wants every state
+        } else {
+          whereClause.postingStatus = "posted";
+        }
+      }
+
       // Build sorting options
       const order = [];
       if (this.model.rawAttributes[sortBy]) {
@@ -242,14 +275,13 @@ class ErpController {
 
   create = async (req, res, next) => {
     try {
-      // Invoice lifecycle is owned by the dedicated lifecycle endpoints, not
-      // generic CRUD. Block creating anything other than a posted invoice here
-      // (drafts/cancelled must go through the lifecycle routes added in P4.2/4.3).
-      if (this.model.name === "Invoice" &&
-          req.body.postingStatus !== undefined && req.body.postingStatus !== "posted") {
+      // Invoice lifecycle fields are owned by the dedicated lifecycle endpoints,
+      // not generic CRUD. Reject ANY lifecycle field in the body (incl.
+      // postingStatus:"posted") — the column default fills posted automatically.
+      if (this.model.name === "Invoice" && invoiceLifecycleFieldInBody(req.body)) {
         return res.status(403).json({
           success: false,
-          message: "postingStatus can only be changed through invoice lifecycle endpoints"
+          message: "Invoice lifecycle fields can only be changed through invoice lifecycle endpoints"
         });
       }
 
@@ -311,13 +343,13 @@ class ErpController {
         throw new NotFoundError(`${this.model.name} record not found.`);
       }
 
-      // Block changing an invoice's lifecycle status via generic CRUD; only the
-      // dedicated lifecycle endpoints may transition draft/posted/cancelled.
-      if (this.model.name === "Invoice" &&
-          req.body.postingStatus !== undefined && req.body.postingStatus !== item.postingStatus) {
+      // Block changing any invoice lifecycle field via generic CRUD; only the
+      // dedicated lifecycle endpoints may transition draft/posted/cancelled and
+      // stamp postedAt/cancelledAt/cancelReason.
+      if (this.model.name === "Invoice" && invoiceLifecycleFieldInBody(req.body)) {
         return res.status(403).json({
           success: false,
-          message: "postingStatus can only be changed through invoice lifecycle endpoints"
+          message: "Invoice lifecycle fields can only be changed through invoice lifecycle endpoints"
         });
       }
 

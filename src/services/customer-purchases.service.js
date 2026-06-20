@@ -17,7 +17,11 @@ async function recalculateCustomerNetPurchases(models, companyId, customerId, op
   const invoices = await models.Invoice.findAll({
     where: {
       companyId,
-      customerId
+      customerId,
+      // Only posted invoices count toward net purchases. The legacy payment-
+      // `status` exclusion below cannot catch drafts (their payment status is
+      // "due"), so filter on the lifecycle status here.
+      postingStatus: "posted"
     },
     transaction: options.transaction
   });

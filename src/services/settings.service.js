@@ -24,6 +24,7 @@ const DEFAULTS = {
   invoiceNumbering: "sequence",
   dateFormat: "YYYY-MM-DD",
   lowStockThreshold: 1,
+  accountingByKarat: false, // P5.1 foundation flag — split posting not enabled yet
   installment: {
     enabled: true,
     allowZeroDownPayment: false,
@@ -109,6 +110,8 @@ async function getCompanySettings(companyId, options = {}) {
     invoiceNumbering: pick("invoiceNumbering", String, DEFAULTS.invoiceNumbering),
     dateFormat: pick("dateFormat", String, DEFAULTS.dateFormat),
     lowStockThreshold: pick("lowStockThreshold", (v) => toNumber(v, DEFAULTS.lowStockThreshold), DEFAULTS.lowStockThreshold),
+    // P5.1 foundation flag (default false). No posting reads it yet.
+    accountingByKarat: toBool(raw.accountingByKarat, DEFAULTS.accountingByKarat),
     receipt: parseMaybeJson(raw.receipt) || null,
     installment: {
       // Prefer flat keys (how the settings page saves them) then nested object then default.

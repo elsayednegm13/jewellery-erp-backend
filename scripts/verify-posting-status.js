@@ -58,36 +58,65 @@ function mockRes() {
   console.log("\nPart B — generic CRUD cannot touch postingStatus:");
   const ctrl = new ErpController(Invoice, ["customerName"]);
 
-  // create a draft via generic POST → 403, and model.create never reached.
-  const res1 = mockRes();
-  await ctrl.create({ body: { postingStatus: "draft", customerId: "X" }, companyId: "CMP-DEMO", user: null, headers: {} }, res1, () => {});
-  check(res1.statusCode === 403, "generic POST /invoices with postingStatus=draft is rejected (403)");
-  check(/lifecycle endpoints/.test(res1.body?.message || ""), "rejection message points to lifecycle endpoints");
+  // Every lifecycle field is rejected by generic POST and PATCH (incl. snake_case
+  // and incl. postingStatus:"posted" — the default fills posted, callers must not).
+  const fieldSamples = {
+    postingStatus: "draft",
+    posting_status: "posted",
+    postedAt: "2026-06-19 10:00",
+    posted_at: "2026-06-19 10:00",
+    cancelledAt: "2026-06-19 10:00",
+    cancelled_at: "2026-06-19 10:00",
+    cancelReason: "test",
+    cancel_reason: "test",
+  };
 
-  // create a posted invoice via generic POST is allowed past the guard
-  // (we don't persist it — stop by checking the guard didn't 403).
-  const res2 = mockRes();
-  let createReached = false;
-  const ctrl2 = new ErpController(
-    // customerId points at a non-existent customer so the post-create
-    // net-purchases recalc affects zero rows (keeps this test side-effect-free).
-    { name: "Invoice", rawAttributes: Invoice.rawAttributes, create: async () => { createReached = true; return { id: "X", toJSON: () => ({ id: "X" }), customerId: "CUS-PROBE-NONEXISTENT" }; } },
-    ["customerName"]
-  );
-  // Avoid the post-create customer recalculation hitting the DB by passing a posted status only.
-  try {
-    await ctrl2.create({ body: { postingStatus: "posted" }, companyId: "CMP-DEMO", user: null, headers: {} }, res2, () => {});
-  } catch { /* downstream (recalc/emit) may noop-fail; we only assert the guard let it through */ }
-  check(createReached === true, "generic POST with postingStatus=posted passes the guard (allowed)");
+  // POST: each lifecycle field → 403 (guard fires before any DB write).
+  for (const [field, val] of Object.entries(fieldSamples)) {
+    const res = mockRes();
+    await ctrl.create({ body: { [field]: val, customerId: "X" }, companyId: "CMP-DEMO", user: null, headers: {} }, res, () => {});
+    check(res.statusCode === 403, `generic POST /invoices with ${field} → 403`);
+  }
+  // message check (once).
+  const resMsg = mockRes();
+  await ctrl.create({ body: { postedAt: "x" }, companyId: "CMP-DEMO", user: null, headers: {} }, resMsg, () => {});
+  check(/Invoice lifecycle fields can only be changed through invoice lifecycle endpoints/.test(resMsg.body?.message || ""),
+    "rejection message is the lifecycle-fields message");
 
-  // change postingStatus on an existing invoice via generic PATCH → 403.
+  // PATCH: each lifecycle field → 403, and confirm nothing changed in DB.
   const existing = await Invoice.findOne({ where: { companyId: "CMP-DEMO" } });
-  const res3 = mockRes();
-  await ctrl.update({ params: { id: existing.id }, body: { postingStatus: "cancelled" }, companyId: "CMP-DEMO", user: null, headers: {} }, res3, () => {});
-  check(res3.statusCode === 403, "generic PATCH /invoices/:id changing postingStatus is rejected (403)");
-  // confirm it was NOT changed in the DB.
+  const before = { postingStatus: existing.postingStatus, postedAt: existing.postedAt, cancelledAt: existing.cancelledAt, cancelReason: existing.cancelReason };
+  for (const [field, val] of Object.entries(fieldSamples)) {
+    const res = mockRes();
+    await ctrl.update({ params: { id: existing.id }, body: { [field]: val }, companyId: "CMP-DEMO", user: null, headers: {} }, res, () => {});
+    check(res.statusCode === 403, `generic PATCH /invoices/:id with ${field} → 403`);
+  }
   const after = await Invoice.findOne({ where: { id: existing.id } });
-  check(after.postingStatus === existing.postingStatus, "the invoice's postingStatus was NOT changed by the blocked PATCH");
+  check(
+    after.postingStatus === before.postingStatus &&
+    String(after.postedAt) === String(before.postedAt) &&
+    String(after.cancelledAt) === String(before.cancelledAt) &&
+    String(after.cancelReason) === String(before.cancelReason),
+    "lifecycle fields were NOT changed in DB by the blocked PATCHes"
+  );
+
+  // A non-lifecycle generic PATCH still works (notes) — does not get blocked.
+  const resOk = mockRes();
+  let blocked = false;
+  await ctrl.update({ params: { id: existing.id }, body: { notes: existing.notes }, companyId: "CMP-DEMO", user: null, headers: {} }, resOk, () => {});
+  if (resOk.statusCode === 403) blocked = true;
+  check(!blocked, "generic PATCH WITHOUT lifecycle fields is still allowed (not over-blocked)");
+
+  // Custom routes are unaffected: a direct Invoice.create CAN set lifecycle
+  // fields (this is the path /pos/checkout, returns, exchanges, etc. use).
+  const t2 = await sequelize.transaction();
+  try {
+    const row = await Invoice.create(
+      { id: "INV-PROBE-CUSTOM-" + Date.now(), companyId: "CMP-DEMO", customerId: "CUS-0041", customerName: "Probe", date: "2026-06-19", total: 1, paymentMethod: "Cash", branch: "Main", postingStatus: "posted", postedAt: "2026-06-19 10:00" },
+      { transaction: t2 }
+    );
+    check(row.postingStatus === "posted", "custom routes (direct Invoice.create) can set lifecycle fields — unaffected by the guard");
+  } finally { await t2.rollback(); }
 
   console.log(`\nRESULT: all ${passed} checks passed. (no data committed)`);
   await sequelize.close();

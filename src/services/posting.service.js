@@ -24,6 +24,12 @@ const CHART = {
   "1110": { name: "Cash on Hand", nameAr: "نقد في الخزنة", type: "asset", nature: "debit", level: 3, parent: "1100" },
   "1120": { name: "Bank Accounts", nameAr: "الحسابات البنكية", type: "asset", nature: "debit", level: 3, parent: "1100" },
   "1200": { name: "Inventory", nameAr: "المخزون", type: "asset", nature: "debit", level: 2, parent: "1000" },
+  // Per-karat inventory sub-accounts (P5.1 — used only when accountingByKarat is on).
+  "1210": { name: "Inventory Gold 18K", nameAr: "مخزون ذهب 18", type: "asset", nature: "debit", level: 3, parent: "1200" },
+  "1211": { name: "Inventory Gold 21K", nameAr: "مخزون ذهب 21", type: "asset", nature: "debit", level: 3, parent: "1200" },
+  "1212": { name: "Inventory Gold 22K", nameAr: "مخزون ذهب 22", type: "asset", nature: "debit", level: 3, parent: "1200" },
+  "1213": { name: "Inventory Gold 24K", nameAr: "مخزون ذهب 24", type: "asset", nature: "debit", level: 3, parent: "1200" },
+  "1219": { name: "Inventory Other / Non-Gold", nameAr: "مخزون أخرى / غير ذهب", type: "asset", nature: "debit", level: 3, parent: "1200" },
   "1300": { name: "Accounts Receivable", nameAr: "ذمم العملاء", type: "asset", nature: "debit", level: 2, parent: "1000" },
   "2000": { name: "Liabilities", nameAr: "الخصوم", type: "liability", nature: "credit", level: 1, parent: null },
   "2100": { name: "Accounts Payable", nameAr: "ذمم الموردين", type: "liability", nature: "credit", level: 2, parent: "2000" },
@@ -33,9 +39,21 @@ const CHART = {
   "3000": { name: "Equity", nameAr: "حقوق الملكية", type: "equity", nature: "credit", level: 1, parent: null },
   "4000": { name: "Revenue", nameAr: "الإيرادات", type: "revenue", nature: "credit", level: 1, parent: null },
   "4100": { name: "Jewelry Sales", nameAr: "مبيعات المجوهرات", type: "revenue", nature: "credit", level: 2, parent: "4000" },
+  // Per-karat sales-revenue sub-accounts (P5.1 — used only when accountingByKarat is on).
+  "4110": { name: "Sales Revenue Gold 18K", nameAr: "إيراد مبيعات ذهب 18", type: "revenue", nature: "credit", level: 3, parent: "4100" },
+  "4111": { name: "Sales Revenue Gold 21K", nameAr: "إيراد مبيعات ذهب 21", type: "revenue", nature: "credit", level: 3, parent: "4100" },
+  "4112": { name: "Sales Revenue Gold 22K", nameAr: "إيراد مبيعات ذهب 22", type: "revenue", nature: "credit", level: 3, parent: "4100" },
+  "4113": { name: "Sales Revenue Gold 24K", nameAr: "إيراد مبيعات ذهب 24", type: "revenue", nature: "credit", level: 3, parent: "4100" },
+  "4119": { name: "Sales Revenue Other / Non-Gold", nameAr: "إيراد مبيعات أخرى / غير ذهب", type: "revenue", nature: "credit", level: 3, parent: "4100" },
   "4200": { name: "Gold Profit", nameAr: "أرباح الذهب", type: "revenue", nature: "credit", level: 2, parent: "4000" },
   "4900": { name: "Other Income", nameAr: "إيرادات أخرى", type: "revenue", nature: "credit", level: 2, parent: "4000" },
   "5000": { name: "Cost of Goods Sold", nameAr: "تكلفة البضاعة المباعة", type: "expense", nature: "debit", level: 1, parent: null },
+  // Per-karat COGS sub-accounts (P5.1 — used only when accountingByKarat is on).
+  "5010": { name: "COGS Gold 18K", nameAr: "تكلفة مبيعات ذهب 18", type: "expense", nature: "debit", level: 2, parent: "5000" },
+  "5011": { name: "COGS Gold 21K", nameAr: "تكلفة مبيعات ذهب 21", type: "expense", nature: "debit", level: 2, parent: "5000" },
+  "5012": { name: "COGS Gold 22K", nameAr: "تكلفة مبيعات ذهب 22", type: "expense", nature: "debit", level: 2, parent: "5000" },
+  "5013": { name: "COGS Gold 24K", nameAr: "تكلفة مبيعات ذهب 24", type: "expense", nature: "debit", level: 2, parent: "5000" },
+  "5019": { name: "COGS Other / Non-Gold", nameAr: "تكلفة مبيعات أخرى / غير ذهب", type: "expense", nature: "debit", level: 2, parent: "5000" },
   "6000": { name: "Operating Expenses", nameAr: "المصروفات التشغيلية", type: "expense", nature: "debit", level: 1, parent: null },
   "6100": { name: "Salaries & Wages", nameAr: "الرواتب والأجور", type: "expense", nature: "debit", level: 2, parent: "6000" },
 };
@@ -43,9 +61,143 @@ const CHART = {
 // Map a treasury account keyword to its GL account code.
 const TREASURY_ACCOUNT = { cash: "1110", bank: "1120" };
 
+// Per-karat GL account codes (P5.1 foundation). NOT used by any posting until
+// P5.2/P5.3 enable split posting behind the accountingByKarat flag. Unknown /
+// null / non-gold karats fall back to the "Other" (*9) sub-accounts.
+const KARAT_ACCOUNTS = {
+  18: { inventory: "1210", cogs: "5010", revenue: "4110" },
+  21: { inventory: "1211", cogs: "5011", revenue: "4111" },
+  22: { inventory: "1212", cogs: "5012", revenue: "4112" },
+  24: { inventory: "1213", cogs: "5013", revenue: "4113" },
+};
+const KARAT_OTHER = { inventory: "1219", cogs: "5019", revenue: "4119" };
+
+/**
+ * Resolve the inventory / COGS / revenue GL codes for a karat.
+ * @param {number|string|null} karat
+ * @returns {{inventory:string, cogs:string, revenue:string}}
+ */
+function karatAccounts(karat) {
+  const k = parseInt(karat, 10);
+  return KARAT_ACCOUNTS[k] || KARAT_OTHER;
+}
+
 const round = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
+// Group sale/return line items by karat bucket (18/21/22/24 or "other"),
+// summing cost (cost*qty) and revenue basis (price*qty) per bucket. Insertion
+// order is preserved so the LAST bucket can absorb any rounding remainder.
+function groupItemsByKarat(items = []) {
+  const map = new Map();
+  for (const it of items) {
+    const k = parseInt(it.karat, 10);
+    const key = [18, 21, 22, 24].includes(k) ? k : "other";
+    const g = map.get(key) || { key, cost: 0, basis: 0 };
+    g.cost += (Number(it.cost) || 0) * (Number(it.quantity) || 1);
+    g.basis += (Number(it.price) || 0) * (Number(it.quantity) || 1);
+    map.set(key, g);
+  }
+  return [...map.values()];
+}
+
+/**
+ * Build the per-karat revenue + COGS + inventory journal lines for a sale or a
+ * return. The revenue lines sum EXACTLY to `revenueTotal` (= net-of-VAT
+ * subtotal) and the COGS/Inventory lines sum EXACTLY to `totalCost`; any
+ * rounding remainder is pushed onto the last karat bucket. VAT and the
+ * cash/bank/AR lines are NOT produced here (the caller keeps those unchanged).
+ *
+ * @param {object} p
+ * @param {Array}  p.items
+ * @param {number} p.revenueTotal  net subtotal to split across karats
+ * @param {number} p.totalCost     COGS total to split across karats
+ * @param {boolean} p.reverse      false=sale (Cr revenue, Dr COGS, Cr inv),
+ *                                 true=return (Dr revenue, Cr COGS, Dr inv)
+ */
+function karatSplitLines({ items = [], revenueTotal = 0, totalCost = 0, reverse = false }) {
+  const groups = groupItemsByKarat(items);
+  const lines = [];
+  if (groups.length === 0) return lines;
+
+  // Revenue allocation by price basis (exact: last bucket absorbs remainder).
+  const totalBasis = round(groups.reduce((s, g) => s + g.basis, 0));
+  let revAllocated = 0;
+  groups.forEach((g, i) => {
+    const codes = karatAccounts(g.key === "other" ? null : g.key);
+    const isLast = i === groups.length - 1;
+    const rev = isLast
+      ? round(revenueTotal - revAllocated)
+      : (totalBasis > 0 ? round(revenueTotal * (g.basis / totalBasis)) : 0);
+    if (!isLast) revAllocated = round(revAllocated + rev);
+    if (rev !== 0) {
+      lines.push({ accountCode: codes.revenue, debit: reverse ? rev : 0, credit: reverse ? 0 : rev, description: `إيراد مبيعات ${g.key}` });
+    }
+  });
+
+  // COGS + Inventory allocation by cost (exact: last bucket absorbs remainder).
+  if (round(totalCost) !== 0) {
+    let costAllocated = 0;
+    groups.forEach((g, i) => {
+      const codes = karatAccounts(g.key === "other" ? null : g.key);
+      const isLast = i === groups.length - 1;
+      const c = isLast ? round(totalCost - costAllocated) : round(g.cost);
+      if (!isLast) costAllocated = round(costAllocated + c);
+      if (c !== 0) {
+        // sale: Dr COGS / Cr Inventory ; return: Cr COGS / Dr Inventory
+        lines.push({ accountCode: codes.cogs, debit: reverse ? 0 : c, credit: reverse ? c : 0, description: `تكلفة مبيعات ${g.key}` });
+        lines.push({ accountCode: codes.inventory, debit: reverse ? c : 0, credit: reverse ? 0 : c, description: `مخزون ${g.key}` });
+      }
+    });
+  }
+  return lines;
+}
+
+/**
+ * Per-karat inventory DEBIT lines for a purchase receipt. Each item's line
+ * amount is its total cost (totalCost, else unitCost/cost × quantity). The
+ * lines sum EXACTLY to `total` (PO total) — the last karat bucket absorbs any
+ * rounding remainder. Non-gold / unknown karats → the "Other" inventory (1219).
+ */
+function karatPurchaseInventoryLines(items = [], total = 0) {
+  const map = new Map();
+  for (const it of items) {
+    const k = parseInt(it.karat, 10);
+    const key = [18, 21, 22, 24].includes(k) ? k : "other";
+    const amt = Number(it.totalCost) || (Number(it.unitCost != null ? it.unitCost : it.cost) || 0) * (Number(it.quantity) || 1);
+    const g = map.get(key) || { key, amount: 0 };
+    g.amount += amt;
+    map.set(key, g);
+  }
+  const groups = [...map.values()];
+  const lines = [];
+  let allocated = 0;
+  groups.forEach((g, i) => {
+    const code = karatAccounts(g.key === "other" ? null : g.key).inventory;
+    const isLast = i === groups.length - 1;
+    const amt = isLast ? round(total - allocated) : round(g.amount);
+    if (!isLast) allocated = round(allocated + amt);
+    if (amt !== 0) lines.push({ accountCode: code, debit: amt, credit: 0, description: `استلام مخزون ${g.key}` });
+  });
+  return lines;
+}
+
 class PostingService {
+  /**
+   * Whether to split sale/return postings by karat. Honours an explicit
+   * opts.accountingByKarat override (passed by a route), else reads the company
+   * setting. Defaults to false (and on any error) so posting never breaks.
+   */
+  async resolveAccountingByKarat(companyId, opts = {}) {
+    if (opts.accountingByKarat !== undefined) return Boolean(opts.accountingByKarat);
+    try {
+      const settingsService = require("./settings.service");
+      const s = await settingsService.getCompanySettings(companyId, { transaction: opts.transaction });
+      return Boolean(s.accountingByKarat);
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Resolve an account by code for a company, creating it from the
    * canonical chart if it does not yet exist.
@@ -209,13 +361,22 @@ class PostingService {
       lines.push({ accountCode: debitCode, debit: total, credit: 0, description: `فاتورة ${invoice.id}` });
     }
 
-    lines.push({ accountCode: "4100", debit: 0, credit: subtotal, description: "إيراد مبيعات" });
-    if (tax > 0) {
-      lines.push({ accountCode: "2200", debit: 0, credit: tax, description: "ضريبة القيمة المضافة" });
-    }
-    if (cost > 0) {
-      lines.push({ accountCode: "5000", debit: cost, credit: 0, description: "تكلفة البضاعة المباعة" });
-      lines.push({ accountCode: "1200", debit: 0, credit: cost, description: "تخفيض المخزون" });
+    const byKarat = await this.resolveAccountingByKarat(companyId, opts);
+    if (byKarat) {
+      // Revenue / COGS / Inventory split across karats (VAT + debit side stay as-is).
+      lines.push(...karatSplitLines({ items, revenueTotal: subtotal, totalCost: cost, reverse: false }));
+      if (tax > 0) {
+        lines.push({ accountCode: "2200", debit: 0, credit: tax, description: "ضريبة القيمة المضافة" });
+      }
+    } else {
+      lines.push({ accountCode: "4100", debit: 0, credit: subtotal, description: "إيراد مبيعات" });
+      if (tax > 0) {
+        lines.push({ accountCode: "2200", debit: 0, credit: tax, description: "ضريبة القيمة المضافة" });
+      }
+      if (cost > 0) {
+        lines.push({ accountCode: "5000", debit: cost, credit: 0, description: "تكلفة البضاعة المباعة" });
+        lines.push({ accountCode: "1200", debit: 0, credit: cost, description: "تخفيض المخزون" });
+      }
     }
 
     return this.postEntry(
@@ -243,14 +404,21 @@ class PostingService {
     const subtotal = round(invoice.subtotal != null ? invoice.subtotal : total - tax);
     const cost = round(items.reduce((s, it) => s + (Number(it.cost) || 0) * (Number(it.quantity) || 1), 0));
 
-    const lines = [
-      { accountCode: "4100", debit: subtotal, credit: 0, description: "عكس إيراد مبيعات" },
-    ];
-    if (tax > 0) lines.push({ accountCode: "2200", debit: tax, credit: 0, description: "عكس ضريبة" });
-    lines.push({ accountCode: "1110", debit: 0, credit: total, description: `مرتجع فاتورة ${invoice.id}` });
-    if (cost > 0) {
-      lines.push({ accountCode: "1200", debit: cost, credit: 0, description: "إرجاع للمخزون" });
-      lines.push({ accountCode: "5000", debit: 0, credit: cost, description: "عكس التكلفة" });
+    const byKarat = await this.resolveAccountingByKarat(companyId, opts);
+    const lines = [];
+    if (byKarat) {
+      // Reverse the sale split: Dr revenue / Cr COGS / Dr inventory, per karat.
+      lines.push(...karatSplitLines({ items, revenueTotal: subtotal, totalCost: cost, reverse: true }));
+      if (tax > 0) lines.push({ accountCode: "2200", debit: tax, credit: 0, description: "عكس ضريبة" });
+      lines.push({ accountCode: "1110", debit: 0, credit: total, description: `مرتجع فاتورة ${invoice.id}` });
+    } else {
+      lines.push({ accountCode: "4100", debit: subtotal, credit: 0, description: "عكس إيراد مبيعات" });
+      if (tax > 0) lines.push({ accountCode: "2200", debit: tax, credit: 0, description: "عكس ضريبة" });
+      lines.push({ accountCode: "1110", debit: 0, credit: total, description: `مرتجع فاتورة ${invoice.id}` });
+      if (cost > 0) {
+        lines.push({ accountCode: "1200", debit: cost, credit: 0, description: "إرجاع للمخزون" });
+        lines.push({ accountCode: "5000", debit: 0, credit: cost, description: "عكس التكلفة" });
+      }
     }
 
     return this.postEntry(
@@ -360,10 +528,20 @@ class PostingService {
     const payable = round(total - paid);
     const method = String(paymentMethod || "").toLowerCase();
     const cashCode = method.includes("card") || method.includes("bank") || method.includes("transfer") || method.includes("تحويل") ? "1120" : "1110";
-    const lines = [
-      { accountCode: "1200", debit: total, credit: 0, description: `استلام مخزون من المورد ${purchaseOrder.supplierName}` },
-    ];
 
+    // Inventory DEBIT side: split by karat when the flag is on AND items are
+    // supplied (via opts.items = the receive route's normalizedItems). When off,
+    // or items missing, fall back to the single 1200 account (unchanged).
+    const byKarat = await this.resolveAccountingByKarat(companyId, opts);
+    const items = Array.isArray(opts.items) ? opts.items : null;
+    const lines = [];
+    if (byKarat && items && items.length) {
+      lines.push(...karatPurchaseInventoryLines(items, total));
+    } else {
+      lines.push({ accountCode: "1200", debit: total, credit: 0, description: `استلام مخزون من المورد ${purchaseOrder.supplierName}` });
+    }
+
+    // Credit side (cash / bank / AP) is UNCHANGED.
     if (paid > 0) {
       lines.push({ accountCode: cashCode, debit: 0, credit: paid, description: `دفع للمورد ${purchaseOrder.supplierName}` });
     }
@@ -522,3 +700,4 @@ class PostingService {
 
 module.exports = new PostingService();
 module.exports.CHART = CHART;
+module.exports.karatAccounts = karatAccounts;

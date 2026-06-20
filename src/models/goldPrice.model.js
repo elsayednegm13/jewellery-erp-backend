@@ -25,6 +25,18 @@ const GoldPrice = sequelize.define("GoldPrice", {
     type: DataTypes.STRING,
     field: "updated_by",
     defaultValue: "System"
+  },
+  // Tenant scope (P2.3). NULL = legacy/global fallback row.
+  companyId: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    field: "company_id"
+  },
+  // manual | live | import (only "manual" is written today).
+  source: {
+    type: DataTypes.STRING,
+    allowNull: false,
+    defaultValue: "manual"
   }
 }, {
   tableName: "gold_prices",

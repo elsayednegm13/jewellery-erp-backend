@@ -12,7 +12,11 @@ const Invoice = sequelize.define("Invoice", {
     field: "company_id"
   },
   type: {
-    type: DataTypes.ENUM("sale", "return", "exchange", "deposit", "repair"),
+    // "installment" added (TD-003) to match /pos/checkout which sets it when
+    // paymentMethod === "installment". NOTE: the DB enum also carries a legacy
+    // "giftVoucher" value (from an earlier migration) that NO route writes, so
+    // it is intentionally NOT listed here.
+    type: DataTypes.ENUM("sale", "return", "exchange", "deposit", "repair", "installment"),
     defaultValue: "sale"
   },
   customerId: {
@@ -143,6 +147,12 @@ const Invoice = sequelize.define("Invoice", {
   idempotencyKey: {
     type: DataTypes.STRING,
     field: "idempotency_key"
+  },
+  // Customer-facing sequential number (e.g. INV-2026-000010), SEPARATE from the
+  // primary key `id`. NULL for drafts; assigned when the invoice becomes posted.
+  invoiceNumber: {
+    type: DataTypes.STRING,
+    field: "invoice_number"
   },
   postedAt: {
     type: DataTypes.STRING,

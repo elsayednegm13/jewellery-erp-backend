@@ -11,10 +11,17 @@ const PurchaseOrderItem = sequelize.define("PurchaseOrderItem", {
     allowNull: false,
     field: "purchase_order_id"
   },
+  // Serialized items link to assets.id; quantity-based items link to products.id
+  // via productId. A line uses exactly one (the other is null).
   assetId: {
     type: DataTypes.STRING,
     allowNull: true,
     field: "asset_id"
+  },
+  productId: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    field: "product_id"
   },
   description: {
     type: DataTypes.STRING,

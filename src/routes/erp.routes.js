@@ -19,6 +19,40 @@ const { moveUploadedFileSafe } = require("../utils/file-move");
 const router = express.Router();
 const allowAuthenticated = (req, res, next) => next();
 
+// Restrict an invoice where-clause to POSTED invoices only — the single source
+// of truth for every financial aggregate (sales totals, customer purchases,
+// branch/customer KPIs). Drafts and cancelled drafts must never be counted.
+const postedInvoiceWhere = (where = {}) => ({ ...where, postingStatus: "posted" });
+
+// Compute the next sequential customer-facing invoice number for a company.
+// Draws from the MAX of BOTH `id` and `invoice_number` matching the padded
+// `${prefix}-NNNNNN` pattern, so POS checkout (id == invoiceNumber) and posted
+// drafts (id = DRAFT-*, invoiceNumber = INV-*) share ONE sequence and never
+// collide. Run inside the posting transaction.
+async function nextInvoiceNumber(companyId, prefix, t) {
+  const rows = await models.Invoice.findAll({
+    where: {
+      companyId,
+      [Op.or]: [
+        { id: { [Op.like]: `${prefix}-%` } },
+        { invoiceNumber: { [Op.like]: `${prefix}-%` } },
+      ],
+    },
+    attributes: ["id", "invoiceNumber"],
+    paranoid: false,
+    transaction: t,
+  });
+  let max = 0;
+  const consider = (val) => {
+    if (typeof val === "string" && val.startsWith(`${prefix}-`)) {
+      const n = parseInt(val.slice(prefix.length + 1), 10);
+      if (Number.isInteger(n) && n > max) max = n;
+    }
+  };
+  for (const r of rows) { consider(r.id); consider(r.invoiceNumber); }
+  return `${prefix}-${String(max + 1).padStart(6, "0")}`;
+}
+
 function getPurityFromKarat(karat) {
   const numericKarat = Number(karat);
   if (numericKarat === 24) return 1;
@@ -283,21 +317,11 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
     });
     const { paidAmount, remainingAmount, status, installmentsToCreate } = payment;
 
-    // 8. Generate safe sequence invoice ID
+    // 8. Generate safe sequence invoice ID. Shared generator considers posted-
+    // draft invoice_numbers too so POS and post-draft never reuse a number.
+    // (Same INV-prefix-NNNNNN result as before; just collision-safe.)
     const prefix = settings.invoicePrefix || "INV-2026";
-    const lastInvoice = await models.Invoice.findOne({
-      where: { companyId: req.companyId, id: { [Op.like]: `${prefix}-%` } },
-      order: [["createdAt", "DESC"]],
-      lock: true,
-      transaction: t
-    });
-    let nextNumber = 1;
-    if (lastInvoice) {
-      const parts = lastInvoice.id.split("-");
-      const lastNum = parseInt(parts[parts.length - 1], 10);
-      if (!isNaN(lastNum)) nextNumber = lastNum + 1;
-    }
-    const invoiceId = `${prefix}-${String(nextNumber).padStart(6, "0")}`;
+    const invoiceId = await nextInvoiceNumber(req.companyId, prefix, t);
 
     // 8. Create Invoice
     const nowStr = new Date().toISOString().slice(0, 16).replace("T", " ");
@@ -332,6 +356,7 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
       notes: body.notes || "",
       idempotencyKey: idempotencyKey || null,
       postingStatus: "posted", // immediate-post path (POS checkout)
+      invoiceNumber: invoiceId, // customer-facing number == id for POS sales
       postedAt: nowStr
     }, { transaction: t });
 
@@ -714,6 +739,7 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
       notes: reason || "مرتجع مبيعات",
       idempotencyKey: req.headers["idempotency-key"] || body.idempotencyKey || null,
       postingStatus: "posted", // immediate-post path (sales return)
+      invoiceNumber: returnInvoiceId,
       postedAt: nowStr
     }, { transaction: t });
 
@@ -758,7 +784,7 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
     // 8. Update original invoice status (fully returned or partial)
     const originalItemIds = originalInvoice.items.map(i => i.assetId);
     const otherReturns = await models.Invoice.findAll({
-      where: { relatedInvoiceId: originalInvoice.id, type: "return", companyId: req.companyId },
+      where: postedInvoiceWhere({ relatedInvoiceId: originalInvoice.id, type: "return", companyId: req.companyId }),
       include: [{ model: models.InvoiceItem, as: "items" }],
       transaction: t
     });
@@ -1009,6 +1035,7 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
       notes: notes || "استبدال أصول بموجب الفاتورة",
       idempotencyKey: req.headers["idempotency-key"] || body.idempotencyKey || null,
       postingStatus: "posted", // immediate-post path (exchange)
+      invoiceNumber: exchangeInvoiceId,
       postedAt: nowStr
     }, { transaction: t });
 
@@ -1345,6 +1372,7 @@ router.post("/customers/:id/gold/deposit", authMiddleware, async (req, res, next
         paymentMethod: payMethod.toUpperCase(),
         notes: `صرف قيمة ذهب مستعمل - ${description}`,
         postingStatus: "posted", // immediate-post path (customer gold settlement)
+        invoiceNumber: payoutId,
         postedAt: nowStr
       }, { transaction: t });
 
@@ -2950,7 +2978,7 @@ router.delete("/customers/:id", authMiddleware, requirePermission("customers.del
     const customer = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t });
     if (!customer) throw new NotFoundError("Customer record not found.");
     const linked = await countLinkedRecords([
-      ["invoices", () => models.Invoice.count({ where: { customerId: customer.id, companyId: req.companyId }, transaction: t })],
+      ["invoices", () => models.Invoice.count({ where: postedInvoiceWhere({ customerId: customer.id, companyId: req.companyId }), transaction: t })],
       ["reservations", () => models.Reservation.count({ where: { customerId: customer.id, companyId: req.companyId }, transaction: t })],
       ["installments", () => models.Installment.count({ where: { customerId: customer.id, companyId: req.companyId }, transaction: t })],
       ["customerGoldPools", () => models.CustomerGoldPool.count({ where: { customerId: customer.id, companyId: req.companyId }, transaction: t })],
@@ -3159,7 +3187,7 @@ router.delete("/branches/:id", authMiddleware, requirePermission("branches.delet
 
     const linked = await countLinkedRecords([
       ["assets", () => models.Asset.count({ where: { branchId: branch.id, companyId: req.companyId }, transaction: t })],
-      ["invoices", () => models.Invoice.count({ where: { branchId: branch.id, companyId: req.companyId }, transaction: t })],
+      ["invoices", () => models.Invoice.count({ where: postedInvoiceWhere({ branchId: branch.id, companyId: req.companyId }), transaction: t })],
       ["transfers", () => models.Transfer.count({ where: { companyId: req.companyId, [Op.or]: [{ fromBranchId: branch.id }, { toBranchId: branch.id }] }, transaction: t })],
       ["payments", () => models.Payment.count({ where: { branchId: branch.id, companyId: req.companyId }, transaction: t })],
       ["treasuryTransactions", () => models.CashTransaction.count({ where: { branchId: branch.id, companyId: req.companyId }, transaction: t })],
@@ -3210,7 +3238,10 @@ setupCrud("manufacturing-orders", models.ManufacturingOrder, ["status", "type", 
 setupCrud("customer-gold-pools", models.CustomerGoldPool, ["customerName", "status"]);
 setupCrud("inventory-gold-pools", models.InventoryGoldPool, ["source", "status"]);
 setupCrud("purchase-orders", models.PurchaseOrder, ["supplierName", "status", "branch"]);
-setupCrud("invoices", models.Invoice, ["customerName", "status", "paymentMethod"]);
+// Search fields must be text columns — `status` is an ENUM and ILIKE cannot be
+// applied to it (Postgres: "operator does not exist: enum_invoices_status ~~*"),
+// which silently broke invoice search. Search by id / invoiceNumber / customer.
+setupCrud("invoices", models.Invoice, ["customerName", "paymentMethod", "invoiceNumber", "id"]);
 setupCrud("reservations", models.Reservation, ["customerName", "assetName", "status"]);
 setupCrud("approval-requests", models.ApprovalRequest, ["description", "status", "requestedBy"]);
 setupCrud("journal-entries", models.JournalEntry, ["description", "status"]);
@@ -3506,11 +3537,13 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
           createdBy: actor
         }, { transaction: t });
 
-        // Create PurchaseOrderItem
+        // Create PurchaseOrderItem — link to the PRODUCT (not assets). Putting a
+        // product id into asset_id violated purchase_order_items_asset_id_fkey.
         const poItem = await models.PurchaseOrderItem.create({
           id: `POI-${Date.now()}-${itemIndex + 1}-1`,
           purchaseOrderId,
-          assetId: product.id, // Store product.id in assetId column!
+          assetId: null,
+          productId: product.id,
           description: item.name,
           quantity: item.quantity,
           unit: item.unit || "قطعة",
@@ -3566,7 +3599,8 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
           const poItem = await models.PurchaseOrderItem.create({
             id: `POI-${Date.now()}-${itemIndex + 1}-${qtyIndex + 1}`,
             purchaseOrderId,
-            assetId,
+            assetId, // a real assets.id created just above
+            productId: null,
             description: item.name,
             quantity: 1,
             unit: item.unit || "قطعة",
@@ -3589,7 +3623,9 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       paidAmount,
       paymentMethod,
       actor,
-      { transaction: t, branchId: branch.id }
+      // Pass the normalized items (karat + totalCost) so the inventory debit can
+      // split by karat when accountingByKarat is on (no-op when off).
+      { transaction: t, branchId: branch.id, items: normalizedItems }
     );
 
     let treasuryTransaction = null;
@@ -3794,7 +3830,7 @@ router.patch("/settings", authMiddleware, requirePermission("settings.update"), 
       await models.Company.update(companyUpdates, { where: { id: req.companyId } });
     }
 
-    const settingKeys = ["language", "theme", "vatRate", "goldKaratDefaults", "goldPricingMode", "invoicePrefix", "invoiceNumbering", "dateFormat", "decimalPrecision", "print", "notifications", "lowStockThreshold", "receipt", "allowZeroDownPayment", "paymentMethods", "installmentEnabled", "installmentDefaultFrequency", "installmentMaxCount", "installmentMinDownPaymentPercent", "barcode"];
+    const settingKeys = ["language", "theme", "vatRate", "goldKaratDefaults", "goldPricingMode", "accountingByKarat", "invoicePrefix", "invoiceNumbering", "dateFormat", "decimalPrecision", "print", "notifications", "lowStockThreshold", "receipt", "allowZeroDownPayment", "paymentMethods", "installmentEnabled", "installmentDefaultFrequency", "installmentMaxCount", "installmentMinDownPaymentPercent", "barcode"];
     for (const key of settingKeys) {
       if (body[key] === undefined) continue;
       const [row, created] = await models.Setting.findOrCreate({
@@ -4047,7 +4083,7 @@ router.get("/customers/:id/invoices", authMiddleware, async (req, res, next) => 
     }
 
     const invoices = await models.Invoice.findAll({
-      where: { customerId, companyId: req.companyId },
+      where: postedInvoiceWhere({ customerId, companyId: req.companyId }),
       include: [
         { model: models.InvoiceItem, as: "items" },
         { model: models.Payment, as: "payments" },
@@ -4076,7 +4112,7 @@ router.get("/customers/:id/statement", authMiddleware, async (req, res, next) =>
     }
 
     const invoices = await models.Invoice.findAll({
-      where: { customerId, companyId: req.companyId },
+      where: postedInvoiceWhere({ customerId, companyId: req.companyId }),
       order: [["date", "DESC"]]
     });
 
@@ -4098,6 +4134,120 @@ router.get("/customers/:id/statement", authMiddleware, async (req, res, next) =>
         vatDue: invoices.reduce((acc, curr) => acc + parseFloat(curr.tax || 0), 0)
       }
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INVENTORY VALUATION REPORT (تقييم المخزون) — READ-ONLY, grouped by karat.
+// Cost value (book), market value (current gold price × weight) and the
+// unrealized gain/loss — informational only, posts NO journal entry and changes
+// NO balances/stock. Current valuation (not a historical snapshot).
+// On-hand = assets in non-sold/melted/archived statuses + products by
+// quantityOnHand. Gold weight basis = goldWeight ?? netWeight ?? grossWeight.
+// ─────────────────────────────────────────────────────────────────────────────
+const VALUATION_ASSET_STATUSES = ["available", "reserved", "pending_transfer", "in_workshop", "repair", "pending_tag", "returned"];
+
+router.get("/reports/inventory-valuation", authMiddleware, requirePermission("reports.view"), async (req, res, next) => {
+  try {
+    const companyId = req.companyId;
+    const settings = await settingsService.getCompanySettings(companyId);
+    const currency = settings.currency || "AED";
+    const branchId = req.query.branchId && req.query.branchId !== "all" ? req.query.branchId : null;
+    const karatFilter = req.query.karat && req.query.karat !== "all" ? String(req.query.karat) : null;
+
+    // Current per-gram price per gold karat (manual fixing wins over live).
+    const prices = {};
+    for (const k of [18, 21, 22, 24]) {
+      try { prices[k] = await effectiveKaratPrice(companyId, currency, k); } catch { prices[k] = null; }
+    }
+
+    const buckets = new Map(); // key 18/21/22/24/'other'
+    const bucketOf = (karat) => {
+      const k = parseInt(karat, 10);
+      return [18, 21, 22, 24].includes(k) ? String(k) : "other";
+    };
+    const ensure = (key) => {
+      if (!buckets.has(key)) buckets.set(key, { karat: key, itemCount: 0, quantity: 0, totalWeight: 0, costValue: 0, marketValue: 0, unrealizedGainLoss: 0, missingCostCount: 0, missingWeightCount: 0, missingPriceCount: 0 });
+      return buckets.get(key);
+    };
+    const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+
+    // ── Serialized assets ──
+    const assetWhere = { companyId, status: { [Op.in]: VALUATION_ASSET_STATUSES } };
+    if (branchId) assetWhere.branchId = branchId;
+    const assets = await models.Asset.findAll({ where: assetWhere });
+    for (const a of assets) {
+      const key = bucketOf(a.karat);
+      if (karatFilter && key !== karatFilter) continue;
+      const g = ensure(key);
+      const weight = num(a.goldWeight) || num(a.netWeight) || num(a.grossWeight);
+      const cost = num(a.cost);
+      const perGram = key === "other" ? null : prices[Number(key)];
+      g.itemCount += 1;
+      g.quantity += 1;
+      g.totalWeight = Math.round((g.totalWeight + weight) * 10000) / 10000;
+      g.costValue = Math.round((g.costValue + cost) * 100) / 100;
+      if (cost <= 0) g.missingCostCount += 1;
+      if (weight <= 0) g.missingWeightCount += 1;
+      if (!perGram) g.missingPriceCount += weight > 0 ? 1 : 0;
+      else g.marketValue = Math.round((g.marketValue + weight * perGram) * 100) / 100;
+    }
+
+    // ── Quantity-based products (on-hand) ──
+    const prodWhere = { companyId, isActive: true, quantityOnHand: { [Op.gt]: 0 } };
+    if (branchId) prodWhere.branchId = branchId;
+    const products = await models.Product.findAll({ where: prodWhere });
+    for (const p of products) {
+      const key = bucketOf(p.karat);
+      if (karatFilter && key !== karatFilter) continue;
+      const g = ensure(key);
+      const qty = num(p.quantityOnHand);
+      const unitCost = num(p.averageCost) || num(p.unitCost); // averageCost is the maintained inventory cost
+      const cost = Math.round(unitCost * qty * 100) / 100;
+      const weight = num(p.totalWeight); // maintained on-hand total weight
+      const perGram = key === "other" ? null : prices[Number(key)];
+      g.itemCount += 1;
+      g.quantity += qty;
+      g.totalWeight = Math.round((g.totalWeight + weight) * 10000) / 10000;
+      g.costValue = Math.round((g.costValue + cost) * 100) / 100;
+      if (unitCost <= 0) g.missingCostCount += 1;
+      if (weight <= 0) g.missingWeightCount += 1;
+      if (!perGram) g.missingPriceCount += weight > 0 ? 1 : 0;
+      else g.marketValue = Math.round((g.marketValue + weight * perGram) * 100) / 100;
+    }
+
+    const groups = [...buckets.values()].map((g) => ({
+      ...g,
+      unrealizedGainLoss: Math.round((g.marketValue - g.costValue) * 100) / 100,
+      pricePerGram: g.karat === "other" ? null : (prices[Number(g.karat)] ?? null),
+    }));
+    // Stable order: 18,21,22,24,other.
+    const order = { "18": 1, "21": 2, "22": 3, "24": 4, other: 9 };
+    groups.sort((a, b) => (order[a.karat] || 99) - (order[b.karat] || 99));
+
+    const totals = groups.reduce((acc, g) => ({
+      itemCount: acc.itemCount + g.itemCount,
+      quantity: Math.round((acc.quantity + g.quantity) * 10000) / 10000,
+      totalWeight: Math.round((acc.totalWeight + g.totalWeight) * 10000) / 10000,
+      costValue: Math.round((acc.costValue + g.costValue) * 100) / 100,
+      marketValue: Math.round((acc.marketValue + g.marketValue) * 100) / 100,
+      unrealizedGainLoss: Math.round((acc.unrealizedGainLoss + g.unrealizedGainLoss) * 100) / 100,
+      missingCostCount: acc.missingCostCount + g.missingCostCount,
+      missingWeightCount: acc.missingWeightCount + g.missingWeightCount,
+      missingPriceCount: acc.missingPriceCount + g.missingPriceCount,
+    }), { itemCount: 0, quantity: 0, totalWeight: 0, costValue: 0, marketValue: 0, unrealizedGainLoss: 0, missingCostCount: 0, missingWeightCount: 0, missingPriceCount: 0 });
+
+    const payload = {
+      currency,
+      generatedAt: new Date().toISOString(),
+      valuationType: "current", // not a historical snapshot
+      informational: true, // market value posts NO journal entry
+      groups,
+      totals,
+    };
+    return res.status(200).json({ success: true, ...payload, data: payload });
   } catch (error) {
     next(error);
   }
@@ -4477,6 +4627,7 @@ router.post("/sales/invoices/draft", authMiddleware, requirePermission("sales.cr
       notes: body.notes || "",
       idempotencyKey: idempotencyKey || null,
       postingStatus: "posted", // legacy misnamed immediate-post route (used by reservations)
+      invoiceNumber: id,
       postedAt: now
     });
 
@@ -4578,6 +4729,521 @@ router.post("/sales/invoices/draft", authMiddleware, requirePermission("sales.cr
     });
     return res.status(201).json({ success: true, ...out, data: out });
   } catch (error) {
+    next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INVOICE DRAFT LIFECYCLE (P4.2) — create / edit / cancel a DRAFT only.
+// A draft has ZERO side effects: no inventory, no journal, no payment/cash, no
+// customer balance, no loyalty, no postedAt. Posting a draft is P4.3 (separate).
+// These are the official lifecycle endpoints; generic CRUD remains blocked from
+// touching lifecycle fields (P4.1a).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Lifecycle fields a draft edit must never accept directly (mirrors P4.1a).
+const DRAFT_PROTECTED_FIELDS = [
+  "postingStatus", "posting_status",
+  "postedAt", "posted_at",
+  "cancelledAt", "cancelled_at",
+  "cancelReason", "cancel_reason"
+];
+
+// Validate + normalize the items array for a draft. Each item must reference an
+// existing asset of this company (we do NOT change the asset — drafts are
+// side-effect free). Returns the rows to persist.
+async function buildDraftItems(items, companyId, transaction) {
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new ValidationError("لا يمكن إنشاء مسودة بدون أصناف");
+  }
+  const rows = [];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const assetId = it.assetId || it.id;
+    if (!assetId) throw new ValidationError(`الصنف رقم ${i + 1} بدون معرف أصل`);
+    const asset = await models.Asset.findOne({ where: { id: assetId, companyId }, transaction });
+    if (!asset) throw new ValidationError(`الأصل ${assetId} غير موجود`);
+    rows.push({
+      assetId,
+      name: it.name || asset.name || "",
+      quantity: it.quantity || 1,
+      price: Number(it.price) || 0,
+      cost: Number(it.cost) || 0,
+      weight: Number(it.weight || it.grossWeight) || 0,
+      karat: it.karat ?? null,
+      discount: Number(it.discount) || 0,
+      makingCharge: Number(it.makingCharge) || 0,
+      stoneValue: Number(it.stoneValue) || 0
+    });
+  }
+  return rows;
+}
+
+// Resolve + validate the branch for a draft; returns the Branch record.
+async function resolveDraftBranch(body, req, transaction) {
+  const branchId = body.branchId || req.headers["x-branch-id"] || req.branchId;
+  if (!branchId) throw new ValidationError("الفرع النشط مطلوب");
+  const branch = await models.Branch.findOne({ where: { id: branchId, companyId: req.companyId, isActive: true }, transaction });
+  if (!branch) throw new ValidationError("الفرع المحدد غير موجود أو غير نشط");
+  return branch;
+}
+
+// 1) Create a DRAFT invoice (no side effects).
+router.post("/sales/invoices/drafts", authMiddleware, requirePermission("sales.create"), async (req, res, next) => {
+  const t = await models.sequelize.transaction();
+  try {
+    const body = req.body || {};
+    const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
+    const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
+
+    // Idempotency: same key returns the existing draft instead of a new one.
+    if (idempotencyKey) {
+      const existing = await models.Invoice.findOne({
+        where: { idempotencyKey, companyId: req.companyId },
+        include: [{ model: models.InvoiceItem, as: "items" }],
+        transaction: t
+      });
+      if (existing) {
+        await t.rollback();
+        return res.status(200).json({ success: true, ...existing.toJSON(), data: existing.toJSON() });
+      }
+    }
+
+    // Validate customer exists.
+    if (!body.customerId) throw new ValidationError("العميل مطلوب لإنشاء المسودة");
+    const customer = await models.Customer.findOne({ where: { id: body.customerId, companyId: req.companyId }, transaction: t });
+    if (!customer) throw new NotFoundError("العميل غير موجود");
+
+    const branch = await resolveDraftBranch(body, req, t);
+    const itemRows = await buildDraftItems(body.items, req.companyId, t);
+
+    const draftSettings = await settingsService.getCompanySettings(req.companyId);
+    const vatRatePercent = body.vatRate !== undefined ? Number(body.vatRate) : (Number(draftSettings.vatRate) || 0);
+    const computedSubtotal = itemRows.reduce((s, r) => s + (Number(r.price) || 0), 0);
+    const id = `DRAFT-${Date.now()}`;
+    const now = new Date().toISOString().slice(0, 16).replace("T", " ");
+
+    const invoice = await models.Invoice.create({
+      id,
+      companyId: req.companyId,
+      type: body.type || "sale",
+      customerId: customer.id,
+      customerName: customer.name || body.customerName || "عميل",
+      date: body.date || now,
+      subtotal: body.subtotal !== undefined ? Number(body.subtotal) : computedSubtotal,
+      total: body.total !== undefined ? Number(body.total) : computedSubtotal,
+      tax: body.tax !== undefined ? Number(body.tax) : 0,
+      vatRate: vatRatePercent,
+      discount: Number(body.discount) || 0,
+      makingCharge: Number(body.makingCharge) || 0,
+      stoneValue: Number(body.stoneValue) || 0,
+      status: "due", // payment status; a draft owes nothing yet but never "paid"
+      postingStatus: "draft", // ← lifecycle: NO posting side effects
+      paymentMethod: body.paymentMethod || "Cash",
+      branch: branch.name,
+      branchId: branch.id,
+      notes: body.notes || "",
+      idempotencyKey: idempotencyKey || null
+      // NOTE: deliberately NO postedAt — a draft is not posted.
+    }, { transaction: t });
+
+    for (const r of itemRows) {
+      await models.InvoiceItem.create({ invoiceId: id, ...r }, { transaction: t });
+    }
+
+    await auditService.record(req.companyId, {
+      action: "invoice.draft.create",
+      description: `Draft invoice ${id} created for ${customer.name || customer.id}`,
+      user: actor,
+      userId: req.user ? req.user.id : null,
+      place: branch.name,
+      branch: branch.name,
+      sourceDocument: id,
+      severity: "info",
+      before: null,
+      after: JSON.stringify({ id, postingStatus: "draft", total: invoice.total, items: itemRows.length })
+    }, { transaction: t });
+
+    await t.commit();
+    emitEntityChanged(req.companyId, { entity: "Invoice", action: "draft-create", id, related: { customerId: customer.id } });
+    const out = invoice.toJSON();
+    out.items = itemRows;
+    return res.status(201).json({ success: true, ...out, data: out });
+  } catch (error) {
+    await t.rollback();
+    next(error);
+  }
+});
+
+// 2) Edit a DRAFT invoice (draft only; no side effects).
+router.patch("/sales/invoices/:id", authMiddleware, requirePermission("sales.create"), async (req, res, next) => {
+  const t = await models.sequelize.transaction();
+  try {
+    const body = req.body || {};
+    // Never allow lifecycle fields to be set through the edit route.
+    if (DRAFT_PROTECTED_FIELDS.some((f) => Object.prototype.hasOwnProperty.call(body, f))) {
+      await t.rollback();
+      return res.status(403).json({ success: false, message: "Invoice lifecycle fields can only be changed through invoice lifecycle endpoints" });
+    }
+
+    const invoice = await models.Invoice.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t });
+    if (!invoice) { await t.rollback(); return res.status(404).json({ success: false, message: "الفاتورة غير موجودة" }); }
+    if (invoice.postingStatus !== "draft") {
+      await t.rollback();
+      return res.status(409).json({ success: false, message: "يمكن تعديل المسودات فقط (هذه الفاتورة ليست مسودة)" });
+    }
+
+    const before = invoice.toJSON();
+    const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
+
+    // Allowed scalar fields.
+    const updates = {};
+    for (const f of ["customerId", "customerName", "date", "notes", "discount", "makingCharge", "stoneValue", "paymentMethod", "total", "subtotal", "tax", "type"]) {
+      if (body[f] !== undefined) updates[f] = body[f];
+    }
+    if (body.customerId !== undefined) {
+      const customer = await models.Customer.findOne({ where: { id: body.customerId, companyId: req.companyId }, transaction: t });
+      if (!customer) throw new NotFoundError("العميل غير موجود");
+      updates.customerName = body.customerName || customer.name;
+    }
+    if (body.branchId !== undefined || body.branch !== undefined) {
+      const branch = await resolveDraftBranch(body, req, t);
+      updates.branch = branch.name;
+      updates.branchId = branch.id;
+    }
+    await invoice.update(updates, { transaction: t });
+
+    // Replace items if provided — NO stock effects.
+    let itemRows = null;
+    if (Array.isArray(body.items)) {
+      itemRows = await buildDraftItems(body.items, req.companyId, t);
+      await models.InvoiceItem.destroy({ where: { invoiceId: invoice.id }, transaction: t });
+      for (const r of itemRows) {
+        await models.InvoiceItem.create({ invoiceId: invoice.id, ...r }, { transaction: t });
+      }
+    }
+
+    await auditService.record(req.companyId, {
+      action: "invoice.draft.update",
+      description: `Draft invoice ${invoice.id} updated`,
+      user: actor,
+      userId: req.user ? req.user.id : null,
+      place: invoice.branch,
+      branch: invoice.branch,
+      sourceDocument: invoice.id,
+      severity: "info",
+      before: JSON.stringify({ total: before.total, items: "(unchanged unless replaced)" }),
+      after: JSON.stringify({ total: invoice.total, reason: body.reason || null, itemsReplaced: itemRows ? itemRows.length : false })
+    }, { transaction: t });
+
+    await t.commit();
+    emitEntityChanged(req.companyId, { entity: "Invoice", action: "draft-update", id: invoice.id });
+    const out = invoice.toJSON();
+    if (itemRows) out.items = itemRows;
+    return res.status(200).json({ success: true, ...out, data: out });
+  } catch (error) {
+    await t.rollback();
+    next(error);
+  }
+});
+
+// 3) Cancel a DRAFT invoice (draft only; no reversal needed — drafts have no effects).
+router.post("/sales/invoices/:id/cancel", authMiddleware, requirePermission("sales.create"), async (req, res, next) => {
+  const t = await models.sequelize.transaction();
+  try {
+    const body = req.body || {};
+    const invoice = await models.Invoice.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t });
+    if (!invoice) { await t.rollback(); return res.status(404).json({ success: false, message: "الفاتورة غير موجودة" }); }
+
+    // Idempotent: already cancelled → return it unchanged, no side effects.
+    if (invoice.postingStatus === "cancelled") {
+      await t.rollback();
+      return res.status(200).json({ success: true, ...invoice.toJSON(), data: invoice.toJSON() });
+    }
+    // Only drafts can be cancelled here; a posted invoice needs a return/void.
+    if (invoice.postingStatus !== "draft") {
+      await t.rollback();
+      return res.status(409).json({ success: false, message: "لا يمكن إلغاء فاتورة مرحَّلة من هذا المسار — استخدم المرتجع/الإلغاء المحاسبي" });
+    }
+
+    const reason = (body.reason || "").trim();
+    if (!reason) {
+      await t.rollback();
+      return res.status(422).json({ success: false, message: "سبب الإلغاء مطلوب" });
+    }
+
+    const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
+    const now = new Date().toISOString().slice(0, 16).replace("T", " ");
+    await invoice.update({ postingStatus: "cancelled", cancelledAt: now, cancelReason: reason }, { transaction: t });
+
+    await auditService.record(req.companyId, {
+      action: "invoice.draft.cancel",
+      description: `Draft invoice ${invoice.id} cancelled: ${reason}`,
+      user: actor,
+      userId: req.user ? req.user.id : null,
+      place: invoice.branch,
+      branch: invoice.branch,
+      sourceDocument: invoice.id,
+      severity: "info",
+      before: JSON.stringify({ postingStatus: "draft" }),
+      after: JSON.stringify({ postingStatus: "cancelled", cancelledAt: now, cancelReason: reason })
+    }, { transaction: t });
+
+    await t.commit();
+    emitEntityChanged(req.companyId, { entity: "Invoice", action: "draft-cancel", id: invoice.id });
+    return res.status(200).json({ success: true, ...invoice.toJSON(), data: invoice.toJSON() });
+  } catch (error) {
+    await t.rollback();
+    next(error);
+  }
+});
+
+// 4) POST a DRAFT → posted (P4.3). Applies the full operational effects ONCE,
+// in a single transaction, reusing the shared posting/sales services (the same
+// ones /pos/checkout uses) — checkout itself is left untouched. Idempotent:
+// guarded by row-lock + postingStatus, so retry/refresh cannot double-post.
+//
+// NOTE: the draft keeps its DRAFT-* id when posted (no PK change → no broken
+// InvoiceItem FK). Assigning a final sequential invoice number at post time is a
+// deliberate FOLLOW-UP (see docs) — not done here to avoid PK/relation risk.
+router.post("/sales/invoices/:id/post", authMiddleware, requirePermission("sales.create"), async (req, res, next) => {
+  const t = await models.sequelize.transaction();
+  try {
+    const body = req.body || {};
+    const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
+    const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
+
+    // Lock the invoice row so concurrent posts serialize.
+    const invoice = await models.Invoice.findOne({
+      where: { id: req.params.id, companyId: req.companyId },
+      lock: true,
+      transaction: t
+    });
+    if (!invoice) { await t.rollback(); return res.status(404).json({ success: false, message: "الفاتورة غير موجودة" }); }
+
+    // Already posted → idempotent return for the SAME key, else 409.
+    if (invoice.postingStatus === "posted") {
+      await t.rollback();
+      if (idempotencyKey && invoice.idempotencyKey === idempotencyKey) {
+        const items = await models.InvoiceItem.findAll({ where: { invoiceId: invoice.id } });
+        const out = invoice.toJSON(); out.items = items;
+        return res.status(200).json({ success: true, ...out, data: out });
+      }
+      return res.status(409).json({ success: false, message: "الفاتورة مرحَّلة بالفعل" });
+    }
+    if (invoice.postingStatus !== "draft") {
+      await t.rollback();
+      return res.status(409).json({ success: false, message: "لا يمكن ترحيل فاتورة ملغاة" });
+    }
+
+    // Re-validate customer + active branch at post time.
+    const customer = await models.Customer.findOne({ where: { id: invoice.customerId, companyId: req.companyId }, transaction: t });
+    if (!customer) throw new NotFoundError("العميل غير موجود");
+    const branchId = invoice.branchId;
+    const branchRecord = await models.Branch.findOne({ where: { id: branchId, companyId: req.companyId, isActive: true }, transaction: t });
+    if (!branchRecord) throw new ValidationError("الفرع المحدد غير موجود أو غير نشط");
+
+    // Draft items already exist; re-validate + LOCK each product/asset now
+    // (a draft does not reserve stock, so availability must be re-checked).
+    const draftItems = await models.InvoiceItem.findAll({ where: { invoiceId: invoice.id }, transaction: t });
+    if (!draftItems.length) throw new ValidationError("لا يمكن ترحيل مسودة بدون أصناف");
+
+    const validated = [];
+    let subtotal = 0;
+    for (const di of draftItems) {
+      const itemId = di.assetId;
+      const product = await models.Product.findOne({ where: { id: itemId, companyId: req.companyId }, lock: true, transaction: t });
+      if (product) {
+        const qty = Number(di.quantity) || 1;
+        if (Number(product.quantityAvailable) < qty) {
+          throw new ValidationError(`الكمية المطلوبة غير متاحة للمنتج ${product.productName}. المتاح: ${product.quantityAvailable}`);
+        }
+        if (product.branchId !== branchId) throw new ValidationError(`المنتج ${product.productName} تابع لفرع آخر`);
+        validated.push({ isProduct: true, product, di, qty, price: Number(di.price) || 0, weight: Number(di.weight) || 0, cost: Number(di.cost) || 0 });
+        subtotal += (Number(di.price) || 0) * qty;
+      } else {
+        const asset = await models.Asset.findOne({ where: { id: itemId, companyId: req.companyId }, lock: true, transaction: t });
+        if (!asset) throw new ValidationError(`الأصل ${itemId} غير موجود`);
+        if (asset.status !== "available") throw new ValidationError(`الأصل ${asset.name} (${asset.id}) غير متاح للبيع، حالته: ${asset.status}`);
+        if (asset.branchId !== branchId) throw new ValidationError(`الأصل ${asset.name} تابع لفرع آخر`);
+        validated.push({ isProduct: false, asset, di, price: Number(di.price) || 0, weight: Number(di.weight) || 0, cost: Number(di.cost) || 0 });
+        subtotal += Number(di.price) || 0;
+      }
+    }
+
+    // Totals + payment via the shared sales service (single source of truth).
+    const settings = await settingsService.getCompanySettings(req.companyId, { transaction: t });
+    const discount = Number(invoice.discount) || 0;
+    const makingCharge = Number(invoice.makingCharge) || 0;
+    const stoneValue = Number(invoice.stoneValue) || 0;
+    const totals = salesService.computeTotals({ subtotal, makingCharge, stoneValue, discount, vatRatePercent: settings.vatRate });
+    const paymentMethod = invoice.paymentMethod || "cash";
+    const payment = salesService.resolvePayment({
+      paymentMethod,
+      total: totals.total,
+      body: {
+        downPayment: invoice.downPayment,
+        installmentCount: invoice.installmentCount,
+        installmentFrequency: invoice.installmentFrequency,
+        firstDueDate: body.firstDueDate || invoice.date,
+        deposit: invoice.deposit,
+        paymentSplits: invoice.paymentSplits,
+      },
+      installmentRules: settings.installment,
+      user: req.user,
+    });
+    const { paidAmount, remainingAmount, status, installmentsToCreate } = payment;
+    const type = paymentMethod === "installment" ? "installment" : (paymentMethod === "deposit" ? "deposit" : (invoice.type || "sale"));
+    const nowStr = new Date().toISOString().slice(0, 16).replace("T", " ");
+
+    // Assign a final customer-facing number from the shared sequence (the draft
+    // keeps its DRAFT-* id). Reuse an already-assigned number on idempotent retry.
+    const prefix = settings.invoicePrefix || "INV-2026";
+    const finalInvoiceNumber = invoice.invoiceNumber || (await nextInvoiceNumber(req.companyId, prefix, t));
+
+    // Flip the draft to posted with the authoritative computed money fields.
+    await invoice.update({
+      type,
+      subtotal: totals.taxBase, // net-of-VAT base so the journal balances (checkout convention)
+      tax: totals.tax,
+      vatRate: totals.vatRate,
+      total: totals.total,
+      paidAmount,
+      remainingAmount,
+      status,
+      postingStatus: "posted",
+      invoiceNumber: finalInvoiceNumber,
+      postedAt: nowStr,
+      idempotencyKey: idempotencyKey || invoice.idempotencyKey
+    }, { transaction: t });
+
+    // Inventory effects (InvoiceItems already exist — do NOT recreate them).
+    for (const v of validated) {
+      if (v.isProduct) {
+        const product = v.product, qty = v.qty;
+        product.quantityAvailable = Math.round((Number(product.quantityAvailable) - qty) * 100) / 100;
+        product.quantityOnHand = Math.round((Number(product.quantityOnHand) - qty) * 100) / 100;
+        product.quantitySold = Math.round((Number(product.quantitySold) + qty) * 100) / 100;
+        product.totalWeight = Math.round((Number(product.totalWeight) - v.weight) * 10000) / 10000;
+        await product.save({ transaction: t, skipAdjustmentHook: true });
+        await models.StockMovement.create({
+          id: `SM-SALE-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          companyId: req.companyId, productId: product.id, productCode: product.productCode,
+          type: "sale", quantityIn: 0, quantityOut: qty, weightIn: 0, weightOut: v.weight,
+          unitCost: v.cost, totalCost: v.cost * qty, referenceType: "Invoice", referenceId: invoice.id,
+          customerId: customer.id, branchId, createdBy: actor
+        }, { transaction: t });
+      } else {
+        const asset = v.asset;
+        await asset.update({ status: "sold" }, { transaction: t });
+        await models.AssetEvent.create({
+          id: `ASE-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          assetId: asset.id, action: "SALE", date: nowStr.slice(0, 10), user: actor,
+          branch: branchRecord.name, note: `تم البيع بموجب الفاتورة رقم ${invoice.id}`,
+          sourceDocument: invoice.id, beforeState: "status:available", afterState: "status:sold"
+        }, { transaction: t });
+      }
+    }
+
+    // Payments (mirror checkout: split / installment down payment / single).
+    const paymentsCreated = [];
+    const mkPay = async (method, amount, notes) => {
+      const p = await models.Payment.create({
+        id: `PAY-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        companyId: req.companyId, branchId, invoiceId: invoice.id,
+        paymentMethod: method, amount, reference: body.reference || "",
+        date: invoice.date || nowStr.slice(0, 10), notes
+      }, { transaction: t });
+      paymentsCreated.push(p.toJSON());
+    };
+    if (paymentMethod === "split") {
+      for (const s of (Array.isArray(invoice.paymentSplits) ? invoice.paymentSplits : [])) {
+        await mkPay(s.method, s.amount, `دفع مجزأ للفاتورة ${invoice.id}`);
+      }
+    } else if (paymentMethod === "installment") {
+      if (paidAmount > 0) await mkPay("cash", paidAmount, `دفعة أولى للفاتورة ${invoice.id}`);
+    } else if (paidAmount > 0) {
+      await mkPay(paymentMethod, paidAmount, paymentMethod === "deposit" ? `عربون للفاتورة ${invoice.id}` : `سداد للفاتورة ${invoice.id}`);
+    }
+
+    // Installment schedule.
+    const createdInstallments = [];
+    for (const inst of installmentsToCreate) {
+      const row = await models.Installment.create({
+        id: `INST-${invoice.id}-${inst.sequence}`, companyId: req.companyId, invoiceId: invoice.id,
+        customerId: customer.id, customerName: customer.name, sequence: inst.sequence,
+        dueDate: inst.dueDate, amount: inst.amount, paidAmount: 0, status: "pending", branch: branchRecord.name
+      }, { transaction: t });
+      createdInstallments.push(row.toJSON());
+    }
+
+    // Journal entry (balanced; failure throws → whole post rolls back).
+    const invPlain = invoice.toJSON();
+    invPlain.downPayment = Number(invoice.downPayment) || 0;
+    let journalEntry;
+    try {
+      if (type === "deposit") {
+        journalEntry = await postingService.postDepositEntry(invPlain, actor, { transaction: t });
+      } else {
+        journalEntry = await postingService.postInvoiceEntry(invPlain, draftItems.map((d) => d.toJSON()), actor, { transaction: t });
+      }
+    } catch (postErr) {
+      logger.error(`[Posting] Failed to post journal for draft ${invoice.id}: ${postErr.message}`);
+      throw new Error(`خطأ في إنشاء القيد المحاسبي: ${postErr.message}`);
+    }
+
+    // Treasury cash-in per payment.
+    for (const pay of paymentsCreated) {
+      const m = pay.paymentMethod.toLowerCase();
+      const account = (m.includes("card") || m.includes("bank") || m.includes("transfer")) ? "bank" : "cash";
+      await models.CashTransaction.create({
+        id: `TX-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        companyId: req.companyId, branchId, branch: branchRecord.name, type: "cash_in", account,
+        amount: pay.amount, category: type === "deposit" ? "عربون عميل" : "مبيعات مجوهرات",
+        description: `مقبوضات فاتورة ${invoice.id} - ${pay.paymentMethod}`, reference: invoice.id,
+        date: invoice.date || nowStr.slice(0, 10), status: "posted",
+        createdBy: req.user ? req.user.id : "System", journalEntryId: journalEntry ? journalEntry.id : null
+      }, { transaction: t });
+    }
+
+    // Loyalty + customer balance (only when something is owed) — inside the tx.
+    const loyalty = await awardLoyaltyForSale(req.companyId, customer, totals.total, invoice.id, { transaction: t });
+    if (remainingAmount > 0) {
+      await customer.update(
+        { balance: Math.round((Number(customer.balance || 0) + remainingAmount) * 100) / 100 },
+        { transaction: t }
+      );
+    }
+
+    await auditService.record(req.companyId, {
+      action: "invoice.draft.post",
+      description: `Draft invoice ${invoice.id} posted (total ${totals.total})`,
+      user: actor, userId: req.user ? req.user.id : null,
+      place: branchRecord.name, branch: branchRecord.name, sourceDocument: invoice.id,
+      severity: "info",
+      before: JSON.stringify({ postingStatus: "draft" }),
+      after: JSON.stringify({ postingStatus: "posted", postedAt: nowStr, total: totals.total, paymentMethod, idempotencyKey: idempotencyKey || null })
+    }, { transaction: t });
+
+    const { recalculateCustomerNetPurchases } = require("../services/customer-purchases.service");
+    await recalculateCustomerNetPurchases(models, req.companyId, customer.id, { transaction: t });
+
+    await t.commit();
+    emitEntityChanged(req.companyId, { entity: "Invoice", action: "post", id: invoice.id, branchId, related: { customerId: customer.id } });
+    await notificationService.createNotification(req.companyId, {
+      title: "ترحيل فاتورة", message: `تم ترحيل الفاتورة ${invoice.id} للعميل ${customer.name}.`,
+      type: "success", entityType: "Invoice", entityId: invoice.id
+    });
+
+    const out = invoice.toJSON();
+    out.journalEntry = journalEntry;
+    out.payments = paymentsCreated;
+    out.installments = createdInstallments;
+    out.loyalty = loyalty;
+    out.items = draftItems.map((d) => d.toJSON());
+    return res.status(200).json({ success: true, ...out, data: out });
+  } catch (error) {
+    await t.rollback();
     next(error);
   }
 });
@@ -4969,13 +5635,20 @@ router.post("/payslips/:id/pay", authMiddleware, async (req, res, next) => {
 // GOLD CENTER (مركز الذهب) — karat prices, item quoting & rate fixing
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Latest manual gold-price row for a karat, TENANT-SAFE: prefer the company's
+// own price, else fall back to a legacy/global row (company_id IS NULL). A
+// company NEVER reads another company's price.
+async function findLatestGoldPrice(companyId, currency, karat) {
+  const k = parseInt(karat);
+  let row = await models.GoldPrice.findOne({ where: { companyId, currency, karat: k }, order: [["updated_at", "DESC"]] });
+  if (!row) row = await models.GoldPrice.findOne({ where: { companyId: null, currency, karat: k }, order: [["updated_at", "DESC"]] });
+  return row;
+}
+
 // Effective per-gram rate for a karat: a manual daily fixing wins over the
 // live-derived rate, so quotes and fixings honour the rate the shop set.
-async function effectiveKaratPrice(currency, karat) {
-  const override = await models.GoldPrice.findOne({
-    where: { currency, karat: parseInt(karat) },
-    order: [["updated_at", "DESC"]]
-  });
+async function effectiveKaratPrice(companyId, currency, karat) {
+  const override = await findLatestGoldPrice(companyId, currency, karat);
   if (override) return parseFloat(override.pricePerGram);
   const snap = await goldService.getKaratPrices(currency, [parseInt(karat)]);
   return snap.prices[0].pricePerGram;
@@ -4987,15 +5660,19 @@ router.get("/gold/karat-prices", authMiddleware, async (req, res, next) => {
   try {
     const currency = req.query.currency || "AED";
     const snap = await goldService.getKaratPrices(currency);
-    const overrides = await models.GoldPrice.findAll({
-      where: { currency },
+    // Tenant-safe: the company's own prices win per karat; legacy/global
+    // (company_id NULL) rows only fill karats the company has not fixed.
+    const companyOverrides = await models.GoldPrice.findAll({
+      where: { companyId: req.companyId, currency },
       order: [["updated_at", "DESC"]]
     });
-    // Keep the latest manual price per karat.
-    const byKarat = {};
-    overrides.forEach((o) => {
-      if (!byKarat[o.karat]) byKarat[o.karat] = o;
+    const legacyOverrides = await models.GoldPrice.findAll({
+      where: { companyId: null, currency },
+      order: [["updated_at", "DESC"]]
     });
+    const byKarat = {};
+    companyOverrides.forEach((o) => { if (!byKarat[o.karat]) byKarat[o.karat] = o; });
+    legacyOverrides.forEach((o) => { if (!byKarat[o.karat]) byKarat[o.karat] = o; });
     const prices = snap.prices.map((p) => {
       const o = byKarat[p.karat];
       return o
@@ -5022,16 +5699,15 @@ router.post("/gold/karat-prices", authMiddleware, async (req, res, next) => {
     for (const e of entries) {
       const karat = parseInt(e.karat);
       const newPrice = Number(e.pricePerGram);
-      // Previous effective price for this karat (latest row), for the audit "before".
-      const prev = await models.GoldPrice.findOne({
-        where: { currency, karat },
-        order: [["updated_at", "DESC"]]
-      });
+      // Previous effective price for this karat (company-scoped), for the audit "before".
+      const prev = await findLatestGoldPrice(req.companyId, currency, karat);
       const row = await models.GoldPrice.create({
         karat,
         pricePerGram: newPrice,
         currency,
-        updatedBy: actor
+        updatedBy: actor,
+        companyId: req.companyId, // tenant-scoped write
+        source: "manual"
       });
       saved.push(row.toJSON());
       auditChanges.push({ karat, oldPrice: prev ? Number(prev.pricePerGram) : null, newPrice });
@@ -5064,7 +5740,7 @@ router.post("/gold/quote", authMiddleware, async (req, res, next) => {
     const settings = await settingsService.getCompanySettings(req.companyId);
     const currency = req.body.currency || settings.currency || "AED";
     const karat = Number(req.body.karat) || 21;
-    const perGram = await effectiveKaratPrice(currency, karat);
+    const perGram = await effectiveKaratPrice(req.companyId, currency, karat);
     const quote = await goldService.quoteItem({
       grossWeight: Number(req.body.grossWeight) || 0,
       karat,
@@ -5110,7 +5786,7 @@ router.post("/gold/fixings", authMiddleware, async (req, res, next) => {
     // (manual daily fixing wins over the live-derived rate).
     let ratePerGram = Number(b.ratePerGram);
     if (!ratePerGram || ratePerGram <= 0) {
-      ratePerGram = await effectiveKaratPrice(currency, karat);
+      ratePerGram = await effectiveKaratPrice(req.companyId, currency, karat);
     }
     const purity = Number(b.purity) || goldService.constructor.purityFor(karat);
     const fineWeight = Math.round(grossWeight * purity * 10000) / 10000;
