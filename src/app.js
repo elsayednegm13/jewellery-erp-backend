@@ -19,33 +19,59 @@ app.use(helmet({
 
 // CORS — locked down by allow-list. Set CORS_ALLOWED_ORIGINS (comma-separated)
 // in production. In non-production an empty list falls back to "*" for DX.
+const normalizeOrigin = (value = "") => value.trim().replace(/\/+$/, "");
+
 const allowedOrigins = [
   ...(process.env.CORS_ALLOWED_ORIGINS || "").split(","),
   process.env.FRONTEND_URL || "",
 ]
-  .map((o) => o.trim())
+  .map(normalizeOrigin)
   .filter(Boolean);
+
 const isProduction = process.env.NODE_ENV === "production";
 
-app.use(cors({
+const corsOptions = {
   origin(origin, callback) {
-    // Allow non-browser clients (curl, server-to-server) that send no Origin header.
+    // Allow non-browser clients (curl, Render health checks, server-to-server)
     if (!origin) return callback(null, true);
+
+    const requestOrigin = normalizeOrigin(origin);
+
     if (allowedOrigins.length === 0) {
       if (isProduction) {
         logger.error("[CORS] CORS_ALLOWED_ORIGINS is empty in production — blocking cross-origin request.");
-        return callback(null, false); // no ACAO header → browser blocks
+        return callback(null, false);
       }
-      return callback(null, true); // dev convenience
+
+      return callback(null, true);
     }
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    logger.warn(`[CORS] Blocked origin: ${origin}`);
-    return callback(null, false); // disallowed: omit ACAO so the browser blocks it
+
+    if (allowedOrigins.includes(requestOrigin)) {
+      return callback(null, true);
+    }
+
+    logger.warn(`[CORS] Blocked origin: ${origin}. Allowed: ${allowedOrigins.join(", ")}`);
+    return callback(null, false);
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Company-ID", "X-Branch-ID", "X-Correlation-ID", "Idempotency-Key"]
-}));
+  allowedHeaders: [
+    "Accept",
+    "Accept-Language",
+    "Content-Type",
+    "Authorization",
+    "X-Company-ID",
+    "X-Branch-ID",
+    "X-Correlation-ID",
+    "Idempotency-Key"
+  ],
+};
+
+// Apply CORS to all requests
+app.use(cors(corsOptions));
+
+// Explicitly handle preflight requests
+app.options("*", cors(corsOptions));
 
 // Setup Morgan request logger mapped to Winston
 const morganFormat = process.env.NODE_ENV === "production" ? "combined" : "dev";
@@ -62,9 +88,11 @@ app.use(express.urlencoded({ extended: true }));
 const uploadsDir = process.env.UPLOAD_DIR
   ? path.resolve(process.env.UPLOAD_DIR)
   : path.join(__dirname, "../../uploads");
+
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
+
 app.use("/uploads", express.static(uploadsDir));
 
 // 3. API Routes Mappings
@@ -73,6 +101,7 @@ app.use("/api", routes); // Backup mount for base router queries
 
 // 4. Swagger Documentation Mounting
 const swaggerPath = path.join(__dirname, "../swagger.json");
+
 if (fs.existsSync(swaggerPath)) {
   const swaggerDocument = require(swaggerPath);
   app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));

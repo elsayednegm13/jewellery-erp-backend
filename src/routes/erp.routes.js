@@ -153,6 +153,8 @@ function setupCrud(resourceName, model, searchFields = ["name"]) {
 // ─── Custom POS Checkout Endpoint ───────────────────────────────────────────
 router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), async (req, res, next) => {
   const t = await models.sequelize.transaction();
+  let committed = false;
+
   try {
     const body = req.body || {};
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
@@ -589,29 +591,8 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
     const { recalculateCustomerNetPurchases } = require("../services/customer-purchases.service");
     await recalculateCustomerNetPurchases(models, req.companyId, customerId, { transaction: t });
 
-    // Commit Transaction
-    await t.commit();
-
-    // 15. Create notification and emit events
-    const notificationCurrency = settings.currency || "AED";
-    emitEntityChanged(req.companyId, {
-      entity: "Invoice",
-      action: "create",
-      id: invoiceId,
-      branchId,
-      related: {
-        customerId: customer.id,
-        assetIds: invoiceItems.map(i => i.assetId).filter(Boolean)
-      }
-    });
-    await notificationService.createNotification(req.companyId, {
-      title: "عملية بيع جديدة",
-      message: `تم إنشاء الفاتورة ${invoiceId} للعميل ${customer.name} بقيمة ${total} ${notificationCurrency}.`,
-      type: "success",
-      entityType: "Invoice",
-      entityId: invoiceId
-    });
-
+    // Prepare response payload before committing.
+    // The POS client must receive the successful invoice response immediately after commit.
     const out = invoice.toJSON();
     out.journalEntry = journalEntry;
     out.installments = createdInstallmentRecords;
@@ -619,9 +600,53 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
     out.loyalty = loyalty;
     out.items = invoiceItems;
 
-    return res.status(201).json({ success: true, ...out, data: out });
+    // Commit Transaction
+    await t.commit();
+    committed = true;
+
+    // Return success to the frontend immediately.
+    // Do not block checkout on notifications/realtime side effects.
+    res.status(201).json({ success: true, ...out, data: out });
+
+    // 15. Create notification and emit events after the response as best-effort.
+    // If these fail or are slow, the invoice remains successful and the cashier does not see a false network error.
+    setImmediate(async () => {
+      try {
+        const notificationCurrency = settings.currency || "AED";
+
+        emitEntityChanged(req.companyId, {
+          entity: "Invoice",
+          action: "create",
+          id: invoiceId,
+          branchId,
+          related: {
+            customerId: customer.id,
+            assetIds: invoiceItems.map(i => i.assetId).filter(Boolean)
+          }
+        });
+
+        await notificationService.createNotification(req.companyId, {
+          title: "عملية بيع جديدة",
+          message: `تم إنشاء الفاتورة ${invoiceId} للعميل ${customer.name} بقيمة ${total} ${notificationCurrency}.`,
+          type: "success",
+          entityType: "Invoice",
+          entityId: invoiceId
+        });
+      } catch (sideEffectErr) {
+        logger.error(`[POS] Post-checkout side effects failed for ${invoiceId}: ${sideEffectErr.message}`);
+      }
+    });
+
+    return;
   } catch (error) {
-    await t.rollback();
+    if (!committed) {
+      try {
+        await t.rollback();
+      } catch (rollbackErr) {
+        logger.error(`[POS] Transaction rollback failed: ${rollbackErr.message}`);
+      }
+    }
+
     next(error);
   }
 });
