@@ -111,8 +111,7 @@ function buildListQueryDebug(queryOptions = {}) {
 
 function logListQueryError(error, req, model, context = {}) {
   const parent = error.parent || error.original || {};
-
-  logger.error("[ERP_LIST_QUERY_FAILED]", {
+  const payload = {
     model: model && model.name,
     method: req.method,
     path: req.originalUrl || req.url,
@@ -140,7 +139,15 @@ function logListQueryError(error, req, model, context = {}) {
       parentPosition: parent.position,
       stack: error.stack
     }
-  });
+  };
+
+  // Keep the full diagnostic payload inside the log message string because some
+  // production logger formats print only the first message argument and drop
+  // metadata objects. console.error is intentionally duplicated as a safety net
+  // for Render logs.
+  const logMessage = `[ERP_LIST_QUERY_FAILED] ${JSON.stringify(payload, null, 2)}`;
+  logger.error(logMessage);
+  console.error(logMessage);
 }
 
 function getPurityFromKarat(karat) {
