@@ -48,6 +48,101 @@ function toFiniteNumber(value, fallback = 0) {
   return isFiniteNumber(value) ? Number(value) : fallback;
 }
 
+function serializeForLog(value) {
+  const seen = new WeakSet();
+
+  function normalize(input) {
+    if (input === null || input === undefined) return input;
+    if (typeof input === "bigint") return input.toString();
+    if (typeof input !== "object") return input;
+
+    if (seen.has(input)) return "[Circular]";
+    seen.add(input);
+
+    if (Array.isArray(input)) {
+      return input.map(normalize);
+    }
+
+    if (input instanceof Date) {
+      return input.toISOString();
+    }
+
+    const output = {};
+    Reflect.ownKeys(input).forEach((key) => {
+      const safeKey = typeof key === "symbol" ? key.toString() : key;
+      const currentValue = input[key];
+
+      if (typeof currentValue === "function") {
+        output[safeKey] = `[Function: ${currentValue.name || "anonymous"}]`;
+      } else {
+        output[safeKey] = normalize(currentValue);
+      }
+    });
+
+    return output;
+  }
+
+  try {
+    return normalize(value);
+  } catch (err) {
+    return {
+      unserializable: true,
+      message: err.message
+    };
+  }
+}
+
+function buildListQueryDebug(queryOptions = {}) {
+  return {
+    where: serializeForLog(queryOptions.where),
+    order: serializeForLog(queryOptions.order),
+    limit: queryOptions.limit,
+    offset: queryOptions.offset,
+    distinct: queryOptions.distinct,
+    include: Array.isArray(queryOptions.include)
+      ? queryOptions.include.map((item) => ({
+        association: item.association,
+        as: item.as,
+        model: item.model && item.model.name
+      }))
+      : undefined
+  };
+}
+
+function logListQueryError(error, req, model, context = {}) {
+  const parent = error.parent || error.original || {};
+
+  logger.error("[ERP_LIST_QUERY_FAILED]", {
+    model: model && model.name,
+    method: req.method,
+    path: req.originalUrl || req.url,
+    companyId: req.companyId,
+    branchId: req.branchId,
+    requestQuery: serializeForLog(req.query),
+    resolvedQuery: {
+      page: context.page,
+      pageSize: context.pageSize,
+      search: context.search,
+      sortBy: context.sortBy,
+      sortDirection: context.sortDirection,
+      whereClause: serializeForLog(context.whereClause),
+      queryOptions: buildListQueryDebug(context.queryOptions)
+    },
+    error: {
+      name: error.name,
+      message: error.message,
+      sql: error.sql || parent.sql,
+      parentName: parent.name,
+      parentMessage: parent.message,
+      parentCode: parent.code,
+      parentDetail: parent.detail,
+      parentHint: parent.hint,
+      parentPosition: parent.position,
+      stack: error.stack
+    }
+  });
+}
+
 function getPurityFromKarat(karat) {
   const numericKarat = Number(karat);
   if (numericKarat === 24) return 1;
@@ -126,6 +221,8 @@ class ErpController {
   }
 
   list = async (req, res, next) => {
+    let listDebugContext = {};
+
     try {
       const page = parseInt(req.query.page) || 1;
       const pageSize = parseInt(req.query.pageSize) || 25;
@@ -230,6 +327,16 @@ class ErpController {
         queryOptions.distinct = true;
       }
 
+      listDebugContext = {
+        page,
+        pageSize,
+        search,
+        sortBy,
+        sortDirection,
+        whereClause,
+        queryOptions
+      };
+
       const { count, rows } = await this.model.findAndCountAll(queryOptions);
 
       const totalPages = Math.ceil(count / pageSize);
@@ -251,6 +358,7 @@ class ErpController {
         }
       });
     } catch (error) {
+      logListQueryError(error, req, this.model, listDebugContext);
       next(error);
     }
   };
@@ -313,7 +421,7 @@ class ErpController {
       }
 
       const newItem = await this.model.create(payload);
-      
+
       logger.info(`${this.model.name} created: ${newItem.id}`);
       await this.logAudit(req, "CREATE", newItem.id, null, newItem.toJSON());
 
@@ -445,7 +553,7 @@ class ErpController {
       }
 
       const originalState = item.toJSON();
-      
+
       // Update status/active values
       const updates = {};
       if (this.model.rawAttributes.status) {
