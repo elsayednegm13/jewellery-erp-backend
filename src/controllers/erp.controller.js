@@ -172,6 +172,16 @@ class ErpController {
             // instead of matching them literally.
             if (isSentinelFilterValue(value)) return;
 
+            // Suppliers' "due" dropdown sends semantic range values — "due"
+            // (has outstanding dues) / "clear" (none). They target the numeric
+            // `due` column, so translate them to a numeric range here, BEFORE
+            // the numeric guard below would otherwise drop them as non-numeric.
+            // A non-positive balance (incl. negatives) counts as "no dues".
+            if (this.model.name === "Supplier" && key === "due" && (value === "due" || value === "clear")) {
+              whereClause[key] = value === "due" ? { [Op.gt]: 0 } : { [Op.lte]: 0 };
+              return;
+            }
+
             // Never let a non-numeric value reach a numeric/decimal column —
             // Postgres throws "invalid input syntax for type numeric" otherwise.
             if (isNumericAttribute(attribute) && !isFiniteNumber(value)) return;
