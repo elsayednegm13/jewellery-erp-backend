@@ -4253,6 +4253,165 @@ router.get("/reports/inventory-valuation", authMiddleware, requirePermission("re
   }
 });
 
+// ─── Financial aggregate report endpoints (Phase 5E-a) ───────────────────────
+// Read-only, server-side summaries over POSTED invoices (companyId scoped), so
+// the previously-truncated frontend financial reports can be re-enabled with
+// correct figures. NO writes, NO posting/accounting changes. Returns are stored
+// as NEGATIVE invoice totals, so summing posted invoice totals nets returns at
+// the invoice level (Tax/Financial). The date filter uses Invoice.date, which
+// is verified to be YYYY-MM-DD (sortable as a string); malformed from/to are
+// ignored and reported in `filters.dateFilterRejected`.
+const REPORT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const reportNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+const reportRound2 = (v) => Math.round(v * 100) / 100;
+
+function buildInvoiceReportWhere(req) {
+  const where = { companyId: req.companyId, postingStatus: "posted" };
+  const filters = {
+    companyId: req.companyId,
+    postedOnly: true,
+    branchId: null,
+    from: null,
+    to: null,
+    dateFilterApplied: false,
+    dateFilterRejected: false,
+  };
+  const branchId = req.query.branchId && req.query.branchId !== "all" ? String(req.query.branchId) : null;
+  if (branchId) { where.branchId = branchId; filters.branchId = branchId; }
+
+  const from = req.query.from;
+  const to = req.query.to;
+  const fromOk = from && REPORT_DATE_RE.test(String(from));
+  const toOk = to && REPORT_DATE_RE.test(String(to));
+  if (fromOk || toOk) {
+    where.date = {};
+    if (fromOk) { where.date[Op.gte] = String(from); filters.from = String(from); }
+    if (toOk) { where.date[Op.lte] = String(to); filters.to = String(to); }
+    filters.dateFilterApplied = true;
+  }
+  if ((from && !fromOk) || (to && !toOk)) filters.dateFilterRejected = true;
+  return { where, filters };
+}
+
+// GET /reports/tax-summary — posted invoices; returns net via negative totals.
+router.get("/reports/tax-summary", authMiddleware, requirePermission("reports.view"), async (req, res, next) => {
+  try {
+    const { where, filters } = buildInvoiceReportWhere(req);
+    const invoices = await models.Invoice.findAll({ where });
+    let salesTotal = 0, vatTotal = 0, netSubtotal = 0;
+    for (const inv of invoices) {
+      salesTotal += reportNum(inv.total);
+      vatTotal += reportNum(inv.tax);
+      netSubtotal += reportNum(inv.subtotal);
+    }
+    const totals = {
+      salesTotal: reportRound2(salesTotal),
+      vatTotal: reportRound2(vatTotal),
+      netSubtotal: reportRound2(netSubtotal),
+      records: invoices.length,
+    };
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      basis: "invoice",
+      postedOnly: true,
+      returnsNetted: "via_negative_invoice_totals",
+      filters,
+      totals,
+    };
+    return res.status(200).json({ success: true, ...payload, data: payload });
+  } catch (error) { next(error); }
+});
+
+// GET /reports/financial-summary — invoice-based (ledger-based is a future variant).
+router.get("/reports/financial-summary", authMiddleware, requirePermission("reports.view"), async (req, res, next) => {
+  try {
+    const { where, filters } = buildInvoiceReportWhere(req);
+    const invoices = await models.Invoice.findAll({ where });
+    let revenue = 0, vat = 0, receivables = 0;
+    for (const inv of invoices) {
+      revenue += reportNum(inv.total);
+      vat += reportNum(inv.tax);
+      receivables += reportNum(inv.remainingAmount);
+    }
+    const totals = {
+      revenue: reportRound2(revenue),
+      vat: reportRound2(vat),
+      receivables: reportRound2(receivables),
+      records: invoices.length,
+      // Deferred: requires the inventory-valuation aggregate (cost basis). Left
+      // null here so the frontend never presents a fabricated stock value.
+      inventoryCostValue: null,
+    };
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      basis: "invoice",
+      postedOnly: true,
+      ledgerBased: false,
+      notes: [
+        "Invoice-based summary; not derived from the accounting ledger.",
+        "inventoryCostValue is deferred to /reports/inventory-valuation.",
+      ],
+      filters,
+      totals,
+    };
+    return res.status(200).json({ success: true, ...payload, data: payload });
+  } catch (error) { next(error); }
+});
+
+// GET /reports/profit-summary — realized gross profit from posted SALE items.
+router.get("/reports/profit-summary", authMiddleware, requirePermission("reports.view"), async (req, res, next) => {
+  try {
+    const { where, filters } = buildInvoiceReportWhere(req);
+    // Scope to type="sale": return/exchange ITEM-level signing is unverified in
+    // the data, so they are EXCLUDED rather than risk mis-signing realized
+    // profit. This is surfaced in `returnsExchanges` below.
+    where.type = "sale";
+    const saleInvoices = await models.Invoice.findAll({ where, attributes: ["id"] });
+    const saleIds = saleInvoices.map((i) => i.id);
+
+    let revenue = 0, cogs = 0, lineCount = 0, missingCostCount = 0, zeroCostCount = 0;
+    if (saleIds.length) {
+      const items = await models.InvoiceItem.findAll({ where: { invoiceId: saleIds } });
+      for (const it of items) {
+        const qty = reportNum(it.quantity);
+        revenue += reportNum(it.price) * qty;
+        if (it.cost === null || it.cost === undefined) {
+          missingCostCount += 1; // contributes 0 to COGS → profit may be overstated
+        } else {
+          const c = reportNum(it.cost);
+          if (c === 0) zeroCostCount += 1;
+          cogs += c * qty;
+        }
+        lineCount += 1;
+      }
+    }
+    const grossProfit = revenue - cogs;
+    const hasCostWarnings = missingCostCount > 0 || zeroCostCount > 0;
+    const totals = {
+      revenue: reportRound2(revenue),
+      cogs: reportRound2(cogs),
+      grossProfit: reportRound2(grossProfit),
+      marginPct: revenue > 0 ? reportRound2((grossProfit / revenue) * 100) : null,
+      saleInvoiceCount: saleIds.length,
+      lineCount,
+      missingCostCount,
+      zeroCostCount,
+      hasCostWarnings,
+    };
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      basis: "invoice-items",
+      postedOnly: true,
+      includedTypes: ["sale"],
+      returnsExchanges: "excluded_pending_item_signing_review",
+      profitReliability: hasCostWarnings ? "cost_warnings_present" : "ok",
+      filters,
+      totals,
+    };
+    return res.status(200).json({ success: true, ...payload, data: payload });
+  } catch (error) { next(error); }
+});
+
 // Employee Session Management
 router.get("/employees/:id/sessions", authMiddleware, async (req, res, next) => {
   try {
@@ -6036,12 +6195,24 @@ router.get("/treasury/transactions", authMiddleware, async (req, res, next) => {
     if (req.query.account) where.account = req.query.account;
     if (req.query.branch) where.branch = req.query.branch;
 
-    const rows = await models.CashTransaction.findAll({
+    // Phase 6B: real server-side pagination (offset + total). page/pageSize are
+    // optional and clamped; pageSize defaults to 20 and is capped at 100 (the
+    // previous limit-only default), so callers that pass neither still get the
+    // newest rows and the {items}/{data.items} shape stays backward compatible.
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize) || 20));
+    const offset = (page - 1) * pageSize;
+
+    const { count, rows } = await models.CashTransaction.findAndCountAll({
       where,
       order: [["created_at", "DESC"]],
-      limit: parseInt(req.query.pageSize) || 100
+      limit: pageSize,
+      offset,
     });
-    return res.status(200).json({ success: true, items: rows, data: { items: rows } });
+    const total = count;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const payload = { items: rows, page, pageSize, total, totalPages };
+    return res.status(200).json({ success: true, ...payload, data: payload });
   } catch (error) {
     next(error);
   }

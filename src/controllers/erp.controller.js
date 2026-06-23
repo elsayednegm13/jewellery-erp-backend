@@ -48,108 +48,6 @@ function toFiniteNumber(value, fallback = 0) {
   return isFiniteNumber(value) ? Number(value) : fallback;
 }
 
-function serializeForLog(value) {
-  const seen = new WeakSet();
-
-  function normalize(input) {
-    if (input === null || input === undefined) return input;
-    if (typeof input === "bigint") return input.toString();
-    if (typeof input !== "object") return input;
-
-    if (seen.has(input)) return "[Circular]";
-    seen.add(input);
-
-    if (Array.isArray(input)) {
-      return input.map(normalize);
-    }
-
-    if (input instanceof Date) {
-      return input.toISOString();
-    }
-
-    const output = {};
-    Reflect.ownKeys(input).forEach((key) => {
-      const safeKey = typeof key === "symbol" ? key.toString() : key;
-      const currentValue = input[key];
-
-      if (typeof currentValue === "function") {
-        output[safeKey] = `[Function: ${currentValue.name || "anonymous"}]`;
-      } else {
-        output[safeKey] = normalize(currentValue);
-      }
-    });
-
-    return output;
-  }
-
-  try {
-    return normalize(value);
-  } catch (err) {
-    return {
-      unserializable: true,
-      message: err.message
-    };
-  }
-}
-
-function buildListQueryDebug(queryOptions = {}) {
-  return {
-    where: serializeForLog(queryOptions.where),
-    order: serializeForLog(queryOptions.order),
-    limit: queryOptions.limit,
-    offset: queryOptions.offset,
-    distinct: queryOptions.distinct,
-    include: Array.isArray(queryOptions.include)
-      ? queryOptions.include.map((item) => ({
-        association: item.association,
-        as: item.as,
-        model: item.model && item.model.name
-      }))
-      : undefined
-  };
-}
-
-function logListQueryError(error, req, model, context = {}) {
-  const parent = error.parent || error.original || {};
-  const payload = {
-    model: model && model.name,
-    method: req.method,
-    path: req.originalUrl || req.url,
-    companyId: req.companyId,
-    branchId: req.branchId,
-    requestQuery: serializeForLog(req.query),
-    resolvedQuery: {
-      page: context.page,
-      pageSize: context.pageSize,
-      search: context.search,
-      sortBy: context.sortBy,
-      sortDirection: context.sortDirection,
-      whereClause: serializeForLog(context.whereClause),
-      queryOptions: buildListQueryDebug(context.queryOptions)
-    },
-    error: {
-      name: error.name,
-      message: error.message,
-      sql: error.sql || parent.sql,
-      parentName: parent.name,
-      parentMessage: parent.message,
-      parentCode: parent.code,
-      parentDetail: parent.detail,
-      parentHint: parent.hint,
-      parentPosition: parent.position,
-      stack: error.stack
-    }
-  };
-
-  // Keep the full diagnostic payload inside the log message string because some
-  // production logger formats print only the first message argument and drop
-  // metadata objects. console.error is intentionally duplicated as a safety net
-  // for Render logs.
-  const logMessage = `[ERP_LIST_QUERY_FAILED] ${JSON.stringify(payload, null, 2)}`;
-  logger.error(logMessage);
-  console.error(logMessage);
-}
-
 function getPurityFromKarat(karat) {
   const numericKarat = Number(karat);
   if (numericKarat === 24) return 1;
@@ -186,6 +84,47 @@ function normalizeAssetCreatePayload(payload, req) {
   if (purity !== null && purity !== undefined) payload.purity = purity;
 
   return payload;
+}
+
+const GENERATED_ID_FORMATS = {
+  Customer: { prefix: "CUS", width: 4 },
+  Supplier: { prefix: "SUP", width: 3 },
+};
+
+const GENERATED_ID_CREATE_ATTEMPTS = 3;
+
+function isUniqueConstraintError(error) {
+  return error?.name === "SequelizeUniqueConstraintError";
+}
+
+async function generateScopedSequentialId(model, companyId) {
+  const format = GENERATED_ID_FORMATS[model.name];
+  if (!format) {
+    return `${model.name.substring(0, 3).toUpperCase()}-${Date.now()}`;
+  }
+
+  const where = {
+    id: { [Op.like]: `${format.prefix}-%` },
+  };
+  if (companyId) {
+    where.companyId = companyId;
+  }
+
+  const rows = await model.findAll({
+    attributes: ["id"],
+    where,
+    paranoid: false,
+    raw: true,
+  });
+
+  const pattern = new RegExp(`^${format.prefix}-(\\d+)$`);
+  const max = rows.reduce((currentMax, row) => {
+    const match = pattern.exec(String(row.id || ""));
+    if (!match) return currentMax;
+    return Math.max(currentMax, Number(match[1]) || 0);
+  }, 0);
+
+  return `${format.prefix}-${String(max + 1).padStart(format.width, "0")}`;
 }
 
 class ErpController {
@@ -228,8 +167,6 @@ class ErpController {
   }
 
   list = async (req, res, next) => {
-    let listDebugContext = {};
-
     try {
       const page = parseInt(req.query.page) || 1;
       const pageSize = parseInt(req.query.pageSize) || 25;
@@ -314,6 +251,38 @@ class ErpController {
         }
       }
 
+      // Assets: opt-in "standalone only" filter for the inventory main list,
+      // which shows top-level serialized assets (no parent). Sub/child assets
+      // (parentAssetId set) are excluded ONLY when ?standaloneOnly=true is sent,
+      // so total/totalPages stay correct under server-side pagination. Default
+      // behaviour is unchanged, and this does not alter generic null-filter
+      // semantics for any other resource.
+      if (this.model.name === "Asset" && req.query.standaloneOnly === "true") {
+        whereClause.parentAssetId = { [Op.is]: null };
+      }
+
+      // Audit logs: optional createdAt date-range (?from / ?to). Validated
+      // strictly — a malformed date throws (→ 400) rather than silently
+      // returning unfiltered results, so the caller never thinks the filter was
+      // applied. Scoped to AuditLog; does not change generic filter semantics.
+      if (this.model.name === "AuditLog") {
+        const parseBound = (value, label) => {
+          if (value === undefined || value === "") return null;
+          const d = new Date(value);
+          if (Number.isNaN(d.getTime())) {
+            throw new ValidationError(`Invalid '${label}' date for audit log range.`);
+          }
+          return d;
+        };
+        const fromD = parseBound(req.query.from, "from");
+        const toD = parseBound(req.query.to, "to");
+        if (fromD || toD) {
+          whereClause.createdAt = {};
+          if (fromD) whereClause.createdAt[Op.gte] = fromD;
+          if (toD) whereClause.createdAt[Op.lte] = toD;
+        }
+      }
+
       // Build sorting options
       const order = [];
       if (this.model.rawAttributes[sortBy]) {
@@ -333,16 +302,6 @@ class ErpController {
         queryOptions.include = [{ association: "items" }];
         queryOptions.distinct = true;
       }
-
-      listDebugContext = {
-        page,
-        pageSize,
-        search,
-        sortBy,
-        sortDirection,
-        whereClause,
-        queryOptions
-      };
 
       const { count, rows } = await this.model.findAndCountAll(queryOptions);
 
@@ -365,7 +324,6 @@ class ErpController {
         }
       });
     } catch (error) {
-      logListQueryError(error, req, this.model, listDebugContext);
       next(error);
     }
   };
@@ -415,20 +373,39 @@ class ErpController {
         companyId: req.companyId
       };
 
-      // Ensure primary key is present if frontend generates IDs (like AST-2026-..., CUS-..., SUP-...)
-      if (!payload.id && this.model.rawAttributes.id) {
-        // If integer autoIncrement, let db handle it. Otherwise set string ID.
-        if (this.model.rawAttributes.id.type.constructor.name === "STRING") {
-          payload.id = `${this.model.name.substring(0, 3).toUpperCase()}-${Date.now()}`;
-        }
-      }
-
       if (this.model.name === "Asset") {
         normalizeAssetCreatePayload(payload, req);
       }
 
-      const newItem = await this.model.create(payload);
+      // Ensure primary key is present if frontend generates IDs (like AST-2026-..., CUS-..., SUP-...)
+      const shouldGenerateStringId =
+        !payload.id &&
+        this.model.rawAttributes.id &&
+        this.model.rawAttributes.id.type.constructor.name === "STRING";
 
+      let newItem;
+      const attempts = shouldGenerateStringId ? GENERATED_ID_CREATE_ATTEMPTS : 1;
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        if (shouldGenerateStringId) {
+          payload.id = await generateScopedSequentialId(this.model, req.companyId);
+        }
+
+        try {
+          newItem = await this.model.create(payload);
+          break;
+        } catch (error) {
+          if (!shouldGenerateStringId || !isUniqueConstraintError(error)) {
+            throw error;
+          }
+          if (attempt === attempts) {
+            throw new ValidationError(`Could not generate a unique ${this.model.name} ID. Please retry.`, {
+              id: ["Could not generate a unique ID"],
+            });
+          }
+          delete payload.id;
+        }
+      }
+      
       logger.info(`${this.model.name} created: ${newItem.id}`);
       await this.logAudit(req, "CREATE", newItem.id, null, newItem.toJSON());
 
@@ -560,7 +537,7 @@ class ErpController {
       }
 
       const originalState = item.toJSON();
-
+      
       // Update status/active values
       const updates = {};
       if (this.model.rawAttributes.status) {
