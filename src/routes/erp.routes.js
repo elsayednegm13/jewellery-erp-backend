@@ -5,6 +5,7 @@ const { authMiddleware, requirePermission, requireAnyPermission } = require("../
 const ErpController = require("../controllers/erp.controller");
 const models = require("../models");
 const postingService = require("../services/posting.service");
+const journalService = require("../services/journal.service");
 const goldService = require("../services/gold.service");
 const settingsService = require("../services/settings.service");
 const salesService = require("../services/sales.service");
@@ -3244,7 +3245,141 @@ setupCrud("purchase-orders", models.PurchaseOrder, ["supplierName", "status", "b
 setupCrud("invoices", models.Invoice, ["customerName", "paymentMethod", "invoiceNumber", "id"]);
 setupCrud("reservations", models.Reservation, ["customerName", "assetName", "status"]);
 setupCrud("approval-requests", models.ApprovalRequest, ["description", "status", "requestedBy"]);
-setupCrud("journal-entries", models.JournalEntry, ["description", "status"]);
+
+// ─── Manual Balanced Journal Draft (Phase 8D3) ──────────────────────────────
+// Safe replacement for the rejected generic POST /journal-entries (Phase 8D1).
+// Creates a manual journal entry as a DRAFT ONLY, with balanced debit/credit
+// lines. It NEVER posts, NEVER stamps postedAt/postedBy, and NEVER touches
+// Account.balance — posting/approval/reversal are separate future phases. The
+// validation + creation core lives in journal.service (transaction-driven) and
+// does NOT use postingService.postEntry (which posts + moves balances).
+// Registered BEFORE setupCrud("journal-entries") so the generic create stays
+// rejected and this dedicated path is the only way to create an entry.
+router.post(
+  "/journal-entries/manual-draft",
+  authMiddleware,
+  requirePermission("accounting.post"),
+  async (req, res, next) => {
+    try {
+      // companyId ALWAYS from the authenticated request — never the body. Only a
+      // real BR-* scope from the validated request context is attached.
+      const companyId = req.companyId;
+      const branchId =
+        typeof req.branchId === "string" && req.branchId.startsWith("BR-") ? req.branchId : null;
+
+      const result = await models.sequelize.transaction((t) =>
+        journalService.createManualDraft({
+          companyId,
+          actor: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
+          actorId: req.user ? req.user.id : null,
+          branchId,
+          input: req.body || {},
+          transaction: t,
+        })
+      );
+
+      emitEntityChanged(companyId, { entity: "JournalEntry", action: "create", id: result.id });
+      return res.status(201).json({ success: true, data: result });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// ─── Post a Manual Journal Draft (Phase 8D5) ────────────────────────────────
+// Transition an EXISTING manual draft (Phase 8D3) to posted, updating
+// Account.balance atomically. Delegates to journal.service.postManualDraft,
+// which locks the entry row, re-validates, applies the double-entry deltas, and
+// flips the same entry to posted — it NEVER creates a new entry and NEVER calls
+// postingService.postEntry. Registered before setupCrud so the generic route
+// (and its rejected create) never shadows it.
+router.post(
+  "/journal-entries/:id/post",
+  authMiddleware,
+  requirePermission("accounting.post"),
+  async (req, res, next) => {
+    try {
+      const result = await models.sequelize.transaction((t) =>
+        journalService.postManualDraft({
+          id: req.params.id,
+          companyId: req.companyId, // always from auth — never the body
+          actor: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
+          actorId: req.user ? req.user.id : null,
+          transaction: t,
+        })
+      );
+
+      emitEntityChanged(req.companyId, { entity: "JournalEntry", action: "update", id: result.id });
+      return res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// ─── Reverse a Posted Manual Journal Entry (Phase 8D7) ──────────────────────
+// Create an accounting-correct reversal: a NEW posted entry with swapped
+// debit/credit lines that undoes the original's balance effect, and flip the
+// original to "reversed". Delegates to journal.service.reverseManualEntry, which
+// locks the original row, validates, never deletes/edits the original lines, and
+// never calls postingService.postEntry. Registered before setupCrud.
+router.post(
+  "/journal-entries/:id/reverse",
+  authMiddleware,
+  requirePermission("accounting.post"),
+  async (req, res, next) => {
+    try {
+      const result = await models.sequelize.transaction((t) =>
+        journalService.reverseManualEntry({
+          id: req.params.id,
+          companyId: req.companyId, // always from auth — never the body
+          actor: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
+          actorId: req.user ? req.user.id : null,
+          transaction: t,
+        })
+      );
+
+      // Both the new reversal entry and the now-reversed original changed.
+      emitEntityChanged(req.companyId, { entity: "JournalEntry", action: "create", id: result.id });
+      emitEntityChanged(req.companyId, { entity: "JournalEntry", action: "update", id: result.originalId });
+      return res.status(201).json({ success: true, data: result });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// ─── Cancel a Manual Journal Draft (Phase 8D9) ──────────────────────────────
+// Hard-delete an UNPOSTED manual draft (status draft, sourceType manual). Safe
+// because a draft never moved any Account.balance. Delegates to
+// journal.service.cancelManualDraft (locks the row, validates, deletes lines +
+// entry, audits) — no balance change, no posting/reversal. Registered before
+// setupCrud so it is the only deletion path for journal entries.
+router.post(
+  "/journal-entries/:id/cancel",
+  authMiddleware,
+  requirePermission("accounting.post"),
+  async (req, res, next) => {
+    try {
+      const result = await models.sequelize.transaction((t) =>
+        journalService.cancelManualDraft({
+          id: req.params.id,
+          companyId: req.companyId, // always from auth — never the body
+          actor: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
+          actorId: req.user ? req.user.id : null,
+          transaction: t,
+        })
+      );
+
+      emitEntityChanged(req.companyId, { entity: "JournalEntry", action: "delete", id: result.id });
+      return res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+setupCrud("journal-entries", models.JournalEntry, ["id", "description", "date"]);
 setupCrud("accounts", models.Account, ["name", "nameAr", "code"]);
 // NOTE: audit-logs is intentionally NOT a full CRUD resource — it is
 // append-only and immutable. Its read/append/verify routes are defined in the
@@ -4133,6 +4268,260 @@ router.get("/customers/:id/statement", authMiddleware, async (req, res, next) =>
         receipts: [],
         vatDue: invoices.reduce((acc, curr) => acc + parseFloat(curr.tax || 0), 0)
       }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GL ACCOUNT STATEMENT (كشف حساب) — Phase 9B. READ-ONLY.
+// Builds a per-GL-account ledger from POSTED journal lines only. It never reads
+// Account.balance to derive opening/closing (those are computed from the lines
+// themselves), and it performs ZERO writes — no balance/journal mutation.
+//
+// Opening balance = full server-side aggregate of every posted line for the
+// account dated BEFORE `from` (0 when no `from`). Rows in [from,to] are ordered
+// deterministically (date, entry.createdAt, entryId, lineId) and a running
+// balance is computed across the WHOLE ordered set, then the requested page is
+// sliced — so page 2's running balance correctly continues after page 1.
+// closingBalance = opening + Σ delta over the entire range (not the page).
+// Reversed originals are status="reversed" → excluded; the reversal entry is
+// status="posted" → included, which is the correct net financial effect.
+// ─────────────────────────────────────────────────────────────────────────────
+const round4 = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
+const isValidYmd = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(new Date(s).getTime());
+
+router.get("/accounts/:id/statement", authMiddleware, requirePermission("accounting.view"), async (req, res, next) => {
+  try {
+    // 1. Account must exist within the tenant. Never modified.
+    const account = await models.Account.findOne({
+      where: { id: req.params.id, companyId: req.companyId },
+    });
+    if (!account) throw new NotFoundError("Account not found.");
+
+    // 2. Validate the optional date window.
+    const from = req.query.from ? String(req.query.from) : null;
+    const to = req.query.to ? String(req.query.to) : null;
+    if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
+    if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
+    if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
+
+    // 3. Pagination (rows only; capped).
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 50, 1), 200);
+
+    const nature = account.nature; // "debit" | "credit"
+    const deltaOf = (debit, credit) =>
+      nature === "debit" ? (Number(debit) || 0) - (Number(credit) || 0) : (Number(credit) || 0) - (Number(debit) || 0);
+
+    // 4. Opening balance — full aggregate of posted lines BEFORE `from`.
+    let openingBalance = 0;
+    if (from) {
+      const priorLines = await models.JournalLine.findAll({
+        attributes: ["debit", "credit"],
+        where: { accountId: account.id },
+        include: [{
+          model: models.JournalEntry,
+          as: "journalEntry",
+          attributes: [],
+          required: true,
+          where: { companyId: req.companyId, status: "posted", date: { [Op.lt]: from } },
+        }],
+        raw: true,
+      });
+      openingBalance = round4(priorLines.reduce((s, l) => s + deltaOf(l.debit, l.credit), 0));
+    }
+
+    // 5. All posted lines within [from,to], deterministically ordered.
+    const entryWhere = { companyId: req.companyId, status: "posted" };
+    if (from || to) {
+      entryWhere.date = {};
+      if (from) entryWhere.date[Op.gte] = from;
+      if (to) entryWhere.date[Op.lte] = to;
+    }
+    const lineRows = await models.JournalLine.findAll({
+      where: { accountId: account.id },
+      include: [{
+        model: models.JournalEntry,
+        as: "journalEntry",
+        attributes: ["id", "date", "status", "sourceType", "sourceId", "branchId", "createdAt"],
+        required: true,
+        where: entryWhere,
+      }],
+      order: [
+        [{ model: models.JournalEntry, as: "journalEntry" }, "date", "ASC"],
+        [{ model: models.JournalEntry, as: "journalEntry" }, "createdAt", "ASC"],
+        [{ model: models.JournalEntry, as: "journalEntry" }, "id", "ASC"],
+        ["id", "ASC"],
+      ],
+    });
+
+    // 6. Running balance across the WHOLE ordered set (so paging stays correct).
+    let running = openingBalance;
+    const allRows = lineRows.map((r) => {
+      const je = r.journalEntry;
+      const debit = round4(r.debit);
+      const credit = round4(r.credit);
+      const delta = round4(deltaOf(debit, credit));
+      running = round4(running + delta);
+      return {
+        journalEntryId: je.id,
+        journalLineId: r.id,
+        date: je.date,
+        description: r.description,
+        sourceType: je.sourceType,
+        sourceId: je.sourceId,
+        branchId: je.branchId,
+        debit,
+        credit,
+        delta,
+        runningBalance: running,
+      };
+    });
+
+    const total = allRows.length;
+    const totalPages = Math.ceil(total / pageSize);
+    const closingBalance = total ? allRows[total - 1].runningBalance : openingBalance;
+    const start = (page - 1) * pageSize;
+    const items = allRows.slice(start, start + pageSize);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        account: {
+          id: account.id,
+          code: account.code,
+          name: account.name,
+          nameAr: account.nameAr,
+          nature: account.nature,
+          balance: round4(account.balance),
+        },
+        from,
+        to,
+        openingBalance,
+        closingBalance,
+        page,
+        pageSize,
+        total,
+        totalPages,
+        items,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRIAL BALANCE (ميزان المراجعة) — Phase 9D — READ-ONLY.
+// Computes debit/credit totals from POSTED journal lines only, never from
+// Account.balance. A reversal's ORIGINAL is flipped to status "reversed" (so it
+// is excluded), while the reversal entry itself is "posted" (so it is included,
+// which is the correct financial effect). Account.balance is surfaced purely as
+// a reference, plus a `difference` against the ledger-derived calculated balance.
+// No rows are created, updated, or deleted.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get("/reports/trial-balance", authMiddleware, requirePermission("accounting.view"), async (req, res, next) => {
+  try {
+    // 1. Validate query. `asOf` optional date, `includeZero` optional bool.
+    const asOf = req.query.asOf ? String(req.query.asOf) : null;
+    if (asOf && !isValidYmd(asOf)) throw new ValidationError("Invalid 'asOf' date (expected YYYY-MM-DD).");
+    const includeZero = String(req.query.includeZero ?? "false").toLowerCase() === "true";
+
+    // 2. All accounts in the tenant — sorted for deterministic output.
+    const accounts = await models.Account.findAll({
+      where: { companyId: req.companyId },
+      order: [["code", "ASC"], ["id", "ASC"]],
+      raw: true,
+    });
+
+    // 3. Aggregate posted journal lines per account, optionally up to `asOf`.
+    //    status="posted" alone excludes drafts/pending/balanced/reversed.
+    const entryWhere = { companyId: req.companyId, status: "posted" };
+    if (asOf) entryWhere.date = { [Op.lte]: asOf };
+    const rows = await models.JournalLine.findAll({
+      attributes: [
+        "accountId",
+        [models.sequelize.fn("COALESCE", models.sequelize.fn("SUM", models.sequelize.col("debit")), 0), "debitTotal"],
+        [models.sequelize.fn("COALESCE", models.sequelize.fn("SUM", models.sequelize.col("credit")), 0), "creditTotal"],
+      ],
+      include: [{
+        model: models.JournalEntry,
+        as: "journalEntry",
+        attributes: [],
+        required: true,
+        where: entryWhere,
+      }],
+      group: [models.sequelize.col("accountId")],
+      raw: true,
+    });
+    const totalsByAccount = new Map();
+    for (const r of rows) totalsByAccount.set(r.accountId, { debitTotal: round4(r.debitTotal), creditTotal: round4(r.creditTotal) });
+
+    // 4. Build per-account lines.
+    const items = [];
+    let totalDebit = 0;
+    let totalCredit = 0;
+    let totalDifference = 0;
+    for (const a of accounts) {
+      const t = totalsByAccount.get(a.id) || { debitTotal: 0, creditTotal: 0 };
+      const debitTotal = t.debitTotal;
+      const creditTotal = t.creditTotal;
+      // Ledger-derived balance, signed by the account's nature.
+      const calculatedBalance = a.nature === "credit" ? round4(creditTotal - debitTotal) : round4(debitTotal - creditTotal);
+      // Presentation side: a negative balance flips to the opposite column.
+      let netDebit = 0;
+      let netCredit = 0;
+      if (calculatedBalance >= 0) {
+        if (a.nature === "credit") netCredit = calculatedBalance;
+        else netDebit = calculatedBalance;
+      } else if (a.nature === "credit") {
+        netDebit = round4(-calculatedBalance);
+      } else {
+        netCredit = round4(-calculatedBalance);
+      }
+
+      const currentBalance = round4(a.balance);
+      const difference = round4(currentBalance - calculatedBalance);
+
+      // includeZero=false → drop accounts with nothing on any metric.
+      const isZero = debitTotal === 0 && creditTotal === 0 && calculatedBalance === 0 && currentBalance === 0;
+      if (!includeZero && isZero) continue;
+
+      totalDebit = round4(totalDebit + netDebit);
+      totalCredit = round4(totalCredit + netCredit);
+      totalDifference = round4(totalDifference + Math.abs(difference));
+
+      items.push({
+        accountId: a.id,
+        code: a.code,
+        name: a.name,
+        nameAr: a.nameAr,
+        type: a.type,
+        nature: a.nature,
+        currentBalance,
+        debitTotal,
+        creditTotal,
+        calculatedBalance,
+        netDebit,
+        netCredit,
+        difference,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        asOf,
+        includeZero,
+        accountCount: items.length,
+        totalDebit,
+        totalCredit,
+        isBalanced: Math.abs(totalDebit - totalCredit) <= 0.01,
+        totalDifference,
+        items,
+      },
     });
   } catch (error) {
     next(error);

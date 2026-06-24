@@ -223,6 +223,18 @@ class ErpController {
               return;
             }
 
+            // Journal entries expose two simplified UI status groups. Keep
+            // array/IN handling scoped to this field so generic filter
+            // semantics remain unchanged for every other resource.
+            if (this.model.name === "JournalEntry" && key === "status" && Array.isArray(value)) {
+              const allowedStatuses = ["draft", "balanced", "posted", "pending", "reversed"];
+              const statuses = value.filter((status) => allowedStatuses.includes(status));
+              if (statuses.length > 0) {
+                whereClause[key] = { [Op.in]: statuses };
+              }
+              return;
+            }
+
             // Never let a non-numeric value reach a numeric/decimal column —
             // Postgres throws "invalid input syntax for type numeric" otherwise.
             if (isNumericAttribute(attribute) && !isFiniteNumber(value)) return;
@@ -358,6 +370,15 @@ class ErpController {
 
   create = async (req, res, next) => {
     try {
+      // Journal entries require balanced debit/credit lines and a dedicated
+      // draft workflow. The generic CRUD endpoint only creates a header row,
+      // so reject it before payload construction, auditing, or any DB write.
+      if (this.model.name === "JournalEntry") {
+        throw new ValidationError(
+          "Manual journal entry creation requires a dedicated balanced draft endpoint."
+        );
+      }
+
       // Invoice lifecycle fields are owned by the dedicated lifecycle endpoints,
       // not generic CRUD. Reject ANY lifecycle field in the body (incl.
       // postingStatus:"posted") — the column default fills posted automatically.
@@ -631,6 +652,17 @@ class ErpController {
 
   delete = async (req, res, next) => {
     try {
+      // Journal entries must never be removed through generic CRUD: that would
+      // hard-delete a POSTED entry without reversing its Account.balance impact,
+      // breaking the ledger. Drafts are removed via the dedicated cancel
+      // endpoint; posted entries are corrected via reversal. Reject here before
+      // any lookup or delete.
+      if (this.model.name === "JournalEntry") {
+        throw new ValidationError(
+          "Journal entries cannot be deleted via generic CRUD. Use the manual draft cancel or reversal workflows."
+        );
+      }
+
       const item = await this.model.findOne({
         where: {
           id: req.params.id,
