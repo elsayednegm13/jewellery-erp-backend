@@ -13,7 +13,7 @@ const auditService = require("../services/audit.service");
 const { emitEntityChanged } = require("../services/realtime-helper.service");
 const notificationService = require("../services/notification.service");
 const logger = require("../utils/logger");
-const { ValidationError, NotFoundError } = require("../utils/errors");
+const { ValidationError, NotFoundError, ConflictError } = require("../utils/errors");
 const uploadMiddleware = require("../middleware/upload.middleware");
 const { moveUploadedFileSafe } = require("../utils/file-move");
 
@@ -3927,6 +3927,166 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SUPPLIER PURCHASE PAYMENT (سداد مورد ضد أمر شراء) — Phase 10J.
+// Pay a received purchase order: records a cash_out CashTransaction
+// (category "supplier_purchase", reference = PO id, counterAccountCode "2100")
+// and posts the journal Dr Accounts Payable (2100) / Cr Cash|Bank via the
+// posting engine — all in ONE transaction with a full rollback on any error.
+// paidSoFar is computed from existing supplier_purchase cash-outs for the PO to
+// block overpayment; Idempotency-Key blocks double payment. Supplier.due is
+// NEVER touched (it stays reference-only; the supplier statement / closing
+// balance is the source of truth and picks up this payment automatically).
+// ─────────────────────────────────────────────────────────────────────────────
+router.post("/purchase-orders/:id/pay", authMiddleware, requirePermission("treasury.update"), async (req, res, next) => {
+  const b = req.body || {};
+  const idempotencyKey = req.headers["idempotency-key"] || b.idempotencyKey;
+  if (!idempotencyKey || !String(idempotencyKey).trim()) {
+    return next(new ValidationError("Idempotency-Key header is required for supplier payments."));
+  }
+
+  // Idempotency replay/conflict check BEFORE opening the write transaction.
+  const existing = await models.CashTransaction.findOne({
+    where: { companyId: req.companyId, idempotencyKey: String(idempotencyKey) },
+  });
+  if (existing) {
+    const sameOperation =
+      existing.type === "cash_out" &&
+      existing.category === "supplier_purchase" &&
+      existing.reference === req.params.id &&
+      Math.abs(Number(existing.amount) - Number(b.amount)) <= 0.01;
+    if (sameOperation) {
+      const out = existing.toJSON();
+      return res.status(200).json({ success: true, data: out, meta: { idempotentReplay: true } });
+    }
+    return next(new ConflictError("Idempotency-Key already used for a different operation."));
+  }
+
+  const t = await models.sequelize.transaction();
+  try {
+    // 1. Lock the PO row inside the transaction (serializes concurrent payments).
+    const po = await models.PurchaseOrder.findOne({
+      where: { id: req.params.id, companyId: req.companyId },
+      lock: t.LOCK.UPDATE,
+      transaction: t,
+    });
+    if (!po) throw new NotFoundError("Purchase order not found.");
+
+    // 2. Eligibility — only a fully received, non-consignment PO can be paid.
+    if (po.status !== "received") {
+      throw new ValidationError(`Only received purchase orders can be paid; PO ${po.id} is "${po.status}".`);
+    }
+    if (po.isConsignment === true) {
+      throw new ValidationError("Consignment purchase orders cannot be paid here.");
+    }
+
+    // 3. Amount + account validation.
+    const amount = round4(b.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new ValidationError("Payment amount must be a finite number greater than zero.");
+    }
+    const account = b.account === "bank" ? "bank" : "cash";
+    const date = b.date && isValidYmd(String(b.date)) ? String(b.date) : new Date().toISOString().slice(0, 10);
+    if (b.date && !isValidYmd(String(b.date))) {
+      throw new ValidationError("Invalid 'date' (expected YYYY-MM-DD).");
+    }
+
+    // 4. paidSoFar from existing supplier-payment cash-outs for THIS PO.
+    const paidAgg = await models.CashTransaction.findOne({
+      attributes: [[models.sequelize.fn("COALESCE", models.sequelize.fn("SUM", models.sequelize.col("amount")), 0), "paid"]],
+      where: { companyId: req.companyId, type: "cash_out", category: "supplier_purchase", reference: po.id },
+      transaction: t,
+      raw: true,
+    });
+    const paidSoFarBefore = round4(paidAgg ? paidAgg.paid : 0);
+    const total = round4(po.total);
+    const remainingBefore = round4(total - paidSoFarBefore);
+
+    // 5. Overpayment / nothing-due guards.
+    if (remainingBefore <= 0.01) {
+      throw new ValidationError(`Purchase order ${po.id} is already fully paid (paid ${paidSoFarBefore} of ${total}).`);
+    }
+    if (amount > remainingBefore + 0.01) {
+      throw new ValidationError(`Overpayment rejected: amount ${amount} exceeds remaining ${remainingBefore} for PO ${po.id}.`);
+    }
+
+    const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
+
+    // 6. Create the cash-out (AP counter) and post Dr 2100 / Cr cash|bank.
+    const cashTxId = `TX-PAY-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const cashTx = await models.CashTransaction.create({
+      id: cashTxId,
+      companyId: req.companyId,
+      type: "cash_out",
+      account,
+      amount,
+      category: "supplier_purchase",
+      counterAccountCode: "2100", // Accounts Payable — Dr AP / Cr cash|bank
+      description: b.note ? String(b.note) : `سداد للمورّد عن أمر الشراء ${po.id}`,
+      reference: po.id,
+      branch: po.branch || req.branchId || "Main Branch",
+      branchId: req.branchId && String(req.branchId).startsWith("BR-") ? req.branchId : null,
+      date,
+      createdBy: actor,
+      status: "posted",
+      idempotencyKey: String(idempotencyKey),
+    }, { transaction: t });
+
+    const journalEntry = await postingService.postCashEntry(cashTx.toJSON(), actor, { transaction: t });
+    await cashTx.update({ journalEntryId: journalEntry.id }, { transaction: t });
+
+    const paidSoFarAfter = round4(paidSoFarBefore + amount);
+    const remainingAfter = round4(total - paidSoFarAfter);
+
+    // 7. Audit inside the same transaction. Supplier.due is NOT modified.
+    await auditService.record(req.companyId, {
+      action: "supplier.payment",
+      description: `Supplier payment ${amount} for PO ${po.id} (${po.supplierName || po.supplierId})`,
+      user: actor,
+      userId: req.user ? req.user.id : null,
+      place: po.branch,
+      branch: po.branch,
+      sourceDocument: po.id,
+      severity: "info",
+      before: JSON.stringify({ purchaseOrderId: po.id, supplierId: po.supplierId, total, paidSoFarBefore, remainingBefore }),
+      after: JSON.stringify({ purchaseOrderId: po.id, supplierId: po.supplierId, amount, paidSoFarAfter, remainingAfter, cashTransactionId: cashTx.id, journalEntryId: journalEntry.id }),
+    }, { transaction: t });
+
+    await t.commit();
+
+    emitEntityChanged(req.companyId, { entity: "Treasury", action: "create", id: cashTx.id, related: { supplierId: po.supplierId, purchaseOrderId: po.id } });
+    emitEntityChanged(req.companyId, { entity: "Accounting", action: "create", id: journalEntry.id, related: { supplierId: po.supplierId, purchaseOrderId: po.id } });
+
+    // Reference-only supplier due (never used for the computation, never written).
+    const supplierRow = await models.Supplier.findByPk(po.supplierId);
+
+    const output = {
+      purchaseOrder: { id: po.id, supplierId: po.supplierId, total },
+      payment: {
+        id: cashTx.id,
+        amount,
+        account,
+        category: "supplier_purchase",
+        reference: po.id,
+        journalEntryId: journalEntry.id,
+        idempotencyKey: String(idempotencyKey),
+      },
+      paidSoFarBefore,
+      paidSoFarAfter,
+      remainingAfter,
+      supplierDueReference: supplierRow ? round4(supplierRow.due) : null,
+    };
+    return res.status(201).json({
+      success: true,
+      data: output,
+      meta: { readBySupplierStatement: true, supplierDueUpdated: false },
+    });
+  } catch (error) {
+    await t.rollback();
+    next(error);
+  }
+});
+
 // ─── Company Settings ───────────────────────────────────────────────────────
 
 router.get("/settings", authMiddleware, requirePermission("settings.view"), async (req, res, next) => {
@@ -4275,6 +4435,172 @@ router.get("/customers/:id/statement", authMiddleware, async (req, res, next) =>
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CUSTOMER SUB-LEDGER STATEMENT (كشف حساب عميل) — Phase 10B. READ-ONLY.
+// A real running-balance statement built from SOURCE DOCUMENTS, not the GL:
+// JournalLine has no customerId, so a per-customer ledger cannot come from the
+// GL. Sources (confirmed): posted Invoices (debit; type="return" → credit) and
+// Payments (credit, linked to the customer via their posted invoices).
+// Installments are intentionally EXCLUDED — their collections are stored only as
+// a cumulative paidAmount (no per-collection dated record) and post GL entries
+// with no customer dimension, so they cannot be turned into accurate dated
+// credit rows here; a later phase will add them. customer.balance is shown for
+// REFERENCE only (with a non-destructive `difference`); it is never written, and
+// opening/closing are computed from a full document scan, never from a page.
+// Kept as a NEW route so the legacy GET /customers/:id/statement is untouched.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get("/customers/:id/statement-v2", authMiddleware, requirePermission("customers.view"), async (req, res, next) => {
+  try {
+    // 1. Customer must exist within the tenant. Never modified.
+    const customer = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId } });
+    if (!customer) throw new NotFoundError("Customer not found.");
+
+    // 2. Validate the optional date window.
+    const from = req.query.from ? String(req.query.from) : null;
+    const to = req.query.to ? String(req.query.to) : null;
+    if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
+    if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
+    if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
+
+    // 3. Pagination (rows only; capped).
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 50, 1), 200);
+
+    // 4. Source 1 — posted invoices for this customer (full scan, not paged).
+    const invoices = await models.Invoice.findAll({
+      where: postedInvoiceWhere({ customerId: customer.id, companyId: req.companyId }),
+      attributes: ["id", "invoiceNumber", "type", "total", "date", "createdAt"],
+      raw: true,
+    });
+
+    // 5. Source 2 — payments, linked to the customer ONLY via their posted
+    //    invoices (Payment carries invoiceId, not customerId).
+    const invoiceIds = invoices.map((i) => i.id);
+    let payments = [];
+    if (invoiceIds.length) {
+      payments = await models.Payment.findAll({
+        where: { companyId: req.companyId, invoiceId: { [Op.in]: invoiceIds } },
+        attributes: ["id", "invoiceId", "amount", "reference", "date", "createdAt"],
+        raw: true,
+      });
+    }
+
+    // 6. Unify into ledger rows. Customer-AR convention: a charge raises what the
+    //    customer owes (debit); a receipt/return lowers it (credit).
+    const rowsAll = [];
+    for (const inv of invoices) {
+      const amount = round4(inv.total);
+      const isReturn = inv.type === "return";
+      rowsAll.push({
+        id: `INV-${inv.id}`,
+        type: isReturn ? "return" : "invoice",
+        sourceId: inv.id,
+        sourceNumber: inv.invoiceNumber || inv.id,
+        date: (inv.date || "").slice(0, 10),
+        createdAt: inv.createdAt,
+        description: isReturn ? `مرتجع ${inv.invoiceNumber || inv.id}` : `فاتورة ${inv.invoiceNumber || inv.id}`,
+        debit: isReturn ? 0 : amount,
+        credit: isReturn ? amount : 0,
+        sortType: isReturn ? "1_return" : "0_invoice",
+      });
+    }
+    for (const p of payments) {
+      const amount = round4(p.amount);
+      rowsAll.push({
+        id: `PAY-${p.id}`,
+        type: "payment",
+        sourceId: p.id,
+        sourceNumber: p.reference || p.id,
+        date: (p.date || "").slice(0, 10),
+        createdAt: p.createdAt,
+        description: `دفعة ${p.reference || p.id}`,
+        debit: 0,
+        credit: amount,
+        sortType: "2_payment",
+      });
+    }
+
+    // 7. Deterministic order so the running balance is stable.
+    rowsAll.sort((a, b) => {
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      const ca = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const cb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      if (ca !== cb) return ca - cb;
+      if (a.sortType !== b.sortType) return a.sortType < b.sortType ? -1 : 1;
+      return a.sourceId < b.sourceId ? -1 : a.sourceId > b.sourceId ? 1 : 0;
+    });
+
+    // 8. Opening = full aggregate of rows BEFORE `from` (0 when no `from`).
+    //    Period = rows within [from,to]. Running computed across the WHOLE
+    //    period set, then the page is sliced (page 2 continues after page 1).
+    let openingBalance = 0;
+    const periodRows = [];
+    for (const r of rowsAll) {
+      const delta = round4(r.debit - r.credit);
+      if (from && r.date < from) {
+        openingBalance = round4(openingBalance + delta);
+        continue;
+      }
+      if (to && r.date > to) continue;
+      periodRows.push({ ...r, delta });
+    }
+
+    let running = openingBalance;
+    const withRunning = periodRows.map((r) => {
+      running = round4(running + r.delta);
+      return {
+        id: r.id,
+        type: r.type,
+        sourceId: r.sourceId,
+        sourceNumber: r.sourceNumber,
+        date: r.date,
+        description: r.description,
+        debit: r.debit,
+        credit: r.credit,
+        delta: r.delta,
+        runningBalance: running,
+      };
+    });
+
+    const total = withRunning.length;
+    const totalPages = Math.ceil(total / pageSize);
+    const closingBalance = total ? withRunning[total - 1].runningBalance : openingBalance;
+    const start = (page - 1) * pageSize;
+    const items = withRunning.slice(start, start + pageSize);
+
+    // 9. customer.balance is reference-only; difference is reported, never fixed.
+    const customerBalanceReference = round4(customer.balance);
+    const difference = round4(customerBalanceReference - closingBalance);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        customer: {
+          id: customer.id,
+          code: customer.code ?? null,
+          name: customer.name,
+          phone: customer.phone,
+          balance: customerBalanceReference,
+        },
+        from,
+        to,
+        openingBalance,
+        closingBalance,
+        customerBalanceReference,
+        difference,
+        page,
+        pageSize,
+        total,
+        totalPages,
+        items,
+        meta: { source: "source_documents", ledgerBased: false, readOnly: true },
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GL ACCOUNT STATEMENT (كشف حساب) — Phase 9B. READ-ONLY.
 // Builds a per-GL-account ledger from POSTED journal lines only. It never reads
 // Account.balance to derive opening/closing (those are computed from the lines
@@ -4520,6 +4846,117 @@ router.get("/reports/trial-balance", authMiddleware, requirePermission("accounti
         totalCredit,
         isBalanced: Math.abs(totalDebit - totalCredit) <= 0.01,
         totalDifference,
+        items,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LEDGER RECONCILIATION (تسوية دفتر الأستاذ) — Phase 9F. READ-ONLY.
+// Compares each account's STORED Account.balance against the balance CALCULATED
+// from posted journal lines, surfacing any drift. It NEVER writes, NEVER fixes,
+// and NEVER uses Account.balance to derive the calculated value (that is built
+// only from the lines). status="posted" alone excludes drafts/pending/balanced
+// and reversed originals; the reversal entry (status posted) is included, which
+// is the correct net effect. differenceCount / totalAbsoluteDifference are
+// computed over EVERY account with drift in the tenant (the true reconciliation
+// signal), independent of the includeZero / onlyDifferences display filters;
+// accountCount reflects the rows actually returned after those filters.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get("/reports/ledger-reconciliation", authMiddleware, requirePermission("accounting.view"), async (req, res, next) => {
+  try {
+    // 1. Validate query.
+    const asOf = req.query.asOf ? String(req.query.asOf) : null;
+    if (asOf && !isValidYmd(asOf)) throw new ValidationError("Invalid 'asOf' date (expected YYYY-MM-DD).");
+    const includeZero = String(req.query.includeZero ?? "false").toLowerCase() === "true";
+    const onlyDifferences = String(req.query.onlyDifferences ?? "true").toLowerCase() === "true";
+
+    // 2. All accounts in the tenant — deterministic order.
+    const accounts = await models.Account.findAll({
+      where: { companyId: req.companyId },
+      order: [["code", "ASC"], ["id", "ASC"]],
+      raw: true,
+    });
+
+    // 3. Aggregate POSTED journal lines per account, optionally up to `asOf`.
+    const entryWhere = { companyId: req.companyId, status: "posted" };
+    if (asOf) entryWhere.date = { [Op.lte]: asOf };
+    const rows = await models.JournalLine.findAll({
+      attributes: [
+        "accountId",
+        [models.sequelize.fn("COALESCE", models.sequelize.fn("SUM", models.sequelize.col("debit")), 0), "debitTotal"],
+        [models.sequelize.fn("COALESCE", models.sequelize.fn("SUM", models.sequelize.col("credit")), 0), "creditTotal"],
+      ],
+      include: [{
+        model: models.JournalEntry,
+        as: "journalEntry",
+        attributes: [],
+        required: true,
+        where: entryWhere,
+      }],
+      group: [models.sequelize.col("accountId")],
+      raw: true,
+    });
+    const totalsByAccount = new Map();
+    for (const r of rows) totalsByAccount.set(r.accountId, { debitTotal: round4(r.debitTotal), creditTotal: round4(r.creditTotal) });
+
+    // 4. Per-account comparison.
+    const items = [];
+    let differenceCount = 0;
+    let totalAbsoluteDifference = 0;
+    for (const a of accounts) {
+      const tot = totalsByAccount.get(a.id) || { debitTotal: 0, creditTotal: 0 };
+      const debitTotal = tot.debitTotal;
+      const creditTotal = tot.creditTotal;
+      // Ledger-derived balance, signed by the account's nature. NEVER uses a.balance.
+      const calculatedBalance = a.nature === "credit"
+        ? round4(creditTotal - debitTotal)
+        : round4(debitTotal - creditTotal);
+      const currentBalance = round4(a.balance);
+      const difference = round4(currentBalance - calculatedBalance);
+      const status = Math.abs(difference) <= 0.01 ? "matched" : "difference";
+      const isDifference = status === "difference";
+
+      // Global reconciliation signal — counted over ALL accounts, pre-display-filter.
+      if (isDifference) {
+        differenceCount += 1;
+        totalAbsoluteDifference = round4(totalAbsoluteDifference + Math.abs(difference));
+      }
+
+      // Display filters.
+      const isZero = debitTotal === 0 && creditTotal === 0 && calculatedBalance === 0 && currentBalance === 0 && difference === 0;
+      if (!includeZero && isZero) continue;
+      if (onlyDifferences && !isDifference) continue;
+
+      items.push({
+        accountId: a.id,
+        code: a.code,
+        name: a.name,
+        nameAr: a.nameAr,
+        type: a.type,
+        nature: a.nature,
+        currentBalance,
+        debitTotal,
+        creditTotal,
+        calculatedBalance,
+        difference,
+        status,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        asOf,
+        includeZero,
+        onlyDifferences,
+        accountCount: items.length,
+        differenceCount,
+        totalAbsoluteDifference,
+        hasDifferences: differenceCount > 0,
         items,
       },
     });
@@ -4850,6 +5287,179 @@ router.get("/suppliers/:id/purchase-orders", authMiddleware, async (req, res, ne
       order: [["date", "DESC"], ["createdAt", "DESC"]],
     });
     return res.status(200).json({ success: true, items: pos, data: pos });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SUPPLIER SUB-LEDGER STATEMENT (كشف حساب مورّد) — Phase 10E. READ-ONLY.
+// A running-balance payable statement built from SOURCE DOCUMENTS, not the GL
+// (JournalLine has no supplierId) and NOT from Supplier.due (which only ever
+// increases on receive and is never reduced, so it is unreliable).
+// Sources (confirmed): received purchase orders (credit = total; consignment and
+// non-"received" statuses excluded) and supplier-payment cash-outs
+// (category "supplier_purchase") linked to the supplier ONLY via
+// CashTransaction.reference -> PurchaseOrder.id -> supplierId. Supplier.due is
+// returned for REFERENCE only (with a non-destructive `difference`, and
+// dueReferenceReliable:false); it is never written. opening/closing come from a
+// full document scan, never from a page.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get("/suppliers/:id/statement", authMiddleware, requirePermission("suppliers.view"), async (req, res, next) => {
+  try {
+    // 1. Supplier must exist within the tenant. Never modified.
+    const supplier = await models.Supplier.findOne({ where: { id: req.params.id, companyId: req.companyId } });
+    if (!supplier) throw new NotFoundError("Supplier not found.");
+
+    // 2. Validate the optional date window.
+    const from = req.query.from ? String(req.query.from) : null;
+    const to = req.query.to ? String(req.query.to) : null;
+    if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
+    if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
+    if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
+
+    // 3. Pagination (rows only; capped).
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 50, 1), 200);
+
+    // 4. Source 1 — received purchase orders (credit = total). Consignment and
+    //    non-received statuses (draft/sent/partial/cancelled) are excluded.
+    const pos = await models.PurchaseOrder.findAll({
+      where: { supplierId: supplier.id, companyId: req.companyId, status: "received", isConsignment: { [Op.ne]: true } },
+      attributes: ["id", "total", "date", "receivedDate", "createdAt"],
+      raw: true,
+    });
+
+    // 5. Source 2 — supplier-payment cash-outs, linked to THIS supplier via the
+    //    free-text reference -> PO id. We resolve POs with paranoid:false so a
+    //    soft-deleted order still maps its payment to the supplier.
+    const payTx = await models.CashTransaction.findAll({
+      where: { companyId: req.companyId, type: "cash_out", category: "supplier_purchase" },
+      attributes: ["id", "amount", "reference", "date", "createdAt", "description"],
+      raw: true,
+    });
+    const refIds = [...new Set(payTx.map((tx) => tx.reference).filter(Boolean))];
+    const supplierPoIds = new Set();
+    if (refIds.length) {
+      const refPos = await models.PurchaseOrder.findAll({
+        where: { id: { [Op.in]: refIds }, companyId: req.companyId, supplierId: supplier.id },
+        attributes: ["id"],
+        paranoid: false, // map payments even if the PO was soft-deleted
+        raw: true,
+      });
+      for (const p of refPos) supplierPoIds.add(p.id);
+    }
+
+    // 6. Unify into ledger rows. Supplier-payable convention: a receipt raises
+    //    what we owe (credit); a payment lowers it (debit).
+    const rowsAll = [];
+    for (const po of pos) {
+      const amount = round4(po.total);
+      rowsAll.push({
+        id: `PO-${po.id}`,
+        type: "purchase_order",
+        sourceId: po.id,
+        sourceNumber: po.id,
+        date: ((po.receivedDate || po.date) || "").slice(0, 10),
+        createdAt: po.createdAt,
+        description: `استلام أمر شراء ${po.id}`,
+        debit: 0,
+        credit: amount,
+        sortType: "0_po",
+      });
+    }
+    for (const tx of payTx) {
+      if (!tx.reference || !supplierPoIds.has(tx.reference)) continue; // only this supplier's payments
+      const amount = round4(tx.amount);
+      rowsAll.push({
+        id: `TX-${tx.id}`,
+        type: "supplier_payment",
+        sourceId: tx.id,
+        sourceNumber: tx.reference || tx.id,
+        date: (tx.date || "").slice(0, 10),
+        createdAt: tx.createdAt,
+        description: tx.description || `سداد للمورّد (${tx.reference})`,
+        debit: amount,
+        credit: 0,
+        sortType: "1_payment",
+      });
+    }
+
+    // 7. Deterministic order so the running balance is stable.
+    rowsAll.sort((a, b) => {
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      const ca = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const cb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      if (ca !== cb) return ca - cb;
+      if (a.sortType !== b.sortType) return a.sortType < b.sortType ? -1 : 1;
+      return a.sourceId < b.sourceId ? -1 : a.sourceId > b.sourceId ? 1 : 0;
+    });
+
+    // 8. Opening = full aggregate BEFORE `from` (0 when no `from`); period =
+    //    rows within [from,to]; running computed across the WHOLE period set,
+    //    then the page is sliced. delta = credit - debit (payable view).
+    let openingBalance = 0;
+    const periodRows = [];
+    for (const r of rowsAll) {
+      const delta = round4(r.credit - r.debit);
+      if (from && r.date < from) {
+        openingBalance = round4(openingBalance + delta);
+        continue;
+      }
+      if (to && r.date > to) continue;
+      periodRows.push({ ...r, delta });
+    }
+
+    let running = openingBalance;
+    const withRunning = periodRows.map((r) => {
+      running = round4(running + r.delta);
+      return {
+        id: r.id,
+        type: r.type,
+        sourceId: r.sourceId,
+        sourceNumber: r.sourceNumber,
+        date: r.date,
+        description: r.description,
+        debit: r.debit,
+        credit: r.credit,
+        delta: r.delta,
+        runningBalance: running,
+      };
+    });
+
+    const total = withRunning.length;
+    const totalPages = Math.ceil(total / pageSize);
+    const closingBalance = total ? withRunning[total - 1].runningBalance : openingBalance;
+    const start = (page - 1) * pageSize;
+    const items = withRunning.slice(start, start + pageSize);
+
+    // 9. Supplier.due is reference-only; difference reported, never fixed.
+    const supplierDueReference = round4(supplier.due);
+    const difference = round4(supplierDueReference - closingBalance);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        supplier: {
+          id: supplier.id,
+          name: supplier.name,
+          phone: supplier.phone,
+          due: supplierDueReference,
+        },
+        from,
+        to,
+        openingBalance,
+        closingBalance,
+        supplierDueReference,
+        difference,
+        page,
+        pageSize,
+        total,
+        totalPages,
+        items,
+        meta: { source: "source_documents", ledgerBased: false, readOnly: true, dueReferenceReliable: false },
+      },
+    });
   } catch (error) {
     next(error);
   }
