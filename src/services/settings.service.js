@@ -17,6 +17,14 @@ const logger = require("../utils/logger");
 
 const DEFAULTS = {
   vatRate: 5, // percent — safe fallback only; real value comes from the settings row
+  // Phase 12E foundation — purchase VAT / RCM config. Read-only foundation: NO
+  // posting consumer reads these yet (purchase-VAT posting lands in 12F).
+  vatEnabled: true,
+  purchaseVatRate: null, // null → falls back to vatRate (resolved below)
+  purchaseTaxIncludedDefault: false,
+  purchaseVatRecoverableDefault: true,
+  inputVatAccountCode: "1400",
+  rcmOutputAccountCode: "2210",
   currency: "AED",
   decimalPrecision: 2,
   paymentMethods: ["cash", "card", "transfer", "split", "installment", "deposit"],
@@ -94,8 +102,23 @@ async function getCompanySettings(companyId, options = {}) {
 
   const installmentRaw = parseMaybeJson(raw.installment) || {};
 
+  // Resolve sales vatRate first so purchaseVatRate can fall back to it.
+  const vatRate = pick("vatRate", (v) => toNumber(v, DEFAULTS.vatRate), DEFAULTS.vatRate);
+  const purchaseVatRate =
+    raw.purchaseVatRate === undefined || raw.purchaseVatRate === null || raw.purchaseVatRate === ""
+      ? vatRate
+      : toNumber(raw.purchaseVatRate, vatRate);
+
   const settings = {
-    vatRate: pick("vatRate", (v) => toNumber(v, DEFAULTS.vatRate), DEFAULTS.vatRate),
+    vatRate,
+    // Phase 12E foundation — purchase VAT / RCM config (read-only; no posting
+    // reads these yet). Surfaced so 12F implementation is configurable.
+    vatEnabled: toBool(raw.vatEnabled, DEFAULTS.vatEnabled),
+    purchaseVatRate,
+    purchaseTaxIncludedDefault: toBool(raw.purchaseTaxIncludedDefault, DEFAULTS.purchaseTaxIncludedDefault),
+    purchaseVatRecoverableDefault: toBool(raw.purchaseVatRecoverableDefault, DEFAULTS.purchaseVatRecoverableDefault),
+    inputVatAccountCode: pick("inputVatAccountCode", String, DEFAULTS.inputVatAccountCode),
+    rcmOutputAccountCode: pick("rcmOutputAccountCode", String, DEFAULTS.rcmOutputAccountCode),
     currency: (() => {
       const { normalizeCurrencyCode } = require("../utils/currency");
       const cur = company?.currency || pick("currency", String, DEFAULTS.currency);

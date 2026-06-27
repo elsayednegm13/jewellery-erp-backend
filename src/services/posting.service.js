@@ -31,9 +31,17 @@ const CHART = {
   "1213": { name: "Inventory Gold 24K", nameAr: "مخزون ذهب 24", type: "asset", nature: "debit", level: 3, parent: "1200" },
   "1219": { name: "Inventory Other / Non-Gold", nameAr: "مخزون أخرى / غير ذهب", type: "asset", nature: "debit", level: 3, parent: "1200" },
   "1300": { name: "Accounts Receivable", nameAr: "ذمم العملاء", type: "asset", nature: "debit", level: 2, parent: "1000" },
+  // Phase 12E foundation — Input VAT (recoverable purchase VAT). Defined here so
+  // it is auto-created by ensureAccount WHEN purchase-VAT posting lands (12F).
+  // No posting reads it yet, so no account row is created until then.
+  "1400": { name: "Input VAT Recoverable", nameAr: "ضريبة مدخلات قابلة للخصم", type: "asset", nature: "debit", level: 2, parent: "1000" },
   "2000": { name: "Liabilities", nameAr: "الخصوم", type: "liability", nature: "credit", level: 1, parent: null },
   "2100": { name: "Accounts Payable", nameAr: "ذمم الموردين", type: "liability", nature: "credit", level: 2, parent: "2000" },
   "2200": { name: "VAT Payable", nameAr: "ضريبة القيمة المضافة", type: "liability", nature: "credit", level: 2, parent: "2000" },
+  // Phase 12E foundation — RCM Output VAT, kept SEPARATE from 2200 so the VAT
+  // return can distinguish normal output VAT from reverse-charge output VAT.
+  // Not used by any posting yet (12F).
+  "2210": { name: "RCM Output VAT", nameAr: "ضريبة احتساب عكسي مستحقة", type: "liability", nature: "credit", level: 2, parent: "2000" },
   "2300": { name: "Customer Deposits", nameAr: "عرابين العملاء", type: "liability", nature: "credit", level: 2, parent: "2000" },
   "2400": { name: "Gift Voucher Liability", nameAr: "التزام قسائم الهدايا", type: "liability", nature: "credit", level: 2, parent: "2000" },
   "3000": { name: "Equity", nameAr: "حقوق الملكية", type: "equity", nature: "credit", level: 1, parent: null },
@@ -524,10 +532,59 @@ class PostingService {
   async postPurchaseEntry(purchaseOrder, paidAmount = 0, paymentMethod = "credit", postedBy = "System", opts = {}) {
     const companyId = purchaseOrder.companyId;
     const total = round(purchaseOrder.total);
-    const paid = Math.min(round(paidAmount), total);
-    const payable = round(total - paid);
     const method = String(paymentMethod || "").toLowerCase();
     const cashCode = method.includes("card") || method.includes("bank") || method.includes("transfer") || method.includes("تحويل") ? "1120" : "1110";
+
+    // Phase 12G — purchase VAT / RCM, driven ONLY by the PurchaseOrder snapshot
+    // fields (12F) + optional settings account codes (12E). Default path (no VAT
+    // fields set) is byte-identical to before: Case A below. NO VAT amount is
+    // ever ADDED on top of inventory — recoverable input VAT and RCM SPLIT the
+    // gross so there is no double-count.
+    const TOL = 0.01;
+    const isRcm = purchaseOrder.isRcm === true;
+    const isRecoverable = purchaseOrder.isRecoverable !== false; // default true
+    const taxBase = round(purchaseOrder.taxBase || 0);
+    const inputVat = round(purchaseOrder.inputVatAmount || 0);
+    const rcmVat = round(purchaseOrder.rcmVatAmount || 0);
+    const vatRate = Number(purchaseOrder.vatRate || 0);
+    const rcmRate = Number(purchaseOrder.rcmRate || 0);
+    const inputVatAccountCode = opts.inputVatAccountCode || "1400";
+    const rcmOutputAccountCode = opts.rcmOutputAccountCode || "2210";
+
+    // General validation (before any write — postEntry is the only write).
+    if (taxBase < 0 || inputVat < 0 || rcmVat < 0) throw new Error("Purchase VAT amounts cannot be negative");
+    if (vatRate < 0 || vatRate > 100 || rcmRate < 0 || rcmRate > 100) throw new Error("Purchase VAT rate must be between 0 and 100");
+
+    let inventoryDebit;     // amount capitalised into inventory
+    let supplierPayable;    // gross owed to the supplier (cash + AP)
+    const vatLines = [];
+    if (isRcm) {
+      // Case D — reverse charge: supplier is NOT paid VAT; buyer self-accounts.
+      if (inputVat > 0) throw new Error("RCM purchase must not carry ordinary input VAT");
+      if (rcmVat <= 0) throw new Error("RCM purchase requires a positive rcmVatAmount");
+      if (taxBase <= 0) throw new Error("RCM purchase requires a positive taxBase");
+      if (Math.abs(total - taxBase) > TOL) throw new Error("RCM purchase total must equal taxBase (supplier is not paid VAT)");
+      inventoryDebit = taxBase;
+      supplierPayable = taxBase;
+      vatLines.push({ accountCode: inputVatAccountCode, debit: rcmVat, credit: 0, description: "ضريبة مدخلات احتساب عكسي" });
+      vatLines.push({ accountCode: rcmOutputAccountCode, debit: 0, credit: rcmVat, description: "ضريبة مخرجات احتساب عكسي" });
+    } else if (isRecoverable && inputVat > 0) {
+      // Case B — recoverable input VAT: SPLIT the gross (no double-count).
+      if (taxBase <= 0) throw new Error("Recoverable input VAT requires a positive taxBase");
+      if (Math.abs(taxBase + inputVat - total) > TOL) throw new Error("taxBase + inputVatAmount must equal total");
+      inventoryDebit = taxBase;
+      supplierPayable = total;
+      vatLines.push({ accountCode: inputVatAccountCode, debit: inputVat, credit: 0, description: "ضريبة مدخلات قابلة للخصم" });
+    } else {
+      // Case A (no VAT) / Case C (non-recoverable → VAT stays in inventory cost).
+      inventoryDebit = total;
+      supplierPayable = total;
+    }
+
+    const paidIn = round(paidAmount);
+    if (paidIn > supplierPayable + TOL) throw new Error("Paid amount cannot exceed the amount payable to the supplier");
+    const paid = Math.min(paidIn, supplierPayable);
+    const payable = round(supplierPayable - paid);
 
     // Inventory DEBIT side: split by karat when the flag is on AND items are
     // supplied (via opts.items = the receive route's normalizedItems). When off,
@@ -536,12 +593,15 @@ class PostingService {
     const items = Array.isArray(opts.items) ? opts.items : null;
     const lines = [];
     if (byKarat && items && items.length) {
-      lines.push(...karatPurchaseInventoryLines(items, total));
+      lines.push(...karatPurchaseInventoryLines(items, inventoryDebit));
     } else {
-      lines.push({ accountCode: "1200", debit: total, credit: 0, description: `استلام مخزون من المورد ${purchaseOrder.supplierName}` });
+      lines.push({ accountCode: "1200", debit: inventoryDebit, credit: 0, description: `استلام مخزون من المورد ${purchaseOrder.supplierName}` });
     }
 
-    // Credit side (cash / bank / AP) is UNCHANGED.
+    // VAT lines (recoverable input VAT / RCM) — never added on top of inventory.
+    lines.push(...vatLines);
+
+    // Credit side (cash / bank / AP) — gross owed to the supplier.
     if (paid > 0) {
       lines.push({ accountCode: cashCode, debit: 0, credit: paid, description: `دفع للمورد ${purchaseOrder.supplierName}` });
     }

@@ -3555,8 +3555,61 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       };
     });
 
-    const total = Math.round(normalizedItems.reduce((sum, item) => sum + item.totalCost, 0) * 100) / 100;
+    const goodsTotal = Math.round(normalizedItems.reduce((sum, item) => sum + item.totalCost, 0) * 100) / 100;
     const totalWeight = Math.round(normalizedItems.reduce((sum, item) => sum + item.totalWeight, 0) * 10000) / 10000;
+
+    // Phase 12I — compute the purchase VAT / RCM snapshot in the BACKEND at
+    // receive time. VAT applies ONLY when explicitly requested (applyVat flag or
+    // a DRC/RCM flag) AND vatEnabled in settings; otherwise the default path is
+    // byte-identical to before (no VAT, Case A). Settings supply the defaults for
+    // the requested values. `goodsTotal` (sum of item costs) is the pre-VAT base.
+    const settings = await settingsService.getCompanySettings(req.companyId, { transaction: t });
+    const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+    const rcmRequested = Boolean(body.isRcm || body.isDRC || body.reverseVat || body.useReverseCharge);
+    const vatRequested = (rcmRequested || body.applyVat === true) && settings.vatEnabled !== false;
+
+    let taxBaseSnap = 0, vatRateSnap = 0, inputVatSnap = 0, taxIncludedSnap = false;
+    let isRecoverableSnap = true, isRcmSnap = false, rcmVatSnap = 0, rcmRateSnap = 0;
+    let total = goodsTotal; // amount payable to the supplier (gross for normal VAT; taxBase for RCM/no-VAT)
+
+    if (vatRequested && rcmRequested) {
+      // Case D — RCM/DRC: supplier price carries NO VAT; buyer self-accounts (net-zero).
+      const rcmRate = Number(body.rcmRate ?? body.vatRate ?? settings.purchaseVatRate ?? settings.vatRate ?? 0);
+      if (!Number.isFinite(rcmRate) || rcmRate <= 0 || rcmRate > 100) throw new ValidationError("RCM purchase requires a valid rcmRate between 0 and 100");
+      if (body.isRecoverable === false) throw new ValidationError("RCM purchase cannot be non-recoverable");
+      if (Number(body.inputVatAmount) > 0) throw new ValidationError("RCM purchase must not carry ordinary input VAT");
+      isRcmSnap = true;
+      isRecoverableSnap = true;
+      taxBaseSnap = goodsTotal;
+      rcmRateSnap = rcmRate;
+      vatRateSnap = rcmRate;
+      rcmVatSnap = r2(taxBaseSnap * rcmRate / 100);
+      inputVatSnap = 0;
+      total = taxBaseSnap; // PO.total = taxBase (no VAT paid to supplier under RCM)
+    } else if (vatRequested) {
+      // Case B/C — ordinary purchase VAT.
+      const vatRate = Number(body.vatRate ?? settings.purchaseVatRate ?? settings.vatRate ?? 0);
+      if (!Number.isFinite(vatRate) || vatRate < 0 || vatRate > 100) throw new ValidationError("Purchase vatRate must be a finite number between 0 and 100");
+      if (vatRate > 0) {
+        vatRateSnap = vatRate;
+        taxIncludedSnap = Boolean(body.taxIncluded ?? settings.purchaseTaxIncludedDefault ?? false);
+        isRecoverableSnap = Boolean(body.isRecoverable ?? settings.purchaseVatRecoverableDefault ?? true);
+        if (taxIncludedSnap) {
+          // inclusive: goodsTotal is the GROSS; back out the base.
+          taxBaseSnap = r2(goodsTotal / (1 + vatRate / 100));
+          inputVatSnap = r2(goodsTotal - taxBaseSnap);
+          total = goodsTotal;
+        } else {
+          // exclusive: goodsTotal is the genuine pre-VAT base; VAT added on top.
+          taxBaseSnap = goodsTotal;
+          inputVatSnap = r2(taxBaseSnap * vatRate / 100);
+          total = r2(taxBaseSnap + inputVatSnap);
+        }
+      }
+      // vatRate == 0 → leave defaults (Case A); total stays goodsTotal.
+    }
+    // else: no VAT requested → defaults; total = goodsTotal (Case A unchanged).
+
     const remainingAmount = Math.round((total - paidAmount) * 100) / 100;
     const paymentStatus = remainingAmount <= 0 ? "paid" : paidAmount > 0 ? "partial" : "unpaid";
 
@@ -3589,6 +3642,16 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       expectedDate: body.expectedDate || null,
       receivedDate: body.receivedDate || dateStr,
       total,
+      // Phase 12I — purchase VAT / RCM snapshot (source of truth for posting +
+      // VAT report). Defaults when no VAT was requested → Case A.
+      taxBase: taxBaseSnap,
+      vatRate: vatRateSnap,
+      inputVatAmount: inputVatSnap,
+      taxIncluded: taxIncludedSnap,
+      isRecoverable: isRecoverableSnap,
+      isRcm: isRcmSnap,
+      rcmVatAmount: rcmVatSnap,
+      rcmRate: rcmRateSnap,
       branch: branch.name,
       notes: [body.notes, drcNote, `Payment: ${paymentStatus}`, `Total weight: ${totalWeight}g`].filter(Boolean).join(" | "),
       isConsignment: Boolean(body.isConsignment ?? supplier.isConsignment),
@@ -3748,9 +3811,12 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       }
     }
 
-    if (remainingAmount > 0) {
-      await supplier.increment("due", { by: remainingAmount, transaction: t });
-    }
+    // Phase 10M: Supplier.due is FROZEN. It is no longer incremented on receive —
+    // it was an unreliable running figure (increment-only, never reduced). The
+    // supplier sub-ledger statement (received POs minus supplier_purchase
+    // payments) is now the source of truth for the payable balance, so we leave
+    // `due` untouched here as a legacy/reference field. `remainingAmount` and the
+    // accounting posting below are unchanged.
     await supplier.update({ lastOrder: dateStr }, { transaction: t });
 
     const journalEntry = await postingService.postPurchaseEntry(
@@ -3759,8 +3825,16 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       paymentMethod,
       actor,
       // Pass the normalized items (karat + totalCost) so the inventory debit can
-      // split by karat when accountingByKarat is on (no-op when off).
-      { transaction: t, branchId: branch.id, items: normalizedItems }
+      // split by karat when accountingByKarat is on (no-op when off). Phase 12I:
+      // pass the settings account codes so Input VAT / RCM post to the configured
+      // accounts (defaults 1400/2210 when settings are absent).
+      {
+        transaction: t,
+        branchId: branch.id,
+        items: normalizedItems,
+        inputVatAccountCode: settings.inputVatAccountCode,
+        rcmOutputAccountCode: settings.rcmOutputAccountCode,
+      }
     );
 
     let treasuryTransaction = null;
@@ -3808,7 +3882,9 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
         remainingAmount,
         paymentStatus,
         totalWeight,
-        isDRC: Boolean(body.isDRC || body.reverseVat || body.useReverseCharge)
+        isDRC: Boolean(body.isDRC || body.reverseVat || body.useReverseCharge),
+        // Phase 12I — tax snapshot persisted on the PO (source of truth).
+        tax: { taxBase: taxBaseSnap, vatRate: vatRateSnap, inputVatAmount: inputVatSnap, taxIncluded: taxIncludedSnap, isRecoverable: isRecoverableSnap, isRcm: isRcmSnap, rcmVatAmount: rcmVatSnap, rcmRate: rcmRateSnap }
       })
     }, { transaction: t });
 
@@ -4100,6 +4176,14 @@ router.get("/settings", authMiddleware, requirePermission("settings.view"), asyn
         currency: normalized.currency,
         receipt: normalized.receipt,
         vatRate: normalized.vatRate,
+        // Phase 12E foundation — purchase VAT / RCM config (read-only; no posting
+        // consumes these yet).
+        vatEnabled: normalized.vatEnabled,
+        purchaseVatRate: normalized.purchaseVatRate,
+        purchaseTaxIncludedDefault: normalized.purchaseTaxIncludedDefault,
+        purchaseVatRecoverableDefault: normalized.purchaseVatRecoverableDefault,
+        inputVatAccountCode: normalized.inputVatAccountCode,
+        rcmOutputAccountCode: normalized.rcmOutputAccountCode,
         lowStockThreshold: normalized.lowStockThreshold,
         decimalPrecision: normalized.decimalPrecision,
         installment: normalized.installment
@@ -4113,6 +4197,27 @@ router.get("/settings", authMiddleware, requirePermission("settings.view"), asyn
 router.patch("/settings", authMiddleware, requirePermission("settings.update"), async (req, res, next) => {
   try {
     const body = req.body || {};
+
+    // Phase 12E: validate the purchase-VAT / RCM foundation keys when present.
+    // Scoped to these keys only — no general settings refactor. These are a
+    // read-only foundation (no posting consumes them yet), but we still reject
+    // obviously bad values so 12F can trust them.
+    const isBoolVal = (v) => typeof v === "boolean";
+    const isNonEmptyStr = (v) => typeof v === "string" && v.trim() !== "";
+    const reject = (msg) => res.status(422).json({ success: false, message: msg });
+    for (const k of ["vatEnabled", "purchaseTaxIncludedDefault", "purchaseVatRecoverableDefault"]) {
+      if (body[k] !== undefined && !isBoolVal(body[k])) return reject(`${k} must be a boolean`);
+    }
+    if (body.purchaseVatRate !== undefined) {
+      const n = Number(body.purchaseVatRate);
+      if (body.purchaseVatRate === "" || body.purchaseVatRate === null || !Number.isFinite(n) || n < 0 || n > 100) {
+        return reject("purchaseVatRate must be a finite number between 0 and 100");
+      }
+    }
+    for (const k of ["inputVatAccountCode", "rcmOutputAccountCode"]) {
+      if (body[k] !== undefined && !isNonEmptyStr(body[k])) return reject(`${k} must be a non-empty string`);
+    }
+
     const companyUpdates = {};
     for (const key of ["businessName", "logo", "currency", "branchName", "taxNumber"]) {
       if (body[key] !== undefined) companyUpdates[key] = body[key];
@@ -4125,7 +4230,7 @@ router.patch("/settings", authMiddleware, requirePermission("settings.update"), 
       await models.Company.update(companyUpdates, { where: { id: req.companyId } });
     }
 
-    const settingKeys = ["language", "theme", "vatRate", "goldKaratDefaults", "goldPricingMode", "accountingByKarat", "invoicePrefix", "invoiceNumbering", "dateFormat", "decimalPrecision", "print", "notifications", "lowStockThreshold", "receipt", "allowZeroDownPayment", "paymentMethods", "installmentEnabled", "installmentDefaultFrequency", "installmentMaxCount", "installmentMinDownPaymentPercent", "barcode"];
+    const settingKeys = ["language", "theme", "vatRate", "goldKaratDefaults", "goldPricingMode", "accountingByKarat", "invoicePrefix", "invoiceNumbering", "dateFormat", "decimalPrecision", "print", "notifications", "lowStockThreshold", "receipt", "allowZeroDownPayment", "paymentMethods", "installmentEnabled", "installmentDefaultFrequency", "installmentMaxCount", "installmentMinDownPaymentPercent", "barcode", "vatEnabled", "purchaseVatRate", "purchaseTaxIncludedDefault", "purchaseVatRecoverableDefault", "inputVatAccountCode", "rcmOutputAccountCode"];
     for (const key of settingKeys) {
       if (body[key] === undefined) continue;
       const [row, created] = await models.Setting.findOrCreate({
@@ -5130,17 +5235,89 @@ router.get("/reports/tax-summary", authMiddleware, requirePermission("reports.vi
       vatTotal += reportNum(inv.tax);
       netSubtotal += reportNum(inv.subtotal);
     }
+
+    // Phase 12H — Input VAT / RCM from RECEIVED, non-consignment purchase orders
+    // (snapshot fields from 12F/12G are the source of truth). Same from/to date
+    // window as sales. branchId is resolved to the purchase-order branch NAME
+    // (purchase_orders has no branch_id column) — see meta limitation. Draft /
+    // sent / partial / cancelled / consignment purchases are excluded.
+    const poWhere = { companyId: req.companyId, status: "received", isConsignment: false };
+    if (filters.from || filters.to) {
+      poWhere.date = {};
+      if (filters.from) poWhere.date[Op.gte] = filters.from;
+      if (filters.to) poWhere.date[Op.lte] = filters.to;
+    }
+    let purchaseBranchFilter = "not_applied";
+    if (filters.branchId) {
+      const br = await models.Branch.findOne({ where: { id: filters.branchId, companyId: req.companyId } });
+      if (br && br.name) { poWhere.branch = br.name; purchaseBranchFilter = "by_resolved_name"; }
+      else { purchaseBranchFilter = "branchId_unresolved_purchases_not_filtered"; }
+    }
+    const purchases = await models.PurchaseOrder.findAll({ where: poWhere });
+    let inputVatTotal = 0, rcmOutputVatTotal = 0, rcmInputVatTotal = 0, purchasesTaxBaseTotal = 0, purchaseGrossTotal = 0;
+    for (const po of purchases) {
+      const isRcm = po.isRcm === true;
+      const isRecoverable = po.isRecoverable !== false;
+      const taxBase = reportNum(po.taxBase);
+      const inputVat = reportNum(po.inputVatAmount);
+      const rcmVat = reportNum(po.rcmVatAmount);
+      purchaseGrossTotal += reportNum(po.total);
+      purchasesTaxBaseTotal += taxBase;
+      if (isRcm) {
+        // RCM is net-zero: output and input each = rcmVatAmount. Never counted in
+        // the ordinary inputVatTotal (avoids double-count).
+        rcmOutputVatTotal += rcmVat;
+        rcmInputVatTotal += rcmVat;
+      } else if (isRecoverable && inputVat > 0) {
+        inputVatTotal += inputVat;
+      }
+      // non-recoverable VAT stays capitalised in cost → not a VAT-return figure.
+    }
+    const outputVatTotal = vatTotal; // backward-compatible alias of the old vatTotal
+    const netVatPayable = outputVatTotal + rcmOutputVatTotal - inputVatTotal - rcmInputVatTotal;
+
     const totals = {
       salesTotal: reportRound2(salesTotal),
       vatTotal: reportRound2(vatTotal),
       netSubtotal: reportRound2(netSubtotal),
       records: invoices.length,
+      // Phase 12H additive totals (Output VAT figures above are unchanged).
+      outputVatTotal: reportRound2(outputVatTotal),
+      inputVatTotal: reportRound2(inputVatTotal),
+      rcmOutputVatTotal: reportRound2(rcmOutputVatTotal),
+      rcmInputVatTotal: reportRound2(rcmInputVatTotal),
+      netVatPayable: reportRound2(netVatPayable),
+      purchasesTaxBaseTotal: reportRound2(purchasesTaxBaseTotal),
+      purchaseGrossTotal: reportRound2(purchaseGrossTotal),
+      purchaseRecords: purchases.length,
     };
     const payload = {
       generatedAt: new Date().toISOString(),
       basis: "invoice",
       postedOnly: true,
       returnsNetted: "via_negative_invoice_totals",
+      // Phase 12B (UNCHANGED for backward compatibility — verify-vat-output): the
+      // legacy `scope`/`meta` keep describing the OUTPUT-VAT view. The expanded
+      // Output+Input+RCM view is exposed additively under `vatFull` below.
+      scope: "output_vat",
+      meta: { scope: "output_vat", includesInputVat: false, includesRcm: false },
+      // Phase 12H — full VAT picture (Output + Input + RCM). Additive, does not
+      // change any legacy field. netVatPayable = output + rcmOutput - input
+      // - rcmInput (RCM nets to zero).
+      vatFull: {
+        scope: "vat_full",
+        includesOutputVat: true,
+        includesInputVat: true,
+        includesRcm: true,
+        outputVatAccountCode: "2200",
+        inputVatAccountCode: "1400",
+        rcmOutputAccountCode: "2210",
+        purchaseBasis: "received_non_consignment_purchase_orders",
+        purchaseBranchFilter,
+        limitations: purchaseBranchFilter === "branchId_unresolved_purchases_not_filtered"
+          ? ["branchId did not resolve to a branch; purchase figures are not branch-filtered"]
+          : [],
+      },
       filters,
       totals,
     };
@@ -7033,18 +7210,100 @@ router.post("/installments/:id/pay", authMiddleware, async (req, res, next) => {
       return res.status(409).json({ success: false, message: "القسط مدفوع بالفعل" });
     }
 
-    const due = parseFloat(inst.amount) - parseFloat(inst.paidAmount || 0);
-    const amount = Number(req.body.amount) || due;
+    const remaining = round4(parseFloat(inst.amount) - parseFloat(inst.paidAmount || 0));
+
+    // Phase 10P: strict amount validation BEFORE any update/create/posting. The
+    // old `Number(req.body.amount) || due` shortcut treated 0 / NaN / missing as
+    // a full payment, which (now that a Payment row is created) could record a
+    // Payment of the wrong value. amount must be an explicit finite number > 0,
+    // and a full payment must send amount = remaining explicitly (no shortcut).
+    const amount = Number(req.body.amount);
+    if (
+      req.body.amount === undefined ||
+      req.body.amount === null ||
+      req.body.amount === "" ||
+      !Number.isFinite(amount) ||
+      amount <= 0
+    ) {
+      return res.status(422).json({ success: false, message: "Payment amount must be greater than zero" });
+    }
+    if (amount > remaining + 0.01) {
+      return res.status(422).json({
+        success: false,
+        message: `Overpayment rejected: amount ${amount} exceeds remaining ${remaining}`,
+      });
+    }
     const method = req.body.paymentMethod || "Cash";
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
 
     const newPaid = parseFloat(inst.paidAmount || 0) + amount;
     const status = newPaid >= parseFloat(inst.amount) - 0.01 ? "paid" : "partial";
-    await inst.update({
-      paidAmount: newPaid,
-      status,
-      paidDate: new Date().toISOString().slice(0, 10),
-      idempotencyKey: idempotencyKey || inst.idempotencyKey
+    const payDate = new Date().toISOString().slice(0, 10);
+
+    // Treasury account mirrors the GL cash account chosen by
+    // postInstallmentPayment (cashCode 1120/bank vs 1110/cash) so the treasury
+    // log row lands on the same account the journal debits.
+    const m = String(method).toLowerCase();
+    const treasuryAccount =
+      m.includes("card") || m.includes("bank") || m.includes("شبك") || m.includes("تحويل") ? "bank" : "cash";
+    const branchId =
+      req.branchId && String(req.branchId).startsWith("BR-") ? req.branchId : null;
+
+    // Phase 10O + 11D: record the installment collection ATOMICALLY — the
+    // installment update, the Payment row (so Customer Statement V2 picks it up
+    // as a credit), the GL journal, and a treasury CashTransaction all commit
+    // together. The journal posting is moved INSIDE the transaction (it used to
+    // be best-effort after commit): a posting failure now rolls back the whole
+    // collection, so we never leave a paid installment / Payment without a GL
+    // entry, nor a CashTransaction without its journalEntryId. The idempotency
+    // early-return above guarantees a replay never reaches this block, so
+    // nothing is duplicated. No Customer.balance writer is added. The
+    // CashTransaction is an operational treasury LOG only — it is linked to the
+    // EXISTING installment journal and NO postCashEntry is called, so there is
+    // no second journal and no double-posting (mirrors the POS/invoice-post
+    // pattern, not the supplier-payment pattern that is itself the journal).
+    let installmentPayment = null;
+    let journalEntry = null;
+    await models.sequelize.transaction(async (t) => {
+      await inst.update({
+        paidAmount: newPaid,
+        status,
+        paidDate: payDate,
+        idempotencyKey: idempotencyKey || inst.idempotencyKey
+      }, { transaction: t });
+
+      installmentPayment = await models.Payment.create({
+        id: `PAY-INST-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        companyId: inst.companyId,
+        branchId,
+        invoiceId: inst.invoiceId,
+        paymentMethod: method,
+        amount,
+        reference: req.body.reference || `Installment #${inst.sequence}`,
+        date: payDate,
+        notes: req.body.notes || `تحصيل قسط ${inst.id}`
+      }, { transaction: t });
+
+      journalEntry = await postingService.postInstallmentPayment(
+        inst.toJSON(), amount, method, actor, { transaction: t }
+      );
+
+      await models.CashTransaction.create({
+        id: `TX-INST-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        companyId: inst.companyId,
+        type: "cash_in",
+        account: treasuryAccount,
+        amount,
+        category: "تحصيل قسط",
+        description: `تحصيل قسط ${inst.id} — فاتورة ${inst.invoiceId}`,
+        reference: inst.invoiceId,
+        branch: inst.branch || "Main Branch",
+        branchId,
+        date: payDate,
+        createdBy: req.user ? req.user.id : "System",
+        status: "posted",
+        journalEntryId: journalEntry ? journalEntry.id : null
+      }, { transaction: t });
     });
 
     if (inst.customerId) {
@@ -7052,15 +7311,9 @@ router.post("/installments/:id/pay", authMiddleware, async (req, res, next) => {
       await recalculateCustomerNetPurchases(models, req.companyId, inst.customerId);
     }
 
-    let journalEntry = null;
-    try {
-      journalEntry = await postingService.postInstallmentPayment(inst.toJSON(), amount, method, actor);
-    } catch (postErr) {
-      logger.error(`[Installment] Failed to post payment ${inst.id}: ${postErr.message}`);
-    }
-
     const out = inst.toJSON();
     out.journalEntry = journalEntry;
+    out.payment = installmentPayment;
     return res.status(200).json({ success: true, ...out, data: out });
   } catch (error) {
     next(error);
@@ -7187,7 +7440,7 @@ router.post("/gift-vouchers/redeem", authMiddleware, async (req, res, next) => {
 const TREASURY_GL = { cash: "1110", bank: "1120" };
 
 // List treasury transactions (newest first), optional type/branch/account filters.
-router.get("/treasury/transactions", authMiddleware, async (req, res, next) => {
+router.get("/treasury/transactions", authMiddleware, requirePermission("treasury.view"), async (req, res, next) => {
   try {
     const where = { companyId: req.companyId };
     if (req.query.type) where.type = req.query.type;
@@ -7218,7 +7471,7 @@ router.get("/treasury/transactions", authMiddleware, async (req, res, next) => {
 });
 
 // Current treasury balances + today's movement totals.
-router.get("/treasury/summary", authMiddleware, async (req, res, next) => {
+router.get("/treasury/summary", authMiddleware, requirePermission("treasury.view"), async (req, res, next) => {
   try {
     const accounts = await models.Account.findAll({
       where: { companyId: req.companyId, code: ["1110", "1120"] }
@@ -7254,74 +7507,102 @@ router.get("/treasury/summary", authMiddleware, async (req, res, next) => {
 });
 
 // Create a treasury transaction (cash_in / cash_out / transfer) + auto-post journal.
-router.post("/treasury/transactions", authMiddleware, async (req, res, next) => {
+// Phase 11B: gated by treasury.update and made ATOMIC — the CashTransaction, its
+// GL posting (postCashEntry), the journalEntryId back-link, and the audit row are
+// created in ONE DB transaction. If posting fails, everything rolls back so no
+// orphan CashTransaction (without a journal) is ever left behind.
+router.post("/treasury/transactions", authMiddleware, requirePermission("treasury.update"), async (req, res, next) => {
   try {
     const b = req.body || {};
     const amount = Number(b.amount);
-    if (!amount || amount <= 0) {
+    if (!Number.isFinite(amount) || amount <= 0) {
       return res.status(422).json({ success: false, message: "المبلغ يجب أن يكون أكبر من صفر" });
     }
     const type = ["cash_in", "cash_out", "transfer"].includes(b.type) ? b.type : "cash_in";
     const id = `CT-${Date.now()}`;
     const now = new Date().toISOString().slice(0, 16).replace("T", " ");
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
-
-    // Idempotency: a retried/double-clicked treasury entry returns the
-    // original transaction instead of recording the cash movement twice.
     const idempotencyKey = req.headers["idempotency-key"] || b.idempotencyKey;
+
+    // Idempotency: a retried/double-clicked entry returns the original transaction
+    // instead of recording the cash movement twice. (No unique index yet, so a
+    // narrow race window remains between concurrent same-key requests.)
     if (idempotencyKey) {
       const existing = await models.CashTransaction.findOne({
         where: { idempotencyKey, companyId: req.companyId }
       });
       if (existing) {
         const out = existing.toJSON();
-        return res.status(200).json({ success: true, ...out, data: out });
+        return res.status(200).json({ success: true, ...out, data: out, meta: { idempotentReplay: true } });
       }
     }
 
-    const tx = await models.CashTransaction.create({
-      id,
-      companyId: req.companyId,
-      type,
-      account: b.account || "cash",
-      toAccount: b.toAccount || null,
-      amount,
-      category: b.category || null,
-      counterAccountCode: b.counterAccountCode || null,
-      description: b.description || null,
-      reference: b.reference || null,
-      branch: b.branch || req.branchId || "Main Branch",
-      date: b.date || now.slice(0, 10),
-      createdBy: actor,
-      status: "posted",
-      idempotencyKey: idempotencyKey || null
+    const result = await models.sequelize.transaction(async (t) => {
+      const tx = await models.CashTransaction.create({
+        id,
+        companyId: req.companyId,
+        type,
+        account: b.account || "cash",
+        toAccount: b.toAccount || null,
+        amount,
+        category: b.category || null,
+        counterAccountCode: b.counterAccountCode || null,
+        description: b.description || null,
+        reference: b.reference || null,
+        branch: b.branch || req.branchId || "Main Branch",
+        date: b.date || now.slice(0, 10),
+        createdBy: actor,
+        status: "posted",
+        idempotencyKey: idempotencyKey || null
+      }, { transaction: t });
+
+      // Post the GL entry inside the SAME transaction; any failure rolls back the
+      // CashTransaction too (no orphan cash movement without a journal).
+      const journalEntry = await postingService.postCashEntry(tx.toJSON(), actor, { transaction: t });
+      await tx.update({ journalEntryId: journalEntry.id }, { transaction: t });
+
+      await auditService.record(req.companyId, {
+        action: "treasury_transaction_created",
+        description: `Treasury ${type} ${amount} (${b.account || "cash"})${b.category ? " — " + b.category : ""}`,
+        user: actor,
+        userId: req.user ? req.user.id : null,
+        place: tx.branch,
+        branch: tx.branch,
+        sourceDocument: tx.id,
+        severity: "info",
+        after: JSON.stringify({
+          id: tx.id, type, account: tx.account, toAccount: tx.toAccount, amount,
+          category: tx.category, reference: tx.reference, journalEntryId: journalEntry.id,
+        }),
+      }, { transaction: t });
+
+      const out = tx.toJSON();
+      out.journalEntry = journalEntry;
+      return out;
     });
 
-    let journalEntry = null;
-    try {
-      journalEntry = await postingService.postCashEntry(tx.toJSON(), actor);
-      await tx.update({ journalEntryId: journalEntry.id });
-    } catch (postErr) {
-      logger.error(`[Treasury] Failed to post journal for ${id}: ${postErr.message}`);
-    }
-
-    const out = tx.toJSON();
-    out.journalEntry = journalEntry;
-    return res.status(201).json({ success: true, ...out, data: out });
+    return res.status(201).json({ success: true, ...result, data: result });
   } catch (error) {
     next(error);
   }
 });
 
 // Treasury closing — reconcile expected vs actual and record variance.
-router.post("/treasury/closing", authMiddleware, async (req, res, next) => {
+router.post("/treasury/closing", authMiddleware, requirePermission("treasury.update"), async (req, res, next) => {
   try {
     const b = req.body || {};
-    const account = b.account || "cash";
-    const glCode = TREASURY_GL[account] || "1110";
 
-    // Idempotency: a retried/double-clicked closing returns the original
-    // closing record instead of recording a second closing.
+    // Phase 11F: strict account validation — only the two treasury accounts are
+    // valid. An unknown account must NOT fall back to cash (1110) silently.
+    const account = b.account;
+    if (account !== "cash" && account !== "bank") {
+      return res.status(422).json({ success: false, message: "Account must be 'cash' or 'bank'" });
+    }
+    const glCode = TREASURY_GL[account];
+
+    // Idempotency: a retried/double-clicked closing returns the original closing
+    // record instead of recording a second one. Checked BEFORE the duplicate
+    // guard so a genuine replay (same key) returns 200, never 409.
     const idempotencyKey = req.headers["idempotency-key"] || b.idempotencyKey;
     if (idempotencyKey) {
       const existing = await models.CashTransaction.findOne({
@@ -7333,38 +7614,86 @@ router.post("/treasury/closing", authMiddleware, async (req, res, next) => {
       }
     }
 
+    // Phase 11F: strict actualBalance validation. The old `Number(x) || 0`
+    // turned a missing/blank/non-numeric value into 0 silently, recording a
+    // bogus variance (= -expected) and poisoning the next closing's opening.
+    // 0 is allowed ONLY when sent explicitly as a valid number.
+    if (b.actualBalance === undefined || b.actualBalance === null || b.actualBalance === "") {
+      return res.status(422).json({ success: false, message: "Actual balance must be a valid non-negative number" });
+    }
+    const actual = Number(b.actualBalance);
+    if (!Number.isFinite(actual) || actual < 0) {
+      return res.status(422).json({ success: false, message: "Actual balance must be a valid non-negative number" });
+    }
+
+    const now = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const closingDate = b.date || now.slice(0, 10);
+    const closingDay = String(closingDate).slice(0, 10);
+
+    // Phase 11F: prevent a second closing for the same account on the same day
+    // within the company (a genuine idempotent replay already returned above).
+    // Scoped by the stored `date` day — not createdAt.
+    const dupe = await models.CashTransaction.findOne({
+      where: {
+        companyId: req.companyId,
+        type: "closing",
+        account,
+        date: { [Op.like]: `${closingDay}%` }
+      }
+    });
+    if (dupe) {
+      return res.status(409).json({ success: false, message: "Treasury closing already exists for this account and date" });
+    }
+
     // Expected = current GL balance of the treasury account.
     const acc = await models.Account.findOne({ where: { companyId: req.companyId, code: glCode } });
     const expected = acc ? parseFloat(acc.balance || 0) : 0;
 
     // Opening = previous closing's actual balance for the same account (else 0).
+    // Scoped by account ONLY (not day) so cross-day chaining is preserved.
     const prev = await models.CashTransaction.findOne({
       where: { companyId: req.companyId, type: "closing", account },
       order: [["created_at", "DESC"]]
     });
     const opening = prev ? parseFloat(prev.actualBalance || 0) : 0;
 
-    const actual = Number(b.actualBalance) || 0;
     const variance = Math.round((actual - expected) * 100) / 100;
-    const now = new Date().toISOString().slice(0, 16).replace("T", " ");
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
 
-    const closing = await models.CashTransaction.create({
-      id: `CLS-${Date.now()}`,
-      companyId: req.companyId,
-      type: "closing",
-      account,
-      amount: actual,
-      description: b.description || `إغلاق خزينة ${account === "bank" ? "البنك" : "النقدية"}`,
-      branch: b.branch || req.branchId || "Main Branch",
-      date: b.date || now.slice(0, 10),
-      createdBy: actor,
-      status: "approved",
-      openingBalance: opening,
-      expectedBalance: expected,
-      actualBalance: actual,
-      variance,
-      idempotencyKey: idempotencyKey || null
+    const closingId = `CLS-${Date.now()}`;
+    const closing = await models.sequelize.transaction(async (t) => {
+      const row = await models.CashTransaction.create({
+        id: closingId,
+        companyId: req.companyId,
+        type: "closing",
+        account,
+        amount: actual,
+        description: b.description || `إغلاق خزينة ${account === "bank" ? "البنك" : "النقدية"}`,
+        branch: b.branch || req.branchId || "Main Branch",
+        date: closingDate,
+        createdBy: actor,
+        status: "approved",
+        openingBalance: opening,
+        expectedBalance: expected,
+        actualBalance: actual,
+        variance,
+        idempotencyKey: idempotencyKey || null
+      }, { transaction: t });
+
+      // Phase 11B: audit the closing (no GL variance posting — recorded only).
+      await auditService.record(req.companyId, {
+        action: "treasury_closing_created",
+        description: `Treasury closing ${account} — actual ${actual}, expected ${expected}, variance ${variance}`,
+        user: actor,
+        userId: req.user ? req.user.id : null,
+        place: row.branch,
+        branch: row.branch,
+        sourceDocument: row.id,
+        severity: variance === 0 ? "info" : "warning",
+        after: JSON.stringify({ id: row.id, account, openingBalance: opening, expectedBalance: expected, actualBalance: actual, variance }),
+      }, { transaction: t });
+
+      return row;
     });
 
     return res.status(201).json({
@@ -7378,7 +7707,7 @@ router.post("/treasury/closing", authMiddleware, async (req, res, next) => {
 });
 
 // List closing records.
-router.get("/treasury/closings", authMiddleware, async (req, res, next) => {
+router.get("/treasury/closings", authMiddleware, requirePermission("treasury.view"), async (req, res, next) => {
   try {
     const rows = await models.CashTransaction.findAll({
       where: { companyId: req.companyId, type: "closing" },

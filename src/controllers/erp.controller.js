@@ -394,6 +394,21 @@ class ErpController {
         companyId: req.companyId
       };
 
+      // Phase 10M: Supplier.due is system-managed (frozen) and must never be set
+      // from a request body. Strip it so a new supplier starts at the column
+      // default (0); the supplier statement is the source of truth for balance.
+      if (this.model.name === "Supplier") {
+        delete payload.due;
+      }
+
+      // Phase 10R: Customer.balance is maintained by business flows (sales/
+      // payments/exchange/gold-pool), never by manual CRUD. Strip it from the
+      // create body so a new customer starts at the column default (0); the
+      // customer statement is the source of truth for the computed balance.
+      if (this.model.name === "Customer") {
+        delete payload.balance;
+      }
+
       if (this.model.name === "Asset") {
         normalizeAssetCreatePayload(payload, req);
       }
@@ -477,7 +492,21 @@ class ErpController {
       }
 
       const originalState = item.toJSON();
-      await item.update(req.body);
+
+      // Phase 10M: Supplier.due is system-managed (frozen) — silently ignore any
+      // `due` in the body so it can never be edited via generic CRUD.
+      // Phase 10R: Customer.balance is likewise maintained only by business
+      // flows — silently ignore any `balance` in the body.
+      let updateBody = req.body;
+      if (this.model.name === "Supplier" && Object.prototype.hasOwnProperty.call(req.body || {}, "due")) {
+        updateBody = { ...updateBody };
+        delete updateBody.due;
+      }
+      if (this.model.name === "Customer" && Object.prototype.hasOwnProperty.call(req.body || {}, "balance")) {
+        updateBody = { ...updateBody };
+        delete updateBody.balance;
+      }
+      await item.update(updateBody);
 
       logger.info(`${this.model.name} updated: ${item.id}`);
       await this.logAudit(req, "UPDATE", item.id, originalState, item.toJSON());
