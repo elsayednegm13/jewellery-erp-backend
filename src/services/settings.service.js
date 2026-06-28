@@ -25,6 +25,13 @@ const DEFAULTS = {
   purchaseVatRecoverableDefault: true,
   inputVatAccountCode: "1400",
   rcmOutputAccountCode: "2210",
+  // Phase 15C foundation — gold cost config. Read-only foundation: NO consumer
+  // reads these yet (snapshot/calculation land in 15D/15E).
+  goldCostSource: "hybrid", // manual | gold_center | hybrid
+  goldCostWeightBasis: "net", // net | gross
+  allowGoldCostOverride: true,
+  goldCostOverridePermission: "goldCost.override",
+  nonRecoverableVatCapitalization: true,
   currency: "AED",
   decimalPrecision: 2,
   paymentMethods: ["cash", "card", "transfer", "split", "installment", "deposit"],
@@ -119,6 +126,13 @@ async function getCompanySettings(companyId, options = {}) {
     purchaseVatRecoverableDefault: toBool(raw.purchaseVatRecoverableDefault, DEFAULTS.purchaseVatRecoverableDefault),
     inputVatAccountCode: pick("inputVatAccountCode", String, DEFAULTS.inputVatAccountCode),
     rcmOutputAccountCode: pick("rcmOutputAccountCode", String, DEFAULTS.rcmOutputAccountCode),
+    // Phase 15C foundation — gold cost config (read-only; no consumer reads
+    // these yet, calculation/snapshot land in 15D/15E).
+    goldCostSource: pick("goldCostSource", String, DEFAULTS.goldCostSource),
+    goldCostWeightBasis: pick("goldCostWeightBasis", String, DEFAULTS.goldCostWeightBasis),
+    allowGoldCostOverride: toBool(raw.allowGoldCostOverride, DEFAULTS.allowGoldCostOverride),
+    goldCostOverridePermission: pick("goldCostOverridePermission", String, DEFAULTS.goldCostOverridePermission),
+    nonRecoverableVatCapitalization: toBool(raw.nonRecoverableVatCapitalization, DEFAULTS.nonRecoverableVatCapitalization),
     currency: (() => {
       const { normalizeCurrencyCode } = require("../utils/currency");
       const cur = company?.currency || pick("currency", String, DEFAULTS.currency);

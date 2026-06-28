@@ -9,11 +9,12 @@ const journalService = require("../services/journal.service");
 const goldService = require("../services/gold.service");
 const settingsService = require("../services/settings.service");
 const salesService = require("../services/sales.service");
+const goldCostService = require("../services/gold-cost.service");
 const auditService = require("../services/audit.service");
 const { emitEntityChanged } = require("../services/realtime-helper.service");
 const notificationService = require("../services/notification.service");
 const logger = require("../utils/logger");
-const { ValidationError, NotFoundError, ConflictError } = require("../utils/errors");
+const { ValidationError, NotFoundError, ConflictError, ForbiddenError } = require("../utils/errors");
 const uploadMiddleware = require("../middleware/upload.middleware");
 const { moveUploadedFileSafe } = require("../utils/file-move");
 
@@ -3662,8 +3663,97 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
     const createdItems = [];
     let hasProducts = false;
 
+    // Phase 15E — gold cost snapshot wiring. Records a Gold-Center snapshot +
+    // metadata alongside the UNCHANGED legacy cost (book cost / posting are not
+    // touched here). `manual` mode never needs a price; hybrid/gold_center try to
+    // compute and degrade gracefully when price/karat/weight are missing
+    // (strict enforcement is deferred). Prices are cached per karat.
+    const goldCostSource = settings.goldCostSource || "hybrid";
+    const goldWeightBasis = settings.goldCostWeightBasis || "net";
+    const karatPriceCache = new Map();
+    const perGramFor = async (karat) => {
+      if (goldCostSource === "manual" || karat == null || karat === "") return null;
+      const key = String(karat);
+      if (karatPriceCache.has(key)) return karatPriceCache.get(key);
+      let val = null;
+      try {
+        const p = await effectiveKaratPrice(req.companyId, settings.currency, karat);
+        if (p != null && Number.isFinite(Number(p)) && Number(p) > 0) val = Number(p);
+      } catch { val = null; }
+      karatPriceCache.set(key, val);
+      return val;
+    };
+
+    // Phase 15F — controlled override governance. An override is an EXPLICIT
+    // request action (body/item.goldCostOverride). Without it the 15E snapshot is
+    // recorded as-is (no governance). A genuine divergence from the computed
+    // reference requires: allowGoldCostOverride + the override permission + a
+    // reason, and is audited (gold_cost.override). Adopting the computed value is
+    // NOT an override. NOTHING legacy (Asset.cost/averageCost/posting) changes.
+    const permissionService = require("../services/permission.service");
+    const overridePermName = settings.goldCostOverridePermission || "goldCost.override";
+    let _permChecked = false, _permVal = false;
+    const hasOverridePerm = async () => {
+      if (!_permChecked) { _permVal = await permissionService.userHasPermission(req.user, overridePermName); _permChecked = true; }
+      return _permVal;
+    };
+    const overrideAudited = new Set();
+    const governSnapshot = async (builtSnap, item, itemIndex) => {
+      if (goldCostSource === "manual") return builtSnap;
+      const overrideInput = item.goldCostOverride ?? (normalizedItems.length === 1 ? body.goldCostOverride : undefined);
+      const cls = goldCostService.classifyOverride({ overrideInput, computedGoldCost: builtSnap.computedGoldCost });
+      if (!cls.provided) return builtSnap;
+      if (cls.invalid) throw new ValidationError("Gold cost override must be a non-negative number");
+      if (!cls.isOverride) return goldCostService.applyOverride(builtSnap, { value: cls.value, isOverride: false });
+      // genuine override → governance
+      if (settings.allowGoldCostOverride === false) throw new ForbiddenError("Gold cost override is disabled for this company");
+      if (!(await hasOverridePerm())) throw new ForbiddenError("You do not have permission to override gold cost");
+      const reason = item.overrideReason ?? body.goldCostOverrideReason;
+      if (!reason || !String(reason).trim()) throw new ValidationError("Override reason is required to change the gold cost");
+      if (!overrideAudited.has(itemIndex)) {
+        overrideAudited.add(itemIndex);
+        await auditService.record(req.companyId, {
+          action: "gold_cost.override",
+          description: `Gold cost override on PO ${purchaseOrderId} item ${itemIndex + 1}`,
+          user: actor,
+          userId: req.user ? req.user.id : null,
+          place: branch.name,
+          branch: branch.name,
+          sourceDocument: purchaseOrderId,
+          severity: "warning",
+          before: JSON.stringify({ computedGoldCost: builtSnap.computedGoldCost, finalBefore: builtSnap.finalPurchaseCost }),
+          after: JSON.stringify({ finalPurchaseCost: cls.value, reason: String(reason).trim() }),
+        }, { transaction: t });
+      }
+      return goldCostService.applyOverride(builtSnap, { value: cls.value, isOverride: true, reason: String(reason).trim(), by: req.user ? req.user.id : "System" });
+    };
+
+    // Phase 15G — non-recoverable VAT capitalisation (forward-only). When VAT is
+    // non-recoverable & exclusive, the legacy unit cost is net while GL inventory
+    // is gross — so we add the allocated VAT into the BOOK cost (Asset.cost /
+    // Product.averageCost input / StockMovement cost) to reconcile with GL.
+    // Inclusive VAT is already gross in the entered cost (no change). Recoverable
+    // / RCM / no-VAT keep the legacy cost. computedGoldCost stays reference-only.
+    const capitalizeNrVat = vatRequested && !isRcmSnap && isRecoverableSnap === false
+      && !taxIncludedSnap && Number(inputVatSnap) > 0 && settings.nonRecoverableVatCapitalization !== false;
+    const nrVatPerLine = capitalizeNrVat
+      ? goldCostService.allocateNonRecoverableVat({ lineNetCosts: normalizedItems.map((it) => it.totalCost), inputVatAmount: inputVatSnap })
+      : normalizedItems.map(() => 0);
+
     for (let itemIndex = 0; itemIndex < normalizedItems.length; itemIndex++) {
       const item = normalizedItems[itemIndex];
+      // Phase 15G — capitalised cost (= legacy + allocated non-recoverable VAT;
+      // equals legacy when capitalisation does not apply).
+      const allocVatLine = nrVatPerLine[itemIndex] || 0;
+      const allocVatPerUnit = item.quantity > 0 ? allocVatLine / item.quantity : 0;
+      const capUnitCost = goldCostService.round4(item.unitCost + allocVatPerUnit);
+      const capLineCost = goldCostService.round4(item.totalCost + allocVatLine);
+      // Per-unit gold weight by the configured basis (net default).
+      const perUnitGoldWeight = goldWeightBasis === "gross"
+        ? (Number(item.weightPerUnit ?? item.netWeight) || 0)
+        : (Number(item.goldWeight ?? item.netWeight ?? item.weightPerUnit) || 0);
+      const itemKarat = item.karat == null || item.karat === "" ? null : item.karat;
+      const itemPerGram = await perGramFor(itemKarat);
       if (item.productCode) {
         hasProducts = true;
         const productCode = String(item.productCode).trim();
@@ -3676,7 +3766,9 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
         const currentQty = product ? Number(product.quantityOnHand) : 0;
         const currentAvgCost = product ? Number(product.averageCost) : 0;
         const newQty = currentQty + item.quantity;
-        const newAvgCost = newQty > 0 ? ((currentAvgCost * currentQty) + (item.unitCost * item.quantity)) / newQty : item.unitCost;
+        // Phase 15G — weighted-average input uses the capitalised unit cost
+        // (= legacy unit cost unless non-recoverable VAT capitalisation applies).
+        const newAvgCost = newQty > 0 ? ((currentAvgCost * currentQty) + (capUnitCost * item.quantity)) / newQty : capUnitCost;
         const totalWeight = product ? Number(product.totalWeight) : 0;
         const newWeight = totalWeight + item.totalWeight;
 
@@ -3687,7 +3779,7 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
             totalWeight: newWeight,
             averageCost: newAvgCost,
             averageUnitWeight: newQty > 0 ? (newWeight / newQty) : item.weightPerUnit,
-            unitCost: item.unitCost,
+            unitCost: capUnitCost,
             salePrice: item.price || product.salePrice
           }, { transaction: t, skipAdjustmentHook: true });
         } else {
@@ -3708,8 +3800,8 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
             quantityReserved: 0,
             totalWeight: item.totalWeight,
             averageUnitWeight: item.weightPerUnit,
-            unitCost: item.unitCost,
-            averageCost: item.unitCost,
+            unitCost: capUnitCost,
+            averageCost: capUnitCost,
             salePrice: item.price,
             isActive: true
           }, { transaction: t });
@@ -3726,8 +3818,9 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
           quantityOut: 0,
           weightIn: item.totalWeight,
           weightOut: 0,
-          unitCost: item.unitCost,
-          totalCost: item.totalCost,
+          // Phase 15G — capitalised cost (legacy unless non-recoverable VAT).
+          unitCost: capUnitCost,
+          totalCost: capLineCost,
           referenceType: "PurchaseOrder",
           referenceId: purchaseOrderId,
           supplierId,
@@ -3747,12 +3840,26 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
           unit: item.unit || "قطعة",
           unitPrice: item.unitCost,
           total: item.totalCost,
-          receivedQuantity: item.quantity
+          receivedQuantity: item.quantity,
+          // Phase 15E snapshot + 15F governed override + 15G capitalised book cost
+          // (legacy unitPrice/total unchanged; finalPurchaseCost = capitalised).
+          ...(await governSnapshot(goldCostService.buildGoldCostSnapshot({
+            goldCostSource, weight: perUnitGoldWeight * item.quantity, karat: itemKarat,
+            perGram: itemPerGram, currentCost: capLineCost,
+          }), item, itemIndex))
         }, { transaction: t });
 
         createdAssets.push(product.toJSON());
         createdItems.push(poItem.toJSON());
       } else {
+        // Phase 15F — one governed snapshot per item (item.cost === item.unitCost
+        // for the asset path, so it applies to both the Asset and its poItem).
+        // Phase 15G — currentCost = capitalised per-piece cost (legacy unless
+        // non-recoverable VAT capitalisation applies).
+        const assetSnap = await governSnapshot(goldCostService.buildGoldCostSnapshot({
+          goldCostSource, weight: perUnitGoldWeight, karat: itemKarat,
+          perGram: itemPerGram, currentCost: capUnitCost,
+        }), item, itemIndex);
         for (let qtyIndex = 0; qtyIndex < item.quantity; qtyIndex++) {
           const sequence = item.quantity > 1 ? `-${qtyIndex + 1}` : "";
           const assetId = item.quantity === 1 && item.assetId
@@ -3771,14 +3878,18 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
             netWeight: item.netWeight,
             goldWeight: item.goldWeight || item.netWeight,
             price: item.price,
-            cost: item.cost,
+            // Phase 15G — capitalised book cost (legacy unless non-recoverable VAT).
+            cost: capUnitCost,
             branch: branch.name,
             branchId: branch.id,
             location: item.location,
             status: "available",
             barcode,
             source: "supplier_purchase",
-            notes: [item.notes, body.notes, `Supplier: ${supplier.name}`, `Purchase: ${purchaseOrderId}`, drcNote].filter(Boolean).join(" | ")
+            notes: [item.notes, body.notes, `Supplier: ${supplier.name}`, `Purchase: ${purchaseOrderId}`, drcNote].filter(Boolean).join(" | "),
+            // Phase 15E snapshot + Phase 15F governed override (legacy Asset.cost
+            // unchanged).
+            ...assetSnap
           }, { transaction: t });
           createdAssets.push(asset.toJSON());
 
@@ -3804,7 +3915,10 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
             unit: item.unit || "قطعة",
             unitPrice: item.unitCost,
             total: item.unitCost,
-            receivedQuantity: 1
+            receivedQuantity: 1,
+            // Phase 15E snapshot + Phase 15F governed override (same governed
+            // snapshot as the asset; item.cost === item.unitCost here).
+            ...assetSnap
           }, { transaction: t });
           createdItems.push(poItem.toJSON());
         }
@@ -4184,6 +4298,12 @@ router.get("/settings", authMiddleware, requirePermission("settings.view"), asyn
         purchaseVatRecoverableDefault: normalized.purchaseVatRecoverableDefault,
         inputVatAccountCode: normalized.inputVatAccountCode,
         rcmOutputAccountCode: normalized.rcmOutputAccountCode,
+        // Phase 15C foundation — gold cost config (read-only; no consumer yet).
+        goldCostSource: normalized.goldCostSource,
+        goldCostWeightBasis: normalized.goldCostWeightBasis,
+        allowGoldCostOverride: normalized.allowGoldCostOverride,
+        goldCostOverridePermission: normalized.goldCostOverridePermission,
+        nonRecoverableVatCapitalization: normalized.nonRecoverableVatCapitalization,
         lowStockThreshold: normalized.lowStockThreshold,
         decimalPrecision: normalized.decimalPrecision,
         installment: normalized.installment
@@ -4218,6 +4338,21 @@ router.patch("/settings", authMiddleware, requirePermission("settings.update"), 
       if (body[k] !== undefined && !isNonEmptyStr(body[k])) return reject(`${k} must be a non-empty string`);
     }
 
+    // Phase 15C: validate the gold-cost foundation keys when present (scoped;
+    // read-only foundation — no calculation consumes them yet).
+    if (body.goldCostSource !== undefined && !["manual", "gold_center", "hybrid"].includes(body.goldCostSource)) {
+      return reject("goldCostSource must be one of: manual, gold_center, hybrid");
+    }
+    if (body.goldCostWeightBasis !== undefined && !["net", "gross"].includes(body.goldCostWeightBasis)) {
+      return reject("goldCostWeightBasis must be one of: net, gross");
+    }
+    for (const k of ["allowGoldCostOverride", "nonRecoverableVatCapitalization"]) {
+      if (body[k] !== undefined && !isBoolVal(body[k])) return reject(`${k} must be a boolean`);
+    }
+    if (body.goldCostOverridePermission !== undefined && !isNonEmptyStr(body.goldCostOverridePermission)) {
+      return reject("goldCostOverridePermission must be a non-empty string");
+    }
+
     const companyUpdates = {};
     for (const key of ["businessName", "logo", "currency", "branchName", "taxNumber"]) {
       if (body[key] !== undefined) companyUpdates[key] = body[key];
@@ -4230,7 +4365,7 @@ router.patch("/settings", authMiddleware, requirePermission("settings.update"), 
       await models.Company.update(companyUpdates, { where: { id: req.companyId } });
     }
 
-    const settingKeys = ["language", "theme", "vatRate", "goldKaratDefaults", "goldPricingMode", "accountingByKarat", "invoicePrefix", "invoiceNumbering", "dateFormat", "decimalPrecision", "print", "notifications", "lowStockThreshold", "receipt", "allowZeroDownPayment", "paymentMethods", "installmentEnabled", "installmentDefaultFrequency", "installmentMaxCount", "installmentMinDownPaymentPercent", "barcode", "vatEnabled", "purchaseVatRate", "purchaseTaxIncludedDefault", "purchaseVatRecoverableDefault", "inputVatAccountCode", "rcmOutputAccountCode"];
+    const settingKeys = ["language", "theme", "vatRate", "goldKaratDefaults", "goldPricingMode", "accountingByKarat", "invoicePrefix", "invoiceNumbering", "dateFormat", "decimalPrecision", "print", "notifications", "lowStockThreshold", "receipt", "allowZeroDownPayment", "paymentMethods", "installmentEnabled", "installmentDefaultFrequency", "installmentMaxCount", "installmentMinDownPaymentPercent", "barcode", "vatEnabled", "purchaseVatRate", "purchaseTaxIncludedDefault", "purchaseVatRecoverableDefault", "inputVatAccountCode", "rcmOutputAccountCode", "goldCostSource", "goldCostWeightBasis", "allowGoldCostOverride", "goldCostOverridePermission", "nonRecoverableVatCapitalization"];
     for (const key of settingKeys) {
       if (body[key] === undefined) continue;
       const [row, created] = await models.Setting.findOrCreate({
@@ -5966,15 +6101,34 @@ router.post("/sales/invoices/draft", authMiddleware, requirePermission("sales.cr
       postedAt: now
     });
 
-    // Persist line items and mark the sold assets.
+    // Phase 16B — resolve COGS book cost SERVER-SIDE (Asset.cost / Product
+    // .averageCost). Never trust the client-supplied item.cost. Selling fields
+    // (price/qty/discount/tax) are kept from the request unchanged.
+    const safeItems = [];
     for (const item of items) {
+      const refId = item.assetId || item.id;
+      let serverCost = 0;
+      if (refId) {
+        const asset = await models.Asset.findOne({ where: { id: refId, companyId: req.companyId } });
+        if (asset) {
+          serverCost = Number(asset.cost) || 0;
+        } else {
+          const product = await models.Product.findOne({ where: { id: refId, companyId: req.companyId } });
+          if (product) serverCost = Number(product.averageCost) || Number(product.unitCost) || 0;
+        }
+      }
+      safeItems.push({ ...item, cost: serverCost });
+    }
+
+    // Persist line items (server book cost) and mark the sold assets.
+    for (const item of safeItems) {
       await models.InvoiceItem.create({
         invoiceId: id,
         assetId: item.assetId || item.id,
         name: item.name || "",
         quantity: item.quantity || 1,
         price: item.price || 0,
-        cost: item.cost || 0,
+        cost: item.cost,
         weight: item.weight || item.grossWeight || 0,
         karat: item.karat || null,
         discount: item.discount || 0,
@@ -6000,7 +6154,7 @@ router.post("/sales/invoices/draft", authMiddleware, requirePermission("sales.cr
       } else if (inv.type === "deposit") {
         journalEntry = await postingService.postDepositEntry(inv, actor);
       } else {
-        journalEntry = await postingService.postInvoiceEntry(inv, items, actor);
+        journalEntry = await postingService.postInvoiceEntry(inv, safeItems, actor);
       }
     } catch (postErr) {
       // Never let a posting issue lose the sale; surface it instead.
@@ -6103,7 +6257,9 @@ async function buildDraftItems(items, companyId, transaction) {
       name: it.name || asset.name || "",
       quantity: it.quantity || 1,
       price: Number(it.price) || 0,
-      cost: Number(it.cost) || 0,
+      // Phase 16B — COGS book cost is server-sourced (Asset.cost), never the
+      // client-supplied it.cost. (buildDraftItems is asset-only.)
+      cost: Number(asset.cost) || 0,
       weight: Number(it.weight || it.grossWeight) || 0,
       karat: it.karat ?? null,
       discount: Number(it.discount) || 0,
@@ -6513,6 +6669,27 @@ router.post("/sales/invoices/:id/post", authMiddleware, requirePermission("sales
     }
 
     // Journal entry (balanced; failure throws → whole post rolls back).
+    // Phase 16B — recompute COGS book cost SERVER-SIDE at post time (defense-in-
+    // depth; also protects drafts saved before this fix). The stored
+    // InvoiceItem.cost is NOT trusted for COGS. assetId may reference an Asset or
+    // (for quantity products) a Product. No silent client/stored fallback.
+    const safeDraftItems = [];
+    for (const di of draftItems) {
+      const d = di.toJSON();
+      let serverCost = null;
+      if (d.assetId) {
+        const asset = await models.Asset.findOne({ where: { id: d.assetId, companyId: req.companyId }, transaction: t });
+        if (asset) {
+          serverCost = Number(asset.cost) || 0;
+        } else {
+          const product = await models.Product.findOne({ where: { id: d.assetId, companyId: req.companyId }, transaction: t });
+          if (product) serverCost = Number(product.averageCost) || Number(product.unitCost) || 0;
+        }
+      }
+      if (serverCost === null) throw new ValidationError(`تعذّر تحديد تكلفة الصنف ${d.assetId || d.id} من السيرفر للترحيل`);
+      safeDraftItems.push({ ...d, cost: serverCost });
+    }
+
     const invPlain = invoice.toJSON();
     invPlain.downPayment = Number(invoice.downPayment) || 0;
     let journalEntry;
@@ -6520,7 +6697,7 @@ router.post("/sales/invoices/:id/post", authMiddleware, requirePermission("sales
       if (type === "deposit") {
         journalEntry = await postingService.postDepositEntry(invPlain, actor, { transaction: t });
       } else {
-        journalEntry = await postingService.postInvoiceEntry(invPlain, draftItems.map((d) => d.toJSON()), actor, { transaction: t });
+        journalEntry = await postingService.postInvoiceEntry(invPlain, safeDraftItems, actor, { transaction: t });
       }
     } catch (postErr) {
       logger.error(`[Posting] Failed to post journal for draft ${invoice.id}: ${postErr.message}`);

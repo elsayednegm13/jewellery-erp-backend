@@ -50,7 +50,22 @@ const PurchaseOrderItem = sequelize.define("PurchaseOrderItem", {
     type: DataTypes.INTEGER,
     field: "received_quantity",
     defaultValue: 0
-  }
+  },
+  // Phase 15D — gold cost snapshot / cost metadata. Forward-only foundation:
+  // no calculation/override/COGS reads these yet (15E/15F/15G). Computed fields
+  // are nullable (no default 0) so legacy rows never look like real snapshots.
+  goldPriceSnapshot: { type: DataTypes.DECIMAL(15, 4), allowNull: true, field: "gold_price_snapshot" },
+  goldPriceSource: { type: DataTypes.STRING, allowNull: true, field: "gold_price_source" },
+  goldPriceKarat: { type: DataTypes.STRING, allowNull: true, field: "gold_price_karat" },
+  goldPriceAt: { type: DataTypes.DATE, allowNull: true, field: "gold_price_at" },
+  computedGoldCost: { type: DataTypes.DECIMAL(15, 4), allowNull: true, field: "computed_gold_cost" },
+  finalPurchaseCost: { type: DataTypes.DECIMAL(15, 4), allowNull: true, field: "final_purchase_cost" },
+  costSource: { type: DataTypes.STRING, allowNull: false, defaultValue: "manual", field: "cost_source" },
+  costOverridden: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false, field: "cost_overridden" },
+  overrideReason: { type: DataTypes.TEXT, allowNull: true, field: "override_reason" },
+  overrideBy: { type: DataTypes.STRING, allowNull: true, field: "override_by" },
+  overrideAt: { type: DataTypes.DATE, allowNull: true, field: "override_at" },
+  netGoldWeight: { type: DataTypes.DECIMAL(15, 4), allowNull: true, field: "net_gold_weight" }
 }, {
   tableName: "purchase_order_items",
   timestamps: true,
