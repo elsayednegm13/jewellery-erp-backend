@@ -82,7 +82,10 @@ async function cogsOf(invId) {
     check(approx(Number(it2.cost), 1000), "draft: InvoiceItem.cost = 1000 (asset.cost, NOT client 0)");
     const c2 = await cogsOf(draftId);
     check(c2 && approx(c2.m["5000"].debit, 1000) && approx(c2.m["1200"].credit, 1000) && c2.balanced, "draft: COGS=1000, inventory credit=1000, balanced");
-    check(approx(Number(r2.json.total ?? r2.json.data?.total), 2000), "draft: selling total unchanged (2000)");
+    // Phase 18B-1: total is now server-computed (price 2000 + 5% default VAT = 2100);
+    // the selling price intent (subtotal base 2000) is unchanged.
+    const inv2 = await Invoice.findByPk(draftId);
+    check(approx(Number(inv2.total), 2100) && approx(Number(inv2.subtotal), 2000), "draft: total server-computed (2100 = 2000 + 5% VAT), subtotal base 2000");
 
     console.log("\n2) /sales/invoices/drafts (buildDraftItems) stores server cost:");
     const a3 = await mkAsset(1200);
@@ -110,7 +113,14 @@ async function cogsOf(invId) {
     const safe = async (label, fn) => { try { await fn(); } catch (e) { console.error(`CLEANUP WARNING (${label}):`, e.message); } };
     await safe("installments", () => Installment.destroy({ where: { companyId: CO } }));
     await safe("asset events", () => AssetEvent.destroy({ where: {}, force: true }).catch(() => {}));
-    await safe("invoice items", () => InvoiceItem.destroy({ where: {}, force: true }).catch(() => {}));
+    await safe("invoice items", async () => {
+      // Scoped: delete only THIS test company's invoice items (invoice_items has
+      // no companyId; resolve via the company's invoices). A global where:{} wipe
+      // would destroy shared dev data — see Phase 18F/18G.
+      const invs = await Invoice.findAll({ where: { companyId: CO }, attributes: ["id"], paranoid: false });
+      const ids = invs.map((i) => i.id).filter(Boolean);
+      if (ids.length) await InvoiceItem.destroy({ where: { invoiceId: ids }, force: true });
+    });
     await safe("invoices", () => Invoice.destroy({ where: { companyId: CO }, force: true }));
     await safe("assets", () => Asset.destroy({ where: { companyId: CO }, force: true }));
     await safe("stock movements", () => StockMovement.destroy({ where: { companyId: CO } }));

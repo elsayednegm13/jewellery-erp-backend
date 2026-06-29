@@ -138,7 +138,14 @@ async function sellAsset(asset, salePrice) {
     const safe = async (label, fn) => { try { await fn(); } catch (e) { console.error(`CLEANUP WARNING (${label}):`, e.message); } };
     for (const co of [CO, CO2]) {
       await safe("asset events", () => AssetEvent.destroy({ where: {}, force: true }).catch(() => {}));
-      await safe("invoice items", () => InvoiceItem.destroy({ where: {}, force: true }).catch(() => {}));
+      await safe("invoice items", async () => {
+        // Scoped: delete only THIS test company's invoice items (invoice_items
+        // has no companyId; resolve via the company's invoices). A global
+        // where:{} wipe would destroy shared dev data — see Phase 18F/18G.
+        const invs = await Invoice.findAll({ where: { companyId: co }, attributes: ["id"], paranoid: false });
+        const ids = invs.map((i) => i.id).filter(Boolean);
+        if (ids.length) await InvoiceItem.destroy({ where: { invoiceId: ids }, force: true });
+      });
       await safe("invoices", () => Invoice.destroy({ where: { companyId: co }, force: true }));
       await safe("assets", () => Asset.destroy({ where: { companyId: co }, force: true }));
       await safe("stock movements", () => StockMovement.destroy({ where: { companyId: co } }));

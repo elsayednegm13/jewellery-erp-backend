@@ -10,6 +10,7 @@ const goldService = require("../services/gold.service");
 const settingsService = require("../services/settings.service");
 const salesService = require("../services/sales.service");
 const goldCostService = require("../services/gold-cost.service");
+const supplierPaymentState = require("../services/supplier-payment-state.service");
 const auditService = require("../services/audit.service");
 const { emitEntityChanged } = require("../services/realtime-helper.service");
 const notificationService = require("../services/notification.service");
@@ -323,7 +324,12 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
     // draft invoice_numbers too so POS and post-draft never reuse a number.
     // (Same INV-prefix-NNNNNN result as before; just collision-safe.)
     const prefix = settings.invoicePrefix || "INV-2026";
-    const invoiceId = await nextInvoiceNumber(req.companyId, prefix, t);
+    // Phase 16D — separate the customer-facing number (company-scoped, human)
+    // from the technical primary key (globally unique). Previously the PK reused
+    // the company-scoped number, so a second company's first POS sale collided on
+    // invoices_pkey. invoiceNumber keeps its existing format/value.
+    const invoiceNumber = await nextInvoiceNumber(req.companyId, prefix, t);
+    const invoiceId = `INV-ID-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     // 8. Create Invoice
     const nowStr = new Date().toISOString().slice(0, 16).replace("T", " ");
@@ -358,7 +364,7 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
       notes: body.notes || "",
       idempotencyKey: idempotencyKey || null,
       postingStatus: "posted", // immediate-post path (POS checkout)
-      invoiceNumber: invoiceId, // customer-facing number == id for POS sales
+      invoiceNumber, // customer-facing, company-scoped human number (≠ technical id)
       postedAt: nowStr
     }, { transaction: t });
 
@@ -441,7 +447,7 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
           date: nowStr.slice(0, 10),
           user: actor,
           branch: branchRecord.name,
-          note: `تم البيع بموجب الفاتورة رقم ${invoiceId}`,
+          note: `تم البيع بموجب الفاتورة رقم ${invoiceNumber}`,
           sourceDocument: invoiceId,
           beforeState: "status:available",
           afterState: "status:sold"
@@ -463,7 +469,7 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
           amount: split.amount,
           reference: split.reference || "",
           date: body.date || nowStr.slice(0, 10),
-          notes: `دفع مجزأ للفاتورة ${invoiceId}`
+          notes: `دفع مجزأ للفاتورة ${invoiceNumber}`
         }, { transaction: t });
         paymentsCreated.push(payment.toJSON());
       }
@@ -479,7 +485,7 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
           amount: downPayment,
           reference: "",
           date: body.date || nowStr.slice(0, 10),
-          notes: `دفعة أولى للفاتورة ${invoiceId}`
+          notes: `دفعة أولى للفاتورة ${invoiceNumber}`
         }, { transaction: t });
         paymentsCreated.push(payment.toJSON());
       }
@@ -493,7 +499,7 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
         amount: paidAmount,
         reference: body.reference || "",
         date: body.date || nowStr.slice(0, 10),
-        notes: paymentMethod === "deposit" ? `عربون للفاتورة ${invoiceId}` : `سداد كامل للفاتورة ${invoiceId}`
+        notes: paymentMethod === "deposit" ? `عربون للفاتورة ${invoiceNumber}` : `سداد كامل للفاتورة ${invoiceNumber}`
       }, { transaction: t });
       paymentsCreated.push(payment.toJSON());
     }
@@ -549,7 +555,7 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
         account,
         amount: pay.amount,
         category: paymentMethod === "deposit" ? "عربون عميل" : "مبيعات مجوهرات",
-        description: `مقبوضات فاتورة مبيعات رقم ${invoiceId} - طريقة الدفع: ${pay.paymentMethod}`,
+        description: `مقبوضات فاتورة مبيعات رقم ${invoiceNumber} - طريقة الدفع: ${pay.paymentMethod}`,
         reference: invoiceId,
         date: body.date || nowStr.slice(0, 10),
         status: "posted",
@@ -577,7 +583,7 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
     // data object, so the audit row is part of `t` and rolls back if checkout fails.
     await auditService.record(req.companyId, {
       action: "pos.checkout",
-      description: `تم إتمام عملية بيع فاتورة رقم ${invoiceId} بمبلغ ${total} بفرع ${branchRecord.name}`,
+      description: `تم إتمام عملية بيع فاتورة رقم ${invoiceNumber} بمبلغ ${total} بفرع ${branchRecord.name}`,
       user: actor,
       userId: req.user ? req.user.id : null,
       place: branchRecord.name,
@@ -608,7 +614,7 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
     });
     await notificationService.createNotification(req.companyId, {
       title: "عملية بيع جديدة",
-      message: `تم إنشاء الفاتورة ${invoiceId} للعميل ${customer.name} بقيمة ${total} ${notificationCurrency}.`,
+      message: `تم إنشاء الفاتورة ${invoiceNumber} للعميل ${customer.name} بقيمة ${total} ${notificationCurrency}.`,
       type: "success",
       entityType: "Invoice",
       entityId: invoiceId
@@ -659,7 +665,9 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
     const originalInvoice = await models.Invoice.findOne({
       where: { id: originalInvoiceId, companyId: req.companyId },
       include: [{ model: models.InvoiceItem, as: "items" }],
-      lock: true,
+      // Lock only the invoices row, not the LEFT-JOINed items: Postgres rejects
+      // FOR UPDATE on the nullable side of an outer join. (Phase 18E)
+      lock: { level: t.LOCK.UPDATE, of: models.Invoice },
       transaction: t
     });
     if (!originalInvoice) {
@@ -943,7 +951,9 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
     const originalInvoice = await models.Invoice.findOne({
       where: { id: originalInvoiceId, companyId: req.companyId },
       include: [{ model: models.InvoiceItem, as: "items" }],
-      lock: true,
+      // Lock only the invoices row, not the LEFT-JOINed items: Postgres rejects
+      // FOR UPDATE on the nullable side of an outer join. (Phase 18E)
+      lock: { level: t.LOCK.UPDATE, of: models.Invoice },
       transaction: t
     });
     if (!originalInvoice) {
@@ -5598,7 +5608,13 @@ router.get("/suppliers/:id/purchase-orders", authMiddleware, async (req, res, ne
       ],
       order: [["date", "DESC"], ["createdAt", "DESC"]],
     });
-    return res.status(200).json({ success: true, items: pos, data: pos });
+    // Phase 17B — augment each PO with computed payment state so the UI can show
+    // paid/remaining/status and gate the Pay button. paid is summed from supplier
+    // -payment cash-outs (reference = PO.id) in ONE grouped query (no N+1).
+    // Supplier.due is NOT used; no writes; /purchase-orders/:id/pay is unchanged.
+    const paidMap = await supplierPaymentState.paidByReference(models, req.companyId, pos.map((p) => p.id));
+    const items = pos.map((p) => ({ ...p.toJSON(), ...supplierPaymentState.computePoPaymentState(p, paidMap.get(p.id) || 0) }));
+    return res.status(200).json({ success: true, items, data: items });
   } catch (error) {
     next(error);
   }
@@ -6075,6 +6091,21 @@ router.post("/sales/invoices/draft", authMiddleware, requirePermission("sales.cr
     const draftSettings = await settingsService.getCompanySettings(req.companyId);
     const vatRatePercent = Number(draftSettings.vatRate) || 0;
 
+    // Phase 18B-1 — this immediate-post route posts GL right away, so totals MUST
+    // be computed server-side (like /pos/checkout), never trusted from the body.
+    // Only for sale/installment (deposit uses its own amount; return reverses).
+    const draftType = body.type || "sale";
+    const draftIsSale = draftType !== "return" && draftType !== "deposit";
+    const draftServerTotals = draftIsSale
+      ? salesService.computeTotals({
+          subtotal: items.reduce((s, it) => s + (Number(it.price) || 0) * (Number(it.quantity) || 1), 0),
+          makingCharge: Number(body.makingCharge) || 0,
+          stoneValue: Number(body.stoneValue) || 0,
+          discount: Number(body.discount) || 0,
+          vatRatePercent,
+        })
+      : null;
+
     const invoice = await models.Invoice.create({
       id,
       companyId: req.companyId,
@@ -6082,10 +6113,10 @@ router.post("/sales/invoices/draft", authMiddleware, requirePermission("sales.cr
       customerId: body.customerId || "",
       customerName: body.customerName || "عميل نقدي",
       date: body.date || now,
-      subtotal: body.subtotal || 0,
-      total: body.total || 0,
-      tax: body.tax || 0,
-      vatRate: body.vatRate !== undefined ? Number(body.vatRate) : vatRatePercent,
+      subtotal: draftServerTotals ? draftServerTotals.taxBase : (body.subtotal || 0),
+      total: draftServerTotals ? draftServerTotals.total : (body.total || 0),
+      tax: draftServerTotals ? draftServerTotals.tax : (body.tax || 0),
+      vatRate: draftServerTotals ? draftServerTotals.vatRate : (body.vatRate !== undefined ? Number(body.vatRate) : vatRatePercent),
       discount: body.discount || 0,
       makingCharge: body.makingCharge || 0,
       stoneValue: body.stoneValue || 0,
@@ -6310,6 +6341,19 @@ router.post("/sales/invoices/drafts", authMiddleware, requirePermission("sales.c
 
     const draftSettings = await settingsService.getCompanySettings(req.companyId);
     const vatRatePercent = body.vatRate !== undefined ? Number(body.vatRate) : (Number(draftSettings.vatRate) || 0);
+    // Phase 18B-1 — compute draft money fields server-side (never trust body
+    // subtotal/tax/total). For sale drafts; /post recomputes again at posting.
+    const draftType = body.type || "sale";
+    const draftIsSale = draftType !== "return" && draftType !== "deposit";
+    const draftServerTotals = draftIsSale
+      ? salesService.computeTotals({
+          subtotal: itemRows.reduce((s, r) => s + (Number(r.price) || 0) * (Number(r.quantity) || 1), 0),
+          makingCharge: Number(body.makingCharge) || 0,
+          stoneValue: Number(body.stoneValue) || 0,
+          discount: Number(body.discount) || 0,
+          vatRatePercent,
+        })
+      : null;
     const computedSubtotal = itemRows.reduce((s, r) => s + (Number(r.price) || 0), 0);
     const id = `DRAFT-${Date.now()}`;
     const now = new Date().toISOString().slice(0, 16).replace("T", " ");
@@ -6321,10 +6365,10 @@ router.post("/sales/invoices/drafts", authMiddleware, requirePermission("sales.c
       customerId: customer.id,
       customerName: customer.name || body.customerName || "عميل",
       date: body.date || now,
-      subtotal: body.subtotal !== undefined ? Number(body.subtotal) : computedSubtotal,
-      total: body.total !== undefined ? Number(body.total) : computedSubtotal,
-      tax: body.tax !== undefined ? Number(body.tax) : 0,
-      vatRate: vatRatePercent,
+      subtotal: draftServerTotals ? draftServerTotals.taxBase : (body.subtotal !== undefined ? Number(body.subtotal) : computedSubtotal),
+      total: draftServerTotals ? draftServerTotals.total : (body.total !== undefined ? Number(body.total) : computedSubtotal),
+      tax: draftServerTotals ? draftServerTotals.tax : (body.tax !== undefined ? Number(body.tax) : 0),
+      vatRate: draftServerTotals ? draftServerTotals.vatRate : vatRatePercent,
       discount: Number(body.discount) || 0,
       makingCharge: Number(body.makingCharge) || 0,
       stoneValue: Number(body.stoneValue) || 0,
