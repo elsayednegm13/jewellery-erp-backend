@@ -657,7 +657,9 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
     if (!originalInvoiceId) {
       throw new ValidationError("رقم الفاتورة الأصلية مطلوب");
     }
-    if (returnedAssetIds.length === 0) {
+    // Items to return come via the new optional `returnedInvoiceItemIds` (exact
+    // lines by InvoiceItem.id) or the legacy `returnedAssetIds`. Require one here.
+    if (!Array.isArray(body.returnedInvoiceItemIds) && returnedAssetIds.length === 0) {
       throw new ValidationError("يجب اختيار عنصر واحد على الأقل للإرجاع");
     }
 
@@ -677,24 +679,90 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
       throw new ValidationError("هذه الفاتورة تم إرجاعها بالكامل مسبقاً");
     }
 
-    // 2. Validate returnable items and their state
-    const assets = await models.Asset.findAll({
-      where: { id: returnedAssetIds, companyId: req.companyId },
-      lock: true,
+    // 2. Validate returnable items and classify each as Asset or Product.
+    //    InvoiceItem.assetId carries either an Asset id or a Product id (PRD-ID),
+    //    so resolve each returned id against both. Asset lines return the unit;
+    //    Product lines do a FULL return of the original line quantity (Phase 18I).
+    //    Reject any id already returned by an earlier credit note (no double/over-return).
+    const priorReturns = await models.Invoice.findAll({
+      // Block re-return of a line already returned OR exchanged off this invoice
+      // (symmetric with /sales/exchanges; Phase 18K).
+      where: postedInvoiceWhere({ relatedInvoiceId: originalInvoiceId, type: ["return", "exchange"], companyId: req.companyId }),
+      include: [{ model: models.InvoiceItem, as: "items" }],
       transaction: t
     });
-    if (assets.length !== returnedAssetIds.length) {
-      throw new ValidationError("بعض الأصول المحددة غير موجودة في النظام");
+    const priorReturnedIds = new Set();
+    for (const ret of priorReturns) {
+      for (const it of ret.items) priorReturnedIds.add(it.assetId);
     }
 
-    for (const asset of assets) {
-      if (asset.status !== "sold") {
-        throw new ValidationError(`المنتج ${asset.name} (${asset.id}) غير مباع حالياً، حالته: ${asset.status}`);
+    // Resolve which original lines are being returned. New optional payload
+    // `returnedInvoiceItemIds` targets exact lines by InvoiceItem.id (needed when
+    // the same product appears on more than one line); the legacy `returnedAssetIds`
+    // (by assetId, first matching line) remains the fallback (Phase 18S).
+    let selectedOriginalItems;
+    if (Array.isArray(body.returnedInvoiceItemIds)) {
+      if (body.returnedInvoiceItemIds.length === 0) {
+        throw new ValidationError("يجب اختيار عنصر واحد على الأقل للإرجاع");
       }
-      const hasItem = originalInvoice.items.some(i => i.assetId === asset.id);
-      if (!hasItem) {
-        throw new ValidationError(`المنتج ${asset.name} (${asset.id}) ليس جزءاً من الفاتورة الأصلية المحدد إرجاعها`);
+      const seenLineIds = new Set();
+      selectedOriginalItems = body.returnedInvoiceItemIds.map((rawId) => {
+        const lineId = Number(rawId);
+        if (!Number.isInteger(lineId) || lineId <= 0) {
+          throw new ValidationError("بند الفاتورة المحدد غير موجود");
+        }
+        if (seenLineIds.has(lineId)) {
+          throw new ValidationError("لا يمكن تكرار نفس البند في الإرجاع");
+        }
+        seenLineIds.add(lineId);
+        const item = originalInvoice.items.find((i) => Number(i.id) === lineId);
+        if (!item) {
+          throw new ValidationError("بند الفاتورة المحدد غير موجود");
+        }
+        return item;
+      });
+    } else {
+      selectedOriginalItems = returnedAssetIds.map((rid) => {
+        const item = originalInvoice.items.find((i) => i.assetId === rid);
+        if (!item) {
+          throw new ValidationError(`البند (${rid}) ليس جزءاً من الفاتورة الأصلية المحدد إرجاعها`);
+        }
+        return item;
+      });
+    }
+
+    const returnLines = [];
+    for (const originalItem of selectedOriginalItems) {
+      const rid = originalItem.assetId;
+      // Double-return guard stays product-level (by assetId): credit-note lines do
+      // not persist the original line id, so line-level history needs a future
+      // migration. Conservative — never over-returns. (Phase 18S)
+      if (priorReturnedIds.has(rid)) {
+        throw new ValidationError("تم إرجاع هذا البند مسبقاً");
       }
+
+      // Try Asset first (unit return, unchanged behaviour)
+      const asset = await models.Asset.findOne({ where: { id: rid, companyId: req.companyId }, lock: true, transaction: t });
+      if (asset) {
+        if (asset.status !== "sold") {
+          throw new ValidationError(`المنتج ${asset.name} (${asset.id}) غير مباع حالياً، حالته: ${asset.status}`);
+        }
+        returnLines.push({ kind: "asset", id: rid, asset, originalItem, quantity: 1 });
+        continue;
+      }
+
+      // Otherwise a Product (quantity-based full return)
+      const product = await models.Product.findOne({ where: { id: rid, companyId: req.companyId }, lock: true, transaction: t });
+      if (product) {
+        const qty = Number(originalItem.quantity) || 1;
+        if (qty <= 0) {
+          throw new ValidationError(`كمية البند (${rid}) غير صالحة للإرجاع`);
+        }
+        returnLines.push({ kind: "product", id: rid, product, originalItem, quantity: qty });
+        continue;
+      }
+
+      throw new ValidationError("بعض الأصول المحددة غير موجودة في النظام");
     }
 
     // 3. Extract branch and settings
@@ -717,10 +785,12 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
     const roundVal = (n) => Math.round((Number(n) || 0) * 100) / 100;
     let returnedSubtotal = 0;
     let returnedCost = 0;
-    for (const asset of assets) {
-      const item = originalInvoice.items.find(i => i.assetId === asset.id);
-      returnedSubtotal += Number(item.price || 0);
-      returnedCost += Number(item.cost || 0);
+    for (const line of returnLines) {
+      const item = line.originalItem;
+      // Asset lines are qty 1; product full-return uses the original line qty.
+      // InvoiceItem.price/cost are per-unit, so multiply by the line quantity.
+      returnedSubtotal += Number(item.price || 0) * line.quantity;
+      returnedCost += Number(item.cost || 0) * line.quantity;
     }
     const returnedTax = roundVal(returnedSubtotal * (vatRatePercent / 100));
     const returnedTotal = roundVal(returnedSubtotal + returnedTax);
@@ -755,16 +825,18 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
 
     // 7. Create Return Invoice Items and restore asset status
     const returnItems = [];
-    for (const asset of assets) {
-      const origItem = originalInvoice.items.find(i => i.assetId === asset.id);
+    for (const line of returnLines) {
+      const origItem = line.originalItem;
+      const qty = line.quantity;
+      const lineWeight = Number(origItem.weight || 0); // stored weight is the line total
       const returnItem = await models.InvoiceItem.create({
         invoiceId: returnInvoiceId,
-        assetId: asset.id,
-        name: asset.name,
-        quantity: 1,
+        assetId: line.id,
+        name: line.kind === "asset" ? line.asset.name : line.product.productName,
+        quantity: qty,
         price: -Number(origItem.price || 0),
         cost: Number(origItem.cost || 0),
-        weight: Number(origItem.weight || 0),
+        weight: lineWeight,
         karat: origItem.karat,
         discount: -Number(origItem.discount || 0),
         makingCharge: -Number(origItem.makingCharge || 0),
@@ -772,23 +844,53 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
       }, { transaction: t });
       returnItems.push(returnItem);
 
-      // Restore status to returned (not available blindly)
-      await asset.update({ status: "returned" }, { transaction: t });
+      if (line.kind === "asset") {
+        // Restore status to returned (not available blindly)
+        await line.asset.update({ status: "returned" }, { transaction: t });
 
-      // Create Asset Event
-      await models.AssetEvent.create({
-        id: `ASE-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        assetId: asset.id,
-        action: "RETURNED",
-        date: nowStr.slice(0, 10),
-        user: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
-        branch: branchRecord.name,
-        note: `تم الإرجاع للفاتورة: ${originalInvoice.id}. السبب: ${reason || "غير محدد"}`,
-        sourceDocument: originalInvoice.id,
-        beforeState: "status:sold",
-        afterState: "status:returned",
-        severity: "info"
-      }, { transaction: t });
+        // Create Asset Event
+        await models.AssetEvent.create({
+          id: `ASE-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          assetId: line.asset.id,
+          action: "RETURNED",
+          date: nowStr.slice(0, 10),
+          user: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
+          branch: branchRecord.name,
+          note: `تم الإرجاع للفاتورة: ${originalInvoice.id}. السبب: ${reason || "غير محدد"}`,
+          sourceDocument: originalInvoice.id,
+          beforeState: "status:sold",
+          afterState: "status:returned",
+          severity: "info"
+        }, { transaction: t });
+      } else {
+        // Product full return: restock quantities/weight (mirror of the POS sale).
+        const product = line.product;
+        product.quantityAvailable = roundVal(Number(product.quantityAvailable || 0) + qty);
+        product.quantityOnHand = roundVal(Number(product.quantityOnHand || 0) + qty);
+        product.quantitySold = Math.max(0, roundVal(Number(product.quantitySold || 0) - qty));
+        product.totalWeight = Math.round((Number(product.totalWeight || 0) + lineWeight) * 10000) / 10000;
+        await product.save({ transaction: t, skipAdjustmentHook: true });
+
+        // Log Stock Movement (return = stock in)
+        await models.StockMovement.create({
+          id: `SM-RET-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          companyId: req.companyId,
+          productId: product.id,
+          productCode: product.productCode,
+          type: "return",
+          quantityIn: qty,
+          quantityOut: 0,
+          weightIn: lineWeight,
+          weightOut: 0,
+          unitCost: Number(origItem.cost || 0),
+          totalCost: Number(origItem.cost || 0) * qty,
+          referenceType: "Invoice",
+          referenceId: returnInvoiceId,
+          customerId: originalInvoice.customerId,
+          branchId,
+          createdBy: req.user ? req.user.id : "System"
+        }, { transaction: t });
+      }
     }
 
     // 8. Update original invoice status (fully returned or partial)
@@ -940,10 +1042,15 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
     if (!originalInvoiceId) {
       throw new ValidationError("رقم الفاتورة الأصلية مطلوب");
     }
-    if (!returnedAssetId) {
+    // The returned line is identified by the new optional `returnedInvoiceItemId`
+    // (exact line by InvoiceItem.id) or the legacy `returnedAssetId`. Require one.
+    if (!returnedAssetId && body.returnedInvoiceItemId == null) {
       throw new ValidationError("رقم القطعة المرتجعة مطلوب للاستبدال");
     }
-    if (newAssetIds.length === 0) {
+    // New items may come via the new `newItems` payload (asset+product mix) or
+    // the legacy `newAssetIds` (assets only). Require at least one source here;
+    // detailed validation (incl. empty newItems) happens in section 3 (Phase 18M).
+    if (!Array.isArray(body.newItems) && newAssetIds.length === 0) {
       throw new ValidationError("يجب اختيار قطعة واحدة جديدة على الأقل للشراء");
     }
 
@@ -960,21 +1067,77 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
       throw new ValidationError("لم يتم العثور على الفاتورة الأصلية");
     }
 
-    // 2. Validate returned asset
-    const returnedAsset = await models.Asset.findOne({
-      where: { id: returnedAssetId, companyId: req.companyId },
+    // 2. Validate the returned item — it may be an Asset OR a Product (its id is
+    //    stored in InvoiceItem.assetId). Asset returns the unit; a product does a
+    //    FULL return of the original line quantity (Phase 18K). New items below
+    //    remain assets-only.
+    // Resolve the returned line. New optional `returnedInvoiceItemId` targets the
+    // exact line by InvoiceItem.id (needed when the same product is on >1 line);
+    // legacy `returnedAssetId` (first matching line) remains the fallback (18S).
+    let originalItem;
+    if (body.returnedInvoiceItemId != null) {
+      const lineId = Number(body.returnedInvoiceItemId);
+      if (!Number.isInteger(lineId) || lineId <= 0) {
+        throw new ValidationError("بند الفاتورة المحدد غير موجود");
+      }
+      originalItem = originalInvoice.items.find(i => Number(i.id) === lineId);
+      if (!originalItem) {
+        throw new ValidationError("بند الفاتورة المحدد غير موجود");
+      }
+      if (returnedAssetId && originalItem.assetId !== returnedAssetId) {
+        throw new ValidationError("بند الفاتورة المحدد لا يطابق العنصر المرتجع");
+      }
+    } else {
+      originalItem = originalInvoice.items.find(i => i.assetId === returnedAssetId);
+      if (!originalItem) {
+        throw new ValidationError("البند المرتجع ليس جزءاً من الفاتورة الأصلية المحددة");
+      }
+    }
+    // Effective id of the returned line (an Asset id or a Product id). Used for the
+    // guard, asset/product lookup and the credit line below, so a line-id-only
+    // request (no returnedAssetId) still resolves correctly.
+    const effectiveReturnedId = originalItem.assetId;
+
+    // Reject if this line was already returned/exchanged off the same invoice
+    // (covers both /sales/returns credit notes and prior exchanges).
+    const priorCredits = await models.Invoice.findAll({
+      where: postedInvoiceWhere({ relatedInvoiceId: originalInvoiceId, type: ["return", "exchange"], companyId: req.companyId }),
+      include: [{ model: models.InvoiceItem, as: "items" }],
+      transaction: t
+    });
+    for (const credit of priorCredits) {
+      if (credit.items.some(it => it.assetId === effectiveReturnedId)) {
+        throw new ValidationError("تم إرجاع هذا البند مسبقاً");
+      }
+    }
+
+    let returnedAsset = null;
+    let returnedProduct = null;
+    let returnQuantity = 1;
+    const returnedAssetCandidate = await models.Asset.findOne({
+      where: { id: effectiveReturnedId, companyId: req.companyId },
       lock: true,
       transaction: t
     });
-    if (!returnedAsset) {
-      throw new ValidationError("الأصل المراد إرجاعه غير موجود");
-    }
-    if (returnedAsset.status !== "sold") {
-      throw new ValidationError(`الأصل المراد إرجاعه غير مباع حالياً، حالته: ${returnedAsset.status}`);
-    }
-    const originalItem = originalInvoice.items.find(i => i.assetId === returnedAssetId);
-    if (!originalItem) {
-      throw new ValidationError("الأصل المرتجع ليس جزءاً من الفاتورة الأصلية المحددة");
+    if (returnedAssetCandidate) {
+      if (returnedAssetCandidate.status !== "sold") {
+        throw new ValidationError(`الأصل المراد إرجاعه غير مباع حالياً، حالته: ${returnedAssetCandidate.status}`);
+      }
+      returnedAsset = returnedAssetCandidate;
+    } else {
+      const product = await models.Product.findOne({
+        where: { id: effectiveReturnedId, companyId: req.companyId },
+        lock: true,
+        transaction: t
+      });
+      if (!product) {
+        throw new ValidationError("البند المراد إرجاعه غير موجود");
+      }
+      returnedProduct = product;
+      returnQuantity = Number(originalItem.quantity) || 1;
+      if (returnQuantity <= 0) {
+        throw new ValidationError("كمية البند المراد إرجاعه غير صالحة");
+      }
     }
 
     // 4. Extract active branch & settings (extracted early for validation)
@@ -990,21 +1153,55 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
       throw new ValidationError("الفرع المحدد غير موجود أو غير نشط");
     }
 
-    // 3. Validate new assets (checking branch scoping too)
-    const newAssets = await models.Asset.findAll({
-      where: { id: newAssetIds, companyId: req.companyId },
-      lock: true,
-      transaction: t
-    });
-    if (newAssets.length !== newAssetIds.length) {
-      throw new ValidationError("بعض الأصول البديلة الجديدة غير موجودة في النظام");
-    }
-    for (const asset of newAssets) {
-      if (asset.status !== "available") {
-        throw new ValidationError(`المنتج البديل ${asset.name} (${asset.id}) غير متاح للبيع حالياً، حالته: ${asset.status}`);
+    // 3. Resolve the new (replacement) items. The new `newItems` payload supports
+    //    a mix of assets and products; the legacy `newAssetIds` (assets only) is
+    //    the fallback when `newItems` is absent. When `newItems` is present it
+    //    takes priority and `newAssetIds` is ignored. ALL validation happens here,
+    //    before any write (Phase 18M).
+    let normalizedNew;
+    if (Array.isArray(body.newItems)) {
+      if (body.newItems.length === 0) {
+        throw new ValidationError("يجب اختيار عنصر بديل واحد على الأقل للاستبدال");
       }
-      if (asset.branchId !== branchId) {
-        throw new ValidationError(`المنتج البديل ${asset.name} (${asset.id}) تابع لفرع آخر وليس للفرع النشط`);
+      normalizedNew = body.newItems.map((it) => ({ type: it && it.type, id: it && it.id, quantity: it && it.quantity }));
+    } else {
+      normalizedNew = (newAssetIds || []).map((id) => ({ type: "asset", id, quantity: 1 }));
+    }
+
+    // Reject malformed entries + duplicate ids up-front (no quantity merging).
+    const seenNewIds = new Set();
+    for (const it of normalizedNew) {
+      if (!it.id) throw new ValidationError("عنصر بديل بدون معرف غير صالح");
+      if (it.type !== "asset" && it.type !== "product") {
+        throw new ValidationError(`نوع العنصر البديل غير صالح: ${it.type}`);
+      }
+      if (seenNewIds.has(it.id)) {
+        throw new ValidationError("لا يمكن تكرار نفس العنصر في الاستبدال");
+      }
+      seenNewIds.add(it.id);
+    }
+
+    const newResolvedItems = [];
+    for (const it of normalizedNew) {
+      if (it.type === "asset") {
+        const asset = await models.Asset.findOne({ where: { id: it.id, companyId: req.companyId }, lock: true, transaction: t });
+        if (!asset) throw new ValidationError("بعض الأصول البديلة الجديدة غير موجودة في النظام");
+        if (asset.status !== "available") throw new ValidationError(`المنتج البديل ${asset.name} (${asset.id}) غير متاح للبيع حالياً، حالته: ${asset.status}`);
+        if (asset.branchId !== branchId) throw new ValidationError(`المنتج البديل ${asset.name} (${asset.id}) تابع لفرع آخر وليس للفرع النشط`);
+        const unitPrice = Number(asset.price || 0);
+        const unitCost = Number(asset.cost || 0);
+        newResolvedItems.push({ itemType: "asset", id: asset.id, name: asset.name, quantity: 1, unitPrice, unitCost, lineValue: unitPrice, lineCost: unitCost, weight: Number(asset.grossWeight || asset.weight || 0), karat: asset.karat, makingCharge: Number(asset.makingCharge || 0), stoneValue: Number(asset.stoneValue || 0), asset });
+      } else {
+        const qty = Number(it.quantity);
+        if (!Number.isInteger(qty) || qty <= 0) throw new ValidationError("كمية المنتج البديل يجب أن تكون عددًا صحيحًا أكبر من صفر");
+        const product = await models.Product.findOne({ where: { id: it.id, companyId: req.companyId }, lock: true, transaction: t });
+        if (!product) throw new ValidationError("بعض الأصول البديلة الجديدة غير موجودة في النظام");
+        if (product.branchId !== branchId) throw new ValidationError(`المنتج البديل ${product.productName} (${product.id}) تابع لفرع آخر وليس للفرع النشط`);
+        if (Number(product.quantityAvailable || 0) < qty) throw new ValidationError(`الكمية المطلوبة غير متاحة للمنتج البديل ${product.productName}. المتاح: ${product.quantityAvailable}`);
+        const unitPrice = Number(product.salePrice || 0);
+        const unitCost = Number(product.unitCost || 0);
+        const lineWeight = Number(product.averageUnitWeight || 0) * qty;
+        newResolvedItems.push({ itemType: "product", id: product.id, name: product.productName, quantity: qty, unitPrice, unitCost, lineValue: unitPrice * qty, lineCost: unitCost * qty, weight: lineWeight, karat: product.karat, makingCharge: 0, stoneValue: 0, product });
       }
     }
 
@@ -1013,11 +1210,14 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
 
     // 5. Calculate values and differences
     const roundVal = (n) => Math.round((Number(n) || 0) * 100) / 100;
-    const returnedValue = Number(originalItem.price || 0);
-    const returnedCost = Number(originalItem.cost || 0);
+    // Asset: qty 1. Product full-return: original line qty. price/cost are per-unit.
+    const returnedValue = roundVal(Number(originalItem.price || 0) * returnQuantity);
+    const returnedCost = roundVal(Number(originalItem.cost || 0) * returnQuantity);
+    const returnedWeight = Number(originalItem.weight || 0); // stored weight is the line total
 
-    const newAssetsValue = newAssets.reduce((sum, a) => sum + Number(a.price || 0), 0);
-    const newAssetsCost = newAssets.reduce((sum, a) => sum + Number(a.cost || 0), 0);
+    // Names kept for the inline GL below; now summed over resolved asset+product lines.
+    const newAssetsValue = newResolvedItems.reduce((sum, it) => sum + it.lineValue, 0);
+    const newAssetsCost = newResolvedItems.reduce((sum, it) => sum + it.lineCost, 0);
 
     const diffBase = roundVal(newAssetsValue - returnedValue);
     const diffTax = roundVal(diffBase * (vatRatePercent / 100));
@@ -1053,64 +1253,125 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
 
     // 8. Create exchange invoice item lines
     // Negative return line
+    const returnedName = returnedAsset ? returnedAsset.name : returnedProduct.productName;
     const returnItem = await models.InvoiceItem.create({
       invoiceId: exchangeInvoiceId,
-      assetId: returnedAssetId,
-      name: `مرتجع استبدال: ${returnedAsset.name}`,
-      quantity: 1,
-      price: -returnedValue,
-      cost: returnedCost,
-      weight: Number(originalItem.weight || 0),
+      assetId: effectiveReturnedId,
+      name: `مرتجع استبدال: ${returnedName}`,
+      quantity: returnQuantity,
+      price: -Number(originalItem.price || 0), // per-unit (negated); line total via quantity
+      cost: Number(originalItem.cost || 0),    // per-unit
+      weight: returnedWeight,
       karat: originalItem.karat,
       discount: 0,
       makingCharge: 0,
       stoneValue: 0
     }, { transaction: t });
 
-    // Positive new asset lines
+    // Positive new item lines (asset and/or product)
     const exchangeItems = [returnItem];
-    for (const asset of newAssets) {
+    for (const it of newResolvedItems) {
       const item = await models.InvoiceItem.create({
         invoiceId: exchangeInvoiceId,
-        assetId: asset.id,
-        name: asset.name,
-        quantity: 1,
-        price: Number(asset.price || 0),
-        cost: Number(asset.cost || 0),
-        weight: Number(asset.grossWeight || asset.weight || 0),
-        karat: asset.karat,
+        assetId: it.id, // assetId column carries an Asset or Product id (existing convention)
+        name: it.name,
+        quantity: it.quantity,
+        price: it.unitPrice, // per-unit; line total via quantity
+        cost: it.unitCost,   // per-unit
+        weight: it.weight,
+        karat: it.karat,
         discount: 0,
-        makingCharge: Number(asset.makingCharge || 0),
-        stoneValue: Number(asset.stoneValue || 0)
+        makingCharge: it.makingCharge,
+        stoneValue: it.stoneValue
       }, { transaction: t });
       exchangeItems.push(item);
+
+      if (it.itemType === "product") {
+        // Product new item: decrement stock (mirror of the POS sale) + stock movement
+        const product = it.product;
+        product.quantityAvailable = roundVal(Number(product.quantityAvailable || 0) - it.quantity);
+        product.quantityOnHand = roundVal(Number(product.quantityOnHand || 0) - it.quantity);
+        product.quantitySold = roundVal(Number(product.quantitySold || 0) + it.quantity);
+        product.totalWeight = Math.round((Number(product.totalWeight || 0) - it.weight) * 10000) / 10000;
+        await product.save({ transaction: t, skipAdjustmentHook: true });
+
+        await models.StockMovement.create({
+          id: `SM-EXO-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          companyId: req.companyId,
+          productId: product.id,
+          productCode: product.productCode,
+          type: "exchange_out",
+          quantityIn: 0,
+          quantityOut: it.quantity,
+          weightIn: 0,
+          weightOut: it.weight,
+          unitCost: it.unitCost,
+          totalCost: it.unitCost * it.quantity,
+          referenceType: "Invoice",
+          referenceId: exchangeInvoiceId,
+          customerId: originalInvoice.customerId,
+          branchId,
+          createdBy: req.user ? req.user.id : "System"
+        }, { transaction: t });
+      }
     }
 
-    // 9. Update asset statuses
-    await returnedAsset.update({ status: "returned" }, { transaction: t });
-    for (const asset of newAssets) {
-      await asset.update({ status: "sold" }, { transaction: t });
-    }
-
-    // 10. Record Asset Events
-    await models.AssetEvent.create({
-      id: `ASE-${Date.now()}-EX-OUT`,
-      assetId: returnedAsset.id,
-      action: "EXCHANGED_OUT",
-      date: nowStr.slice(0, 10),
-      user: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
-      branch: branchRecord.name,
-      note: `تم إرجاعه بالاستبدال للفاتورة: ${originalInvoice.id} بموجب سند الاستبدال ${exchangeInvoiceId}`,
-      sourceDocument: originalInvoice.id,
-      beforeState: "status:sold",
-      afterState: "status:returned",
-      severity: "info"
-    }, { transaction: t });
-
-    for (const asset of newAssets) {
+    // 9. Update returned-item state + new asset statuses
+    if (returnedAsset) {
+      await returnedAsset.update({ status: "returned" }, { transaction: t });
+      // 10a. Asset event for the returned asset
       await models.AssetEvent.create({
-        id: `ASE-${Date.now()}-EX-IN-${asset.id}`,
-        assetId: asset.id,
+        id: `ASE-${Date.now()}-EX-OUT`,
+        assetId: returnedAsset.id,
+        action: "EXCHANGED_OUT",
+        date: nowStr.slice(0, 10),
+        user: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
+        branch: branchRecord.name,
+        note: `تم إرجاعه بالاستبدال للفاتورة: ${originalInvoice.id} بموجب سند الاستبدال ${exchangeInvoiceId}`,
+        sourceDocument: originalInvoice.id,
+        beforeState: "status:sold",
+        afterState: "status:returned",
+        severity: "info"
+      }, { transaction: t });
+    } else {
+      // 10a. Product full return: restock + stock movement (mirror of the POS sale)
+      const product = returnedProduct;
+      product.quantityAvailable = roundVal(Number(product.quantityAvailable || 0) + returnQuantity);
+      product.quantityOnHand = roundVal(Number(product.quantityOnHand || 0) + returnQuantity);
+      product.quantitySold = Math.max(0, roundVal(Number(product.quantitySold || 0) - returnQuantity));
+      product.totalWeight = Math.round((Number(product.totalWeight || 0) + returnedWeight) * 10000) / 10000;
+      await product.save({ transaction: t, skipAdjustmentHook: true });
+
+      await models.StockMovement.create({
+        id: `SM-RET-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        companyId: req.companyId,
+        productId: product.id,
+        productCode: product.productCode,
+        type: "return",
+        quantityIn: returnQuantity,
+        quantityOut: 0,
+        weightIn: returnedWeight,
+        weightOut: 0,
+        unitCost: Number(originalItem.cost || 0),
+        totalCost: Number(originalItem.cost || 0) * returnQuantity,
+        referenceType: "Invoice",
+        referenceId: exchangeInvoiceId,
+        customerId: originalInvoice.customerId,
+        branchId,
+        createdBy: req.user ? req.user.id : "System"
+      }, { transaction: t });
+    }
+
+    const newAssetItems = newResolvedItems.filter((it) => it.itemType === "asset");
+    for (const it of newAssetItems) {
+      await it.asset.update({ status: "sold" }, { transaction: t });
+    }
+
+    // 10. Record Asset Events for new assets (product movements are logged above)
+    for (const it of newAssetItems) {
+      await models.AssetEvent.create({
+        id: `ASE-${Date.now()}-EX-IN-${it.asset.id}`,
+        assetId: it.asset.id,
         action: "EXCHANGED_IN",
         date: nowStr.slice(0, 10),
         user: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
