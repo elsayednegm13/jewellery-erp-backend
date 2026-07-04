@@ -28,6 +28,8 @@ const serializeCompany = (company) => company ? {
   commercialRegister: company.commercialRegister || "",
   taxNumber: company.taxNumber || "",
   phone: company.phone || "",
+  email: company.email || "",
+  website: company.website || "",
   logo: company.logo || "",
   branchName: company.branchName || "Main Branch"
 } : null;

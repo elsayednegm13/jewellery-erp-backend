@@ -4625,7 +4625,7 @@ router.patch("/settings", authMiddleware, requirePermission("settings.update"), 
     }
 
     const companyUpdates = {};
-    for (const key of ["businessName", "logo", "currency", "branchName", "taxNumber"]) {
+    for (const key of ["businessName", "logo", "currency", "branchName", "taxNumber", "phone", "email", "website", "country", "city", "region", "address1", "address2", "postalCode", "commercialRegister"]) {
       if (body[key] !== undefined) companyUpdates[key] = body[key];
     }
     if (companyUpdates.currency !== undefined) {

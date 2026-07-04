@@ -53,6 +53,15 @@ const Company = sequelize.define("Company", {
     type: DataTypes.STRING,
     field: "tax_number"
   },
+  phone: {
+    type: DataTypes.STRING(40)
+  },
+  email: {
+    type: DataTypes.STRING(160)
+  },
+  website: {
+    type: DataTypes.STRING(200)
+  },
   logo: {
     type: DataTypes.STRING
   },
