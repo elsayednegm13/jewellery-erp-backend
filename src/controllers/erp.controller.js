@@ -379,13 +379,17 @@ class ErpController {
         );
       }
 
-      // Invoice lifecycle fields are owned by the dedicated lifecycle endpoints,
-      // not generic CRUD. Reject ANY lifecycle field in the body (incl.
-      // postingStatus:"posted") — the column default fills posted automatically.
-      if (this.model.name === "Invoice" && invoiceLifecycleFieldInBody(req.body)) {
+      // Invoices are financial documents: creating one must also create the
+      // matching stock movements, treasury transactions and accounting postings.
+      // The generic create only writes a header row and — via the column default
+      // (postingStatus:"posted") — would produce a POSTED invoice with none of
+      // those side effects. Block it entirely. Invoices are created only through
+      // the lifecycle endpoints: POS checkout (/pos/checkout) or the sales draft
+      // flow (/sales/invoices/drafts → /sales/invoices/:id/post).
+      if (this.model.name === "Invoice") {
         return res.status(403).json({
           success: false,
-          message: "Invoice lifecycle fields can only be changed through invoice lifecycle endpoints"
+          message: "Invoices cannot be created through generic CRUD. Use POS checkout or the sales draft/post lifecycle endpoints."
         });
       }
 
@@ -481,14 +485,23 @@ class ErpController {
         throw new NotFoundError(`${this.model.name} record not found.`);
       }
 
-      // Block changing any invoice lifecycle field via generic CRUD; only the
-      // dedicated lifecycle endpoints may transition draft/posted/cancelled and
-      // stamp postedAt/cancelledAt/cancelReason.
-      if (this.model.name === "Invoice" && invoiceLifecycleFieldInBody(req.body)) {
-        return res.status(403).json({
-          success: false,
-          message: "Invoice lifecycle fields can only be changed through invoice lifecycle endpoints"
-        });
+      // Posted/cancelled invoices are financial records; generic CRUD cannot edit
+      // them (there is no stock/treasury/accounting reversal here). Only DRAFT
+      // invoices may be updated through generic CRUD, and even then the lifecycle
+      // fields stay owned by the dedicated post/cancel endpoints.
+      if (this.model.name === "Invoice") {
+        if (item.postingStatus !== "draft") {
+          return res.status(409).json({
+            success: false,
+            message: "Posted invoices cannot be modified through generic CRUD. Use the invoice lifecycle endpoints (post/cancel) or sales returns/exchanges."
+          });
+        }
+        if (invoiceLifecycleFieldInBody(req.body)) {
+          return res.status(403).json({
+            success: false,
+            message: "Invoice lifecycle fields can only be changed through invoice lifecycle endpoints"
+          });
+        }
       }
 
       const originalState = item.toJSON();
@@ -586,8 +599,18 @@ class ErpController {
         throw new NotFoundError(`${this.model.name} record not found.`);
       }
 
+      // Invoices have no deactivate/reactivate lifecycle; their financial state is
+      // owned by the post/cancel endpoints (and "inactive" is not a valid invoice
+      // status). Block it via generic CRUD.
+      if (this.model.name === "Invoice") {
+        return res.status(409).json({
+          success: false,
+          message: "Invoices cannot be deactivated through generic CRUD. Use the invoice lifecycle endpoints."
+        });
+      }
+
       const originalState = item.toJSON();
-      
+
       // Update status/active values
       const updates = {};
       if (this.model.rawAttributes.status) {
@@ -639,6 +662,14 @@ class ErpController {
 
       if (!item) {
         throw new NotFoundError(`${this.model.name} record not found.`);
+      }
+
+      // Invoices have no deactivate/reactivate lifecycle (see deactivate above).
+      if (this.model.name === "Invoice") {
+        return res.status(409).json({
+          success: false,
+          message: "Invoices cannot be reactivated through generic CRUD. Use the invoice lifecycle endpoints."
+        });
       }
 
       const originalState = item.toJSON();
@@ -701,6 +732,17 @@ class ErpController {
 
       if (!item) {
         throw new NotFoundError(`${this.model.name} record not found.`);
+      }
+
+      // Posted/cancelled invoices are financial records: a generic (soft-)delete
+      // would remove them without reversing the stock/treasury/accounting impact.
+      // Only DRAFT invoices (no posted side effects) may be deleted here; posted
+      // documents must be corrected via a lifecycle cancel/reversal route.
+      if (this.model.name === "Invoice" && item.postingStatus !== "draft") {
+        return res.status(409).json({
+          success: false,
+          message: "Posted invoices cannot be deleted through generic CRUD. Use the invoice lifecycle cancel/reversal route."
+        });
       }
 
       const originalState = item.toJSON();

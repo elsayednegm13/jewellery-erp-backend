@@ -14,6 +14,8 @@ const supplierPaymentState = require("../services/supplier-payment-state.service
 const auditService = require("../services/audit.service");
 const { emitEntityChanged } = require("../services/realtime-helper.service");
 const notificationService = require("../services/notification.service");
+const idempotencyService = require("../services/idempotency.service");
+const customerCreditService = require("../services/customer-credit.service");
 const logger = require("../utils/logger");
 const { ValidationError, NotFoundError, ConflictError, ForbiddenError } = require("../utils/errors");
 const uploadMiddleware = require("../middleware/upload.middleware");
@@ -161,21 +163,21 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
     const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
 
-    // 1. Idempotency Check
-    if (idempotencyKey) {
-      const existing = await models.Invoice.findOne({
-        where: { idempotencyKey, companyId: req.companyId },
-        include: [
-          { model: models.InvoiceItem, as: "items" },
-          { model: models.Installment, as: "installments" }
-        ],
-        transaction: t
-      });
-      if (existing) {
-        await t.rollback();
-        return res.status(200).json({ success: true, ...existing.toJSON(), data: existing.toJSON() });
-      }
+    // 1. Idempotency Check — Phase 21.3 central race-safe (unique company_id+scope+key).
+    if (!idempotencyKey) {
+      await t.rollback();
+      return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لإتمام البيع" });
     }
+    const idemScope = "pos.checkout";
+    const idemRequestHash = idempotencyService.hashRequest(idemScope, body);
+    const idemClaim = await idempotencyService.claim({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash, transaction: t });
+    if (!idemClaim.claimed) {
+      try { await t.rollback(); } catch (_) { /* transaction already aborted by the unique violation */ }
+      const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash });
+      if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+      return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+    }
+    const idemRequest = idemClaim.request;
 
     // 2. Extract active branch
     const branchId = req.headers["x-branch-id"] || body.branchId;
@@ -597,6 +599,17 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
     const { recalculateCustomerNetPurchases } = require("../services/customer-purchases.service");
     await recalculateCustomerNetPurchases(models, req.companyId, customerId, { transaction: t });
 
+    // Build the success response up front and persist it for idempotent replay
+    // BEFORE commit (same transaction as the claimed idempotency row).
+    const out = invoice.toJSON();
+    out.journalEntry = journalEntry;
+    out.installments = createdInstallmentRecords;
+    out.payments = paymentsCreated;
+    out.loyalty = loyalty;
+    out.items = invoiceItems;
+    const idemResponseBody = { success: true, ...out, data: out };
+    await idempotencyService.succeed({ request: idemRequest, statusCode: 201, responseBody: idemResponseBody, transaction: t });
+
     // Commit Transaction
     await t.commit();
 
@@ -620,14 +633,7 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
       entityId: invoiceId
     });
 
-    const out = invoice.toJSON();
-    out.journalEntry = journalEntry;
-    out.installments = createdInstallmentRecords;
-    out.payments = paymentsCreated;
-    out.loyalty = loyalty;
-    out.items = invoiceItems;
-
-    return res.status(201).json({ success: true, ...out, data: out });
+    return res.status(201).json(idemResponseBody);
   } catch (error) {
     await t.rollback();
     next(error);
@@ -641,18 +647,22 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
     const body = req.body || {};
     const { originalInvoiceId, returnedAssetIds = [], reason = "" } = body;
 
-    if (req.headers["idempotency-key"] || body.idempotencyKey) {
-      const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
-      const existing = await models.Invoice.findOne({
-        where: { idempotencyKey, companyId: req.companyId },
-        include: [{ model: models.InvoiceItem, as: "items" }],
-        transaction: t
-      });
-      if (existing) {
-        await t.rollback();
-        return res.status(200).json({ success: true, ...existing.toJSON(), data: existing.toJSON() });
-      }
+    // Phase 21.3 — central race-safe idempotency (unique company_id+scope+key).
+    const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
+    if (!idempotencyKey) {
+      await t.rollback();
+      return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لعملية المرتجع" });
     }
+    const idemScope = "sales.return";
+    const idemRequestHash = idempotencyService.hashRequest(idemScope, body);
+    const idemClaim = await idempotencyService.claim({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash, transaction: t });
+    if (!idemClaim.claimed) {
+      try { await t.rollback(); } catch (_) { /* transaction already aborted by the unique violation */ }
+      const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash });
+      if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+      return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+    }
+    const idemRequest = idemClaim.request;
 
     if (!originalInvoiceId) {
       throw new ValidationError("رقم الفاتورة الأصلية مطلوب");
@@ -916,6 +926,17 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
       status: allItemsReturned ? "returned" : "partial"
     }, { transaction: t });
 
+    // Phase 21.2 — receivable-first settlement. Apply the return value to the
+    // original invoice's outstanding receivable FIRST; only the excess becomes a
+    // real cash refund. Prevents refunding cash for money never collected and
+    // keeps the GL money leg, treasury, and customer balance consistent.
+    const outstandingBefore = roundVal(Number(originalInvoice.remainingAmount || 0));
+    const receivableReliefAmount = roundVal(Math.min(returnedTotal, outstandingBefore));
+    const cashRefundAmount = roundVal(returnedTotal - receivableReliefAmount);
+    const refundMethodLower = originalInvoice.paymentMethod.toLowerCase();
+    const refundCashAccountCode = (refundMethodLower.includes("card") || refundMethodLower.includes("bank") || refundMethodLower.includes("transfer") || refundMethodLower.includes("شبكة") || refundMethodLower.includes("تحويل")) ? "1120" : "1110";
+    const refundTreasuryAccount = refundCashAccountCode === "1120" ? "bank" : "cash";
+
     // 9. Post GL Journal Entry (posting service expects positive absolute figures)
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
     let journalEntry = null;
@@ -926,45 +947,53 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
         tax: returnedTax,
         subtotal: returnedSubtotal
       };
-      journalEntry = await postingService.postReturnEntry(returnInvoiceForPosting, returnItems, actor, { transaction: t });
+      journalEntry = await postingService.postReturnEntry(returnInvoiceForPosting, returnItems, actor, {
+        transaction: t,
+        receivableReliefAmount,
+        cashRefundAmount,
+        cashAccountCode: refundCashAccountCode
+      });
     } catch (postErr) {
       logger.error(`[Posting] Failed to post return journal entry: ${postErr.message}`);
       throw new Error(`خطأ في إنشاء القيد المحاسبي للمرتجع: ${postErr.message}`);
     }
 
-    // 10. Record Treasury Cash Transaction (Cash Outward)
-    const methodLower = originalInvoice.paymentMethod.toLowerCase();
-    const account = (methodLower.includes("card") || methodLower.includes("bank") || methodLower.includes("transfer") || methodLower.includes("شبكة") || methodLower.includes("تحويل")) ? "bank" : "cash";
-
-    await models.CashTransaction.create({
-      id: `TX-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      companyId: req.companyId,
-      branchId,
-      branch: branchRecord.name,
-      type: "cash_out",
-      account,
-      amount: returnedTotal,
-      category: "مرتجع مبيعات",
-      description: `مرتجع مبيعات للفاتورة رقم ${originalInvoice.id} - مستند دائن ${returnInvoiceId}`,
-      reference: returnInvoiceId,
-      date: nowStr.slice(0, 10),
-      status: "posted",
-      createdBy: req.user ? req.user.id : "System",
-      journalEntryId: journalEntry ? journalEntry.id : null
-    }, { transaction: t });
-
-    // 11. Adjust Customer Outstanding Balance if needed (unpaid installment/due invoice)
-    const customer = await models.Customer.findOne({
-      where: { id: originalInvoice.customerId, companyId: req.companyId },
-      transaction: t
-    });
-    if (customer && Number(originalInvoice.remainingAmount || 0) > 0) {
-      const deduction = Math.min(Number(originalInvoice.remainingAmount), returnedTotal);
-      await customer.update({
-        balance: Math.max(0, roundVal(Number(customer.balance || 0) - deduction))
+    // 10. Record Treasury Cash Transaction — ONLY for the real cash refund
+    // portion (the excess of the return value over the outstanding receivable).
+    // Pure receivable relief moves no money, so no CashTransaction is created.
+    if (cashRefundAmount > 0) {
+      await models.CashTransaction.create({
+        id: `TX-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        companyId: req.companyId,
+        branchId,
+        branch: branchRecord.name,
+        type: "cash_out",
+        account: refundTreasuryAccount,
+        amount: cashRefundAmount,
+        category: "مرتجع مبيعات",
+        description: `مرتجع مبيعات (استرداد نقدي) للفاتورة رقم ${originalInvoice.id} - مستند دائن ${returnInvoiceId}`,
+        reference: returnInvoiceId,
+        date: nowStr.slice(0, 10),
+        status: "posted",
+        createdBy: req.user ? req.user.id : "System",
+        journalEntryId: journalEntry ? journalEntry.id : null
       }, { transaction: t });
+    }
+
+    // 11. Apply the receivable relief ONCE — customer balance + invoice
+    // remainingAmount both reduced by the AR portion only (never below zero).
+    if (receivableReliefAmount > 0) {
+      const customer = await models.Customer.findOne({
+        where: { id: originalInvoice.customerId, companyId: req.companyId },
+        transaction: t
+      });
+      if (customer) {
+        await customer.update({
+          balance: Math.max(0, roundVal(Number(customer.balance || 0) - receivableReliefAmount))
+        }, { transaction: t });
+      }
       await originalInvoice.update({
-        remainingAmount: roundVal(Number(originalInvoice.remainingAmount) - deduction)
+        remainingAmount: Math.max(0, roundVal(outstandingBefore - receivableReliefAmount))
       }, { transaction: t });
     }
 
@@ -983,6 +1012,14 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
     // Recalculate customer net purchases
     const { recalculateCustomerNetPurchases } = require("../services/customer-purchases.service");
     await recalculateCustomerNetPurchases(models, req.companyId, originalInvoice.customerId, { transaction: t });
+
+    // Build the success response up front and persist it for idempotent replay
+    // BEFORE commit (same transaction as the claimed idempotency row).
+    const responseData = returnInvoice.toJSON();
+    responseData.items = returnItems;
+    responseData.journalEntry = journalEntry;
+    const idemResponseBody = { success: true, ...responseData, data: responseData };
+    await idempotencyService.succeed({ request: idemRequest, statusCode: 201, responseBody: idemResponseBody, transaction: t });
 
     // Commit Transaction
     await t.commit();
@@ -1008,11 +1045,7 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
       }
     });
 
-    const responseData = returnInvoice.toJSON();
-    responseData.items = returnItems;
-    responseData.journalEntry = journalEntry;
-
-    return res.status(201).json({ success: true, ...responseData, data: responseData });
+    return res.status(201).json(idemResponseBody);
   } catch (error) {
     await t.rollback();
     next(error);
@@ -1026,18 +1059,22 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
     const body = req.body || {};
     const { originalInvoiceId, returnedAssetId, newAssetIds = [], paymentMethod = "Exchange", notes = "" } = body;
 
-    if (req.headers["idempotency-key"] || body.idempotencyKey) {
-      const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
-      const existing = await models.Invoice.findOne({
-        where: { idempotencyKey, companyId: req.companyId },
-        include: [{ model: models.InvoiceItem, as: "items" }],
-        transaction: t
-      });
-      if (existing) {
-        await t.rollback();
-        return res.status(200).json({ success: true, ...existing.toJSON(), data: existing.toJSON() });
-      }
+    // Phase 21.3 — central race-safe idempotency (unique company_id+scope+key).
+    const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
+    if (!idempotencyKey) {
+      await t.rollback();
+      return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لعملية الاستبدال" });
     }
+    const idemScope = "sales.exchange";
+    const idemRequestHash = idempotencyService.hashRequest(idemScope, body);
+    const idemClaim = await idempotencyService.claim({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash, transaction: t });
+    if (!idemClaim.claimed) {
+      try { await t.rollback(); } catch (_) { /* transaction already aborted by the unique violation */ }
+      const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash });
+      if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+      return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+    }
+    const idemRequest = idemClaim.request;
 
     if (!originalInvoiceId) {
       throw new ValidationError("رقم الفاتورة الأصلية مطلوب");
@@ -1223,6 +1260,30 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
     const diffTax = roundVal(diffBase * (vatRatePercent / 100));
     const diffTotal = roundVal(diffBase + diffTax);
 
+    // Phase 21.2 — receivable-first settlement of the exchange difference.
+    // diff < 0: relieve the outstanding receivable first, cash-refund only the excess.
+    // diff > 0: raise the receivable (credit) OR collect cash now (paid_now). The UI
+    // hardcodes paymentMethod:"Exchange", so an unconfirmed positive diff defaults to
+    // CREDIT to avoid recording a cash_in that never actually happened.
+    const outstandingBefore = roundVal(Number(originalInvoice.remainingAmount || 0));
+    const paidNowMethods = ["cash", "bank", "card", "transfer", "شبكة", "تحويل"];
+    const pmLower = String(paymentMethod || "").toLowerCase();
+    const settlementMode = (body.settlementMode === "paid_now" || body.settlementMode === "credit")
+      ? body.settlementMode
+      : ((diffTotal > 0 && paidNowMethods.some((m) => pmLower.includes(m))) ? "paid_now" : "credit");
+    let receivableReliefAmount = 0;   // diff < 0 → reduce AR
+    let cashRefundAmount = 0;         // diff < 0 → refund the excess as cash
+    let receivableIncreaseAmount = 0; // diff > 0 credit → raise AR
+    let cashInAmount = 0;             // diff > 0 paid_now → collect cash now
+    if (diffTotal < 0) {
+      const creditValue = roundVal(Math.abs(diffTotal));
+      receivableReliefAmount = roundVal(Math.min(creditValue, outstandingBefore));
+      cashRefundAmount = roundVal(creditValue - receivableReliefAmount);
+    } else if (diffTotal > 0) {
+      if (settlementMode === "paid_now") cashInAmount = roundVal(diffTotal);
+      else receivableIncreaseAmount = roundVal(diffTotal);
+    }
+
     // 6. Generate Exchange Invoice ID
     const exchangeInvoiceId = `EX-${Date.now().toString().slice(-6)}-${Math.floor(Math.random() * 1000)}`;
 
@@ -1391,10 +1452,13 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
     const accountCode = isBank ? "1120" : "1110";
 
     const lines = [];
+    // Money leg (Phase 21.2): split between Cash/Bank and Accounts Receivable 1300.
     if (diffTotal > 0) {
-      lines.push({ accountCode, debit: diffTotal, credit: 0, description: "دفع فارق استبدال" });
+      if (cashInAmount > 0) lines.push({ accountCode, debit: cashInAmount, credit: 0, description: "دفع فارق استبدال نقداً" });
+      if (receivableIncreaseAmount > 0) lines.push({ accountCode: "1300", debit: receivableIncreaseAmount, credit: 0, description: "زيادة ذمم العميل — فارق استبدال" });
     } else if (diffTotal < 0) {
-      lines.push({ accountCode, debit: 0, credit: Math.abs(diffTotal), description: "إرجاع فارق استبدال" });
+      if (receivableReliefAmount > 0) lines.push({ accountCode: "1300", debit: 0, credit: receivableReliefAmount, description: "تخفيض ذمم العميل — فارق استبدال" });
+      if (cashRefundAmount > 0) lines.push({ accountCode, debit: 0, credit: cashRefundAmount, description: "إرجاع فارق استبدال نقداً" });
     }
 
     if (returnedValue > 0) {
@@ -1435,8 +1499,11 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
       throw new Error(`خطأ في إنشاء القيد المحاسبي للاستبدال: ${postErr.message}`);
     }
 
-    // 12. Record Treasury Cash Transaction if cash/bank changed
-    if (diffTotal !== 0) {
+    // 12. Record Treasury Cash Transaction — ONLY for real money movement:
+    // cash collected now on a positive diff (paid_now), or the cash-refund excess
+    // on a negative diff. Pure receivable (credit/relief) movements create none.
+    const exchangeCashAmount = diffTotal > 0 ? cashInAmount : cashRefundAmount;
+    if (exchangeCashAmount > 0) {
       await models.CashTransaction.create({
         id: `TX-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         companyId: req.companyId,
@@ -1444,9 +1511,9 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
         branch: branchRecord.name,
         type: diffTotal > 0 ? "cash_in" : "cash_out",
         account: isBank ? "bank" : "cash",
-        amount: Math.abs(diffTotal),
+        amount: exchangeCashAmount,
         category: "استبدال أصول",
-        description: `فارق استبدال أصول - فاتورة استبدال رقم ${exchangeInvoiceId}`,
+        description: `فارق استبدال أصول (نقدي) - فاتورة استبدال رقم ${exchangeInvoiceId}`,
         reference: exchangeInvoiceId,
         date: nowStr.slice(0, 10),
         status: "posted",
@@ -1455,14 +1522,21 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
       }, { transaction: t });
     }
 
-    // 13. Adjust Customer Outstanding Balance if credit payment method is chosen
-    const customer = await models.Customer.findOne({
-      where: { id: originalInvoice.customerId, companyId: req.companyId },
-      transaction: t
-    });
-    if (customer && paymentMethod === "credit") {
-      await customer.update({
-        balance: roundVal(Number(customer.balance || 0) + diffTotal)
+    // 13. Apply the receivable movement ONCE — raise AR for a credit purchase of
+    // the difference, or relieve AR first for a refund. Cash never touches AR.
+    const exchangeArDelta = roundVal(receivableIncreaseAmount - receivableReliefAmount);
+    if (exchangeArDelta !== 0) {
+      const customer = await models.Customer.findOne({
+        where: { id: originalInvoice.customerId, companyId: req.companyId },
+        transaction: t
+      });
+      if (customer) {
+        await customer.update({
+          balance: Math.max(0, roundVal(Number(customer.balance || 0) + exchangeArDelta))
+        }, { transaction: t });
+      }
+      await originalInvoice.update({
+        remainingAmount: Math.max(0, roundVal(outstandingBefore + exchangeArDelta))
       }, { transaction: t });
     }
 
@@ -1481,6 +1555,14 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
     // Recalculate customer net purchases
     const { recalculateCustomerNetPurchases } = require("../services/customer-purchases.service");
     await recalculateCustomerNetPurchases(models, req.companyId, originalInvoice.customerId, { transaction: t });
+
+    // Build the success response up front and persist it for idempotent replay
+    // BEFORE commit (same transaction as the claimed idempotency row).
+    const responseData = exchangeInvoice.toJSON();
+    responseData.items = exchangeItems;
+    responseData.journalEntry = journalEntry;
+    const idemResponseBody = { success: true, ...responseData, data: responseData };
+    await idempotencyService.succeed({ request: idemRequest, statusCode: 201, responseBody: idemResponseBody, transaction: t });
 
     // Commit Transaction
     await t.commit();
@@ -1505,11 +1587,7 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
       }
     });
 
-    const responseData = exchangeInvoice.toJSON();
-    responseData.items = exchangeItems;
-    responseData.journalEntry = journalEntry;
-
-    return res.status(201).json({ success: true, ...responseData, data: responseData });
+    return res.status(201).json(idemResponseBody);
   } catch (error) {
     await t.rollback();
     next(error);
@@ -1746,8 +1824,30 @@ router.post("/customers/:id/gold/deposit", authMiddleware, async (req, res, next
 
 // ─── Customer Gold Payout Endpoint ───────────────────────────────────────────
 router.post("/customers/:id/gold/payout", authMiddleware, async (req, res, next) => {
+  // Phase 21.5 — central race-safe idempotency (unique company_id+scope+key). The
+  // key is REQUIRED and req.params (the customer id) is folded into the request
+  // hash so one key cannot pay out a different customer. This endpoint has no UI
+  // caller yet, so requiring a key makes any future/API caller safe-by-default.
+  const idempotencyKey = req.headers["idempotency-key"] || (req.body && req.body.idempotencyKey);
+  if (!idempotencyKey || !String(idempotencyKey).trim()) {
+    return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لصرف رصيد الذهب" });
+  }
+  const idemScope = "customer.gold_payout";
+  const idemRequestHash = idempotencyService.hashRequest(idemScope, req.body || {}, req.params);
+
   const t = await models.sequelize.transaction();
   try {
+    // Claim the idempotency key FIRST inside the write transaction; a concurrent
+    // duplicate fails the unique insert → rollback and replay/conflict.
+    const idemClaim = await idempotencyService.claim({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash, transaction: t });
+    if (!idemClaim.claimed) {
+      try { await t.rollback(); } catch (_) { /* aborted by the unique violation */ }
+      const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash });
+      if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+      return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+    }
+    const idemRequest = idemClaim.request;
+
     const customerId = req.params.id;
     const { weight, ratePerGram, payMethod = "cash" } = req.body || {};
 
@@ -1815,9 +1915,13 @@ router.post("/customers/:id/gold/payout", authMiddleware, async (req, res, next)
       { accountCode: cashAccountCode, debit: 0, credit: calculatedValue, description: "صرف نقدي للعميل" }
     ]);
 
+    // Persist the success response for idempotent replay BEFORE commit.
+    const idemResponseBody = { success: true, cgp, journalEntry };
+    await idempotencyService.succeed({ request: idemRequest, statusCode: 200, responseBody: idemResponseBody, transaction: t });
+
     await t.commit();
 
-    return res.status(200).json({ success: true, cgp, journalEntry });
+    return res.status(200).json(idemResponseBody);
   } catch (error) {
     await t.rollback();
     next(error);
@@ -3757,17 +3861,21 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
     // Idempotency: a retried/double-clicked receive returns the original PO
     // (and its stock) instead of receiving the goods twice.
     const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
-    if (idempotencyKey) {
-      const existingByKey = await models.PurchaseOrder.findOne({
-        where: { idempotencyKey, companyId: req.companyId },
-        paranoid: false,
-        transaction: t
-      });
-      if (existingByKey) {
-        await t.rollback();
-        return res.status(200).json({ success: true, ...existingByKey.toJSON(), data: existingByKey.toJSON() });
-      }
+    // Phase 21.3 — central race-safe idempotency (unique company_id+scope+key).
+    if (!idempotencyKey) {
+      await t.rollback();
+      return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لاستلام المشتريات" });
     }
+    const idemScope = "purchase.receive";
+    const idemRequestHash = idempotencyService.hashRequest(idemScope, body);
+    const idemClaim = await idempotencyService.claim({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash, transaction: t });
+    if (!idemClaim.claimed) {
+      try { await t.rollback(); } catch (_) { /* transaction already aborted by the unique violation */ }
+      const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash });
+      if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+      return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+    }
+    const idemRequest = idemClaim.request;
 
     if (!supplierId) throw new ValidationError("المورد مطلوب لاستلام أمر الشراء");
     if (!branchId) throw new ValidationError("الفرع أو المستودع مطلوب لاستلام المشتريات");
@@ -4283,6 +4391,26 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
 
     const updatedSupplier = await models.Supplier.findByPk(supplier.id, { transaction: t });
 
+    // Build the success response up front and persist it for idempotent replay
+    // BEFORE commit (same transaction as the claimed idempotency row).
+    const output = {
+      purchaseOrder: {
+        ...purchaseOrder.toJSON(),
+        items: createdItems,
+        totalWeight,
+        paidAmount,
+        remainingAmount,
+        paymentStatus
+      },
+      supplier: updatedSupplier?.toJSON(),
+      assets: createdAssets,
+      journalEntry,
+      treasuryTransaction,
+      notification: notification.toJSON()
+    };
+    const idemResponseBody = { success: true, ...output, data: output };
+    await idempotencyService.succeed({ request: idemRequest, statusCode: 201, responseBody: idemResponseBody, transaction: t });
+
     await t.commit();
 
     emitEntityChanged(req.companyId, {
@@ -4366,22 +4494,7 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       related: { supplierId: supplier.id, purchaseOrderId }
     });
 
-    const output = {
-      purchaseOrder: {
-        ...purchaseOrder.toJSON(),
-        items: createdItems,
-        totalWeight,
-        paidAmount,
-        remainingAmount,
-        paymentStatus
-      },
-      supplier: updatedSupplier?.toJSON(),
-      assets: createdAssets,
-      journalEntry,
-      treasuryTransaction,
-      notification: notification.toJSON()
-    };
-    return res.status(201).json({ success: true, ...output, data: output });
+    return res.status(201).json(idemResponseBody);
   } catch (error) {
     await t.rollback();
     next(error);
@@ -4406,25 +4519,25 @@ router.post("/purchase-orders/:id/pay", authMiddleware, requirePermission("treas
     return next(new ValidationError("Idempotency-Key header is required for supplier payments."));
   }
 
-  // Idempotency replay/conflict check BEFORE opening the write transaction.
-  const existing = await models.CashTransaction.findOne({
-    where: { companyId: req.companyId, idempotencyKey: String(idempotencyKey) },
-  });
-  if (existing) {
-    const sameOperation =
-      existing.type === "cash_out" &&
-      existing.category === "supplier_purchase" &&
-      existing.reference === req.params.id &&
-      Math.abs(Number(existing.amount) - Number(b.amount)) <= 0.01;
-    if (sameOperation) {
-      const out = existing.toJSON();
-      return res.status(200).json({ success: true, data: out, meta: { idempotentReplay: true } });
-    }
-    return next(new ConflictError("Idempotency-Key already used for a different operation."));
-  }
+  // Phase 21.4 — central race-safe idempotency (unique company_id+scope+key),
+  // replacing the CashTransaction lookup/sameOperation check. The PO id is folded
+  // into the request hash so one key cannot pay a different purchase order.
+  const idemScope = "purchase.payment";
+  const idemRequestHash = idempotencyService.hashRequest(idemScope, b, req.params);
 
   const t = await models.sequelize.transaction();
   try {
+    // Claim the idempotency key FIRST inside the write transaction; a concurrent
+    // duplicate fails the unique insert → rollback and replay/conflict.
+    const idemClaim = await idempotencyService.claim({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash, transaction: t });
+    if (!idemClaim.claimed) {
+      try { await t.rollback(); } catch (_) { /* aborted by the unique violation */ }
+      const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash });
+      if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+      return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+    }
+    const idemRequest = idemClaim.request;
+
     // 1. Lock the PO row inside the transaction (serializes concurrent payments).
     const po = await models.PurchaseOrder.findOne({
       where: { id: req.params.id, companyId: req.companyId },
@@ -4513,13 +4626,8 @@ router.post("/purchase-orders/:id/pay", authMiddleware, requirePermission("treas
       after: JSON.stringify({ purchaseOrderId: po.id, supplierId: po.supplierId, amount, paidSoFarAfter, remainingAfter, cashTransactionId: cashTx.id, journalEntryId: journalEntry.id }),
     }, { transaction: t });
 
-    await t.commit();
-
-    emitEntityChanged(req.companyId, { entity: "Treasury", action: "create", id: cashTx.id, related: { supplierId: po.supplierId, purchaseOrderId: po.id } });
-    emitEntityChanged(req.companyId, { entity: "Accounting", action: "create", id: journalEntry.id, related: { supplierId: po.supplierId, purchaseOrderId: po.id } });
-
     // Reference-only supplier due (never used for the computation, never written).
-    const supplierRow = await models.Supplier.findByPk(po.supplierId);
+    const supplierRow = await models.Supplier.findByPk(po.supplierId, { transaction: t });
 
     const output = {
       purchaseOrder: { id: po.id, supplierId: po.supplierId, total },
@@ -4537,11 +4645,20 @@ router.post("/purchase-orders/:id/pay", authMiddleware, requirePermission("treas
       remainingAfter,
       supplierDueReference: supplierRow ? round4(supplierRow.due) : null,
     };
-    return res.status(201).json({
+    const idemResponseBody = {
       success: true,
       data: output,
       meta: { readBySupplierStatement: true, supplierDueUpdated: false },
-    });
+    };
+    // Persist the success response for idempotent replay BEFORE commit.
+    await idempotencyService.succeed({ request: idemRequest, statusCode: 201, responseBody: idemResponseBody, transaction: t });
+
+    await t.commit();
+
+    emitEntityChanged(req.companyId, { entity: "Treasury", action: "create", id: cashTx.id, related: { supplierId: po.supplierId, purchaseOrderId: po.id } });
+    emitEntityChanged(req.companyId, { entity: "Accounting", action: "create", id: journalEntry.id, related: { supplierId: po.supplierId, purchaseOrderId: po.id } });
+
+    return res.status(201).json(idemResponseBody);
   } catch (error) {
     await t.rollback();
     next(error);
@@ -5112,6 +5229,48 @@ router.get("/customers/:id/statement-v2", authMiddleware, requirePermission("cus
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CUSTOMER CREDIT LEDGER (رصيد العميل الدائن) — Phase 23-Fix. READ-ONLY.
+// Returns the customer's available credit (SUM active credit_in − credit_out)
+// plus recent/paged ledger rows from customer_credit_transactions. This is
+// infrastructure only: NO current flow creates credit yet, so a customer with no
+// credit movements returns availableCredit = 0. Never mutates Customer.balance,
+// Invoice.remainingAmount, or the GL. No POST/apply/refund endpoint exists.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get("/customers/:id/credit", authMiddleware, requirePermission("customers.view"), async (req, res, next) => {
+  try {
+    const customer = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId } });
+    if (!customer) throw new NotFoundError("Customer not found.");
+
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 50, 1), 200);
+
+    const summary = await customerCreditService.getCustomerCreditSummary({
+      models, companyId: req.companyId, customerId: customer.id
+    });
+    const transactions = await customerCreditService.getCustomerCreditTransactions({
+      models, companyId: req.companyId, customerId: customer.id, limit: pageSize, offset: (page - 1) * pageSize
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        customerId: customer.id,
+        availableCredit: summary.availableCredit,
+        totalCreditIn: summary.totalCreditIn,
+        totalCreditOut: summary.totalCreditOut,
+        currency: summary.currency,
+        page,
+        pageSize,
+        transactions,
+        meta: { source: "customer_credit_ledger", readOnly: true, glBridge: "deferred" },
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GL ACCOUNT STATEMENT (كشف حساب) — Phase 9B. READ-ONLY.
 // Builds a per-GL-account ledger from POSTED journal lines only. It never reads
 // Account.balance to derive opening/closing (those are computed from the lines
@@ -5128,6 +5287,63 @@ router.get("/customers/:id/statement-v2", authMiddleware, requirePermission("cus
 // ─────────────────────────────────────────────────────────────────────────────
 const round4 = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
 const isValidYmd = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(new Date(s).getTime());
+const ledgerMeta = {
+  ledgerBased: true,
+  source: "journal_lines",
+  readOnly: true,
+};
+
+function ledgerDateWhere({ from, to, asOf, before }) {
+  if (before) return { [Op.lt]: before };
+  const date = {};
+  if (from) date[Op.gte] = from;
+  if (to) date[Op.lte] = to;
+  if (asOf) date[Op.lte] = asOf;
+  return Object.keys(date).length ? date : null;
+}
+
+function ledgerEntryWhere({ companyId, from, to, asOf, branchId, before }) {
+  const where = { companyId, status: "posted" };
+  const date = ledgerDateWhere({ from, to, asOf, before });
+  if (date) where.date = date;
+  if (branchId) where.branchId = branchId;
+  return where;
+}
+
+function accountSignedBalance(account, debit, credit) {
+  return account.nature === "credit"
+    ? round4((Number(credit) || 0) - (Number(debit) || 0))
+    : round4((Number(debit) || 0) - (Number(credit) || 0));
+}
+
+async function ledgerTotalsByAccountCode({ companyId, accountCodes, from, to, asOf, branchId, before }) {
+  const rows = await models.JournalLine.findAll({
+    attributes: [
+      "accountCode",
+      [models.sequelize.fn("COALESCE", models.sequelize.fn("SUM", models.sequelize.col("debit")), 0), "debitTotal"],
+      [models.sequelize.fn("COALESCE", models.sequelize.fn("SUM", models.sequelize.col("credit")), 0), "creditTotal"],
+    ],
+    where: { accountCode: { [Op.in]: accountCodes } },
+    include: [{
+      model: models.JournalEntry,
+      as: "journalEntry",
+      attributes: [],
+      required: true,
+      where: ledgerEntryWhere({ companyId, from, to, asOf, branchId, before }),
+    }],
+    group: ["accountCode"],
+    raw: true,
+  });
+
+  const byCode = new Map(accountCodes.map((code) => [code, { debitTotal: 0, creditTotal: 0 }]));
+  for (const row of rows) {
+    byCode.set(row.accountCode, {
+      debitTotal: round4(row.debitTotal),
+      creditTotal: round4(row.creditTotal),
+    });
+  }
+  return byCode;
+}
 
 router.get("/accounts/:id/statement", authMiddleware, requirePermission("accounting.view"), async (req, res, next) => {
   try {
@@ -5140,6 +5356,7 @@ router.get("/accounts/:id/statement", authMiddleware, requirePermission("account
     // 2. Validate the optional date window.
     const from = req.query.from ? String(req.query.from) : null;
     const to = req.query.to ? String(req.query.to) : null;
+    const branchId = req.query.branchId ? String(req.query.branchId) : null;
     if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
     if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
     if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
@@ -5163,7 +5380,7 @@ router.get("/accounts/:id/statement", authMiddleware, requirePermission("account
           as: "journalEntry",
           attributes: [],
           required: true,
-          where: { companyId: req.companyId, status: "posted", date: { [Op.lt]: from } },
+          where: ledgerEntryWhere({ companyId: req.companyId, before: from, branchId }),
         }],
         raw: true,
       });
@@ -5171,12 +5388,7 @@ router.get("/accounts/:id/statement", authMiddleware, requirePermission("account
     }
 
     // 5. All posted lines within [from,to], deterministically ordered.
-    const entryWhere = { companyId: req.companyId, status: "posted" };
-    if (from || to) {
-      entryWhere.date = {};
-      if (from) entryWhere.date[Op.gte] = from;
-      if (to) entryWhere.date[Op.lte] = to;
-    }
+    const entryWhere = ledgerEntryWhere({ companyId: req.companyId, from, to, branchId });
     const lineRows = await models.JournalLine.findAll({
       where: { accountId: account.id },
       include: [{
@@ -5220,6 +5432,8 @@ router.get("/accounts/:id/statement", authMiddleware, requirePermission("account
     const total = allRows.length;
     const totalPages = Math.ceil(total / pageSize);
     const closingBalance = total ? allRows[total - 1].runningBalance : openingBalance;
+    const debitTotal = round4(allRows.reduce((sum, row) => sum + row.debit, 0));
+    const creditTotal = round4(allRows.reduce((sum, row) => sum + row.credit, 0));
     const start = (page - 1) * pageSize;
     const items = allRows.slice(start, start + pageSize);
 
@@ -5236,13 +5450,21 @@ router.get("/accounts/:id/statement", authMiddleware, requirePermission("account
         },
         from,
         to,
+        branchId,
         openingBalance,
+        debitTotal,
+        creditTotal,
         closingBalance,
         page,
         pageSize,
         total,
         totalPages,
         items,
+        meta: {
+          ...ledgerMeta,
+          report: "account_ledger",
+          partyLevel: false,
+        },
       },
     });
   } catch (error) {
@@ -5263,7 +5485,13 @@ router.get("/reports/trial-balance", authMiddleware, requirePermission("accounti
   try {
     // 1. Validate query. `asOf` optional date, `includeZero` optional bool.
     const asOf = req.query.asOf ? String(req.query.asOf) : null;
+    const from = req.query.from ? String(req.query.from) : null;
+    const to = req.query.to ? String(req.query.to) : null;
+    const branchId = req.query.branchId ? String(req.query.branchId) : null;
     if (asOf && !isValidYmd(asOf)) throw new ValidationError("Invalid 'asOf' date (expected YYYY-MM-DD).");
+    if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
+    if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
+    if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
     const includeZero = String(req.query.includeZero ?? "false").toLowerCase() === "true";
 
     // 2. All accounts in the tenant — sorted for deterministic output.
@@ -5275,8 +5503,7 @@ router.get("/reports/trial-balance", authMiddleware, requirePermission("accounti
 
     // 3. Aggregate posted journal lines per account, optionally up to `asOf`.
     //    status="posted" alone excludes drafts/pending/balanced/reversed.
-    const entryWhere = { companyId: req.companyId, status: "posted" };
-    if (asOf) entryWhere.date = { [Op.lte]: asOf };
+    const entryWhere = ledgerEntryWhere({ companyId: req.companyId, from, to, asOf, branchId });
     const rows = await models.JournalLine.findAll({
       attributes: [
         "accountId",
@@ -5351,13 +5578,22 @@ router.get("/reports/trial-balance", authMiddleware, requirePermission("accounti
       success: true,
       data: {
         asOf,
+        from,
+        to,
+        branchId,
         includeZero,
         accountCount: items.length,
         totalDebit,
         totalCredit,
         isBalanced: Math.abs(totalDebit - totalCredit) <= 0.01,
+        balanced: Math.abs(totalDebit - totalCredit) <= 0.01,
         totalDifference,
         items,
+        meta: {
+          ...ledgerMeta,
+          report: "trial_balance",
+          balanced: Math.abs(totalDebit - totalCredit) <= 0.01,
+        },
       },
     });
   } catch (error) {
@@ -5469,6 +5705,370 @@ router.get("/reports/ledger-reconciliation", authMiddleware, requirePermission("
         totalAbsoluteDifference,
         hasDifferences: differenceCount > 0,
         items,
+        meta: {
+          ...ledgerMeta,
+          report: "ledger_reconciliation",
+          reconciliation: true,
+          comparedAgainst: "account_balance_mirror",
+        },
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Ledger account report by accountCode/accountId. This complements
+// /accounts/:id/statement without replacing it, and keeps the GL as the source.
+router.get("/reports/ledger/account", authMiddleware, requirePermission("accounting.view"), async (req, res, next) => {
+  try {
+    const accountId = req.query.accountId ? String(req.query.accountId) : null;
+    const accountCode = req.query.accountCode ? String(req.query.accountCode) : null;
+    const from = req.query.from ? String(req.query.from) : null;
+    const to = req.query.to ? String(req.query.to) : null;
+    const branchId = req.query.branchId ? String(req.query.branchId) : null;
+    if (!accountId && !accountCode) throw new ValidationError("accountId or accountCode is required.");
+    if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
+    if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
+    if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
+
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 50, 1), 200);
+    const account = await models.Account.findOne({
+      where: {
+        companyId: req.companyId,
+        ...(accountId ? { id: accountId } : { code: accountCode }),
+      },
+    });
+    if (!account) throw new NotFoundError("Account not found.");
+
+    const deltaOf = (debit, credit) =>
+      account.nature === "debit"
+        ? (Number(debit) || 0) - (Number(credit) || 0)
+        : (Number(credit) || 0) - (Number(debit) || 0);
+
+    let openingBalance = 0;
+    if (from) {
+      const priorLines = await models.JournalLine.findAll({
+        attributes: ["debit", "credit"],
+        where: { accountId: account.id },
+        include: [{
+          model: models.JournalEntry,
+          as: "journalEntry",
+          attributes: [],
+          required: true,
+          where: ledgerEntryWhere({ companyId: req.companyId, before: from, branchId }),
+        }],
+        raw: true,
+      });
+      openingBalance = round4(priorLines.reduce((sum, line) => sum + deltaOf(line.debit, line.credit), 0));
+    }
+
+    const lineRows = await models.JournalLine.findAll({
+      where: { accountId: account.id },
+      include: [{
+        model: models.JournalEntry,
+        as: "journalEntry",
+        attributes: ["id", "date", "sourceType", "sourceId", "branchId", "createdAt"],
+        required: true,
+        where: ledgerEntryWhere({ companyId: req.companyId, from, to, branchId }),
+      }],
+      order: [
+        [{ model: models.JournalEntry, as: "journalEntry" }, "date", "ASC"],
+        [{ model: models.JournalEntry, as: "journalEntry" }, "createdAt", "ASC"],
+        [{ model: models.JournalEntry, as: "journalEntry" }, "id", "ASC"],
+        ["id", "ASC"],
+      ],
+    });
+
+    let running = openingBalance;
+    const allRows = lineRows.map((line) => {
+      const entry = line.journalEntry;
+      const debit = round4(line.debit);
+      const credit = round4(line.credit);
+      const delta = round4(deltaOf(debit, credit));
+      running = round4(running + delta);
+      return {
+        journalEntryId: entry.id,
+        journalLineId: line.id,
+        date: entry.date,
+        description: line.description,
+        sourceType: entry.sourceType,
+        sourceId: entry.sourceId,
+        branchId: entry.branchId,
+        debit,
+        credit,
+        delta,
+        runningBalance: running,
+      };
+    });
+
+    const debitTotal = round4(allRows.reduce((sum, row) => sum + row.debit, 0));
+    const creditTotal = round4(allRows.reduce((sum, row) => sum + row.credit, 0));
+    const total = allRows.length;
+    const totalPages = Math.ceil(total / pageSize);
+    const start = (page - 1) * pageSize;
+    const items = allRows.slice(start, start + pageSize);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        account: {
+          id: account.id,
+          code: account.code,
+          name: account.name,
+          nameAr: account.nameAr,
+          type: account.type,
+          nature: account.nature,
+          balance: round4(account.balance),
+        },
+        from,
+        to,
+        branchId,
+        openingBalance,
+        debitTotal,
+        creditTotal,
+        closingBalance: total ? allRows[total - 1].runningBalance : openingBalance,
+        page,
+        pageSize,
+        total,
+        totalPages,
+        items,
+        meta: {
+          ...ledgerMeta,
+          report: "account_ledger",
+          partyLevel: false,
+        },
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Cash/bank reconciliation compares GL activity against operational treasury
+// CashTransaction rows. It is read-only and reports differences only.
+router.get("/reports/ledger/cash-reconciliation", authMiddleware, requirePermission("accounting.view"), async (req, res, next) => {
+  try {
+    const from = req.query.from ? String(req.query.from) : null;
+    const to = req.query.to ? String(req.query.to) : null;
+    const branchId = req.query.branchId ? String(req.query.branchId) : null;
+    if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
+    if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
+    if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
+
+    const accountSpecs = [
+      { key: "cash", code: "1110", label: "Cash on Hand" },
+      { key: "bank", code: "1120", label: "Bank Accounts" },
+    ];
+    const codes = accountSpecs.map((spec) => spec.code);
+    const accounts = await models.Account.findAll({
+      where: { companyId: req.companyId, code: { [Op.in]: codes } },
+      raw: true,
+    });
+    const accountByCode = new Map(accounts.map((account) => [account.code, account]));
+    const openingByCode = from
+      ? await ledgerTotalsByAccountCode({ companyId: req.companyId, accountCodes: codes, before: from, branchId })
+      : new Map(codes.map((code) => [code, { debitTotal: 0, creditTotal: 0 }]));
+    const periodByCode = await ledgerTotalsByAccountCode({ companyId: req.companyId, accountCodes: codes, from, to, branchId });
+
+    const txWhere = {
+      companyId: req.companyId,
+      status: "posted",
+      type: { [Op.in]: ["cash_in", "cash_out", "transfer"] },
+    };
+    if (from || to) {
+      txWhere.date = {};
+      if (from) txWhere.date[Op.gte] = from;
+      if (to) txWhere.date[Op.lte] = to;
+    }
+    if (branchId) txWhere.branchId = branchId;
+    const cashTransactions = await models.CashTransaction.findAll({
+      where: txWhere,
+      attributes: ["id", "type", "account", "toAccount", "amount", "date", "reference", "journalEntryId"],
+      raw: true,
+    });
+
+    const txTotals = {
+      cash: { debit: 0, credit: 0, transactionCount: 0 },
+      bank: { debit: 0, credit: 0, transactionCount: 0 },
+    };
+    for (const tx of cashTransactions) {
+      const amount = round4(tx.amount);
+      for (const spec of accountSpecs) {
+        if (tx.type === "cash_in" && tx.account === spec.key) {
+          txTotals[spec.key].debit = round4(txTotals[spec.key].debit + amount);
+          txTotals[spec.key].transactionCount += 1;
+        } else if (tx.type === "cash_out" && tx.account === spec.key) {
+          txTotals[spec.key].credit = round4(txTotals[spec.key].credit + amount);
+          txTotals[spec.key].transactionCount += 1;
+        } else if (tx.type === "transfer" && tx.account === spec.key) {
+          txTotals[spec.key].credit = round4(txTotals[spec.key].credit + amount);
+          txTotals[spec.key].transactionCount += 1;
+        } else if (tx.type === "transfer" && tx.toAccount === spec.key) {
+          txTotals[spec.key].debit = round4(txTotals[spec.key].debit + amount);
+          txTotals[spec.key].transactionCount += 1;
+        }
+      }
+    }
+
+    const items = accountSpecs.map((spec) => {
+      const account = accountByCode.get(spec.code) || { nature: "debit", balance: 0 };
+      const opening = openingByCode.get(spec.code) || { debitTotal: 0, creditTotal: 0 };
+      const period = periodByCode.get(spec.code) || { debitTotal: 0, creditTotal: 0 };
+      const openingGlBalance = accountSignedBalance(account, opening.debitTotal, opening.creditTotal);
+      const periodGlDebit = round4(period.debitTotal);
+      const periodGlCredit = round4(period.creditTotal);
+      const glNetMovement = round4(periodGlDebit - periodGlCredit);
+      const operationalDebit = round4(txTotals[spec.key].debit);
+      const operationalCredit = round4(txTotals[spec.key].credit);
+      const operationalNetMovement = round4(operationalDebit - operationalCredit);
+      return {
+        account: spec.key,
+        accountCode: spec.code,
+        accountName: account.name || spec.label,
+        openingGlBalance,
+        periodGlDebit,
+        periodGlCredit,
+        closingGlBalance: round4(openingGlBalance + glNetMovement),
+        cashTransactionInTotal: operationalDebit,
+        cashTransactionOutTotal: operationalCredit,
+        cashTransactionNetMovement: operationalNetMovement,
+        transactionCount: txTotals[spec.key].transactionCount,
+        movementDifference: round4(glNetMovement - operationalNetMovement),
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        from,
+        to,
+        branchId,
+        items,
+        totals: {
+          glNetMovement: round4(items.reduce((sum, item) => sum + item.periodGlDebit - item.periodGlCredit, 0)),
+          cashTransactionNetMovement: round4(items.reduce((sum, item) => sum + item.cashTransactionNetMovement, 0)),
+          movementDifference: round4(items.reduce((sum, item) => sum + item.movementDifference, 0)),
+        },
+        meta: {
+          ledgerBased: true,
+          reconciliation: true,
+          glSource: "journal_lines",
+          operationalSource: "cash_transactions",
+          readOnly: true,
+          accounts: ["1110", "1120"],
+        },
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// AR/AP reconciliation compares account-level GL balances against operational
+// mirrors. Party-level reconciliation is deferred because journal lines do not
+// store customerId/supplierId dimensions.
+router.get("/reports/ledger/ar-ap-reconciliation", authMiddleware, requirePermission("accounting.view"), async (req, res, next) => {
+  try {
+    const asOf = req.query.asOf ? String(req.query.asOf) : null;
+    const branchId = req.query.branchId ? String(req.query.branchId) : null;
+    if (asOf && !isValidYmd(asOf)) throw new ValidationError("Invalid 'asOf' date (expected YYYY-MM-DD).");
+
+    const accountCodes = ["1300", "2100", "2300"];
+    const accounts = await models.Account.findAll({
+      where: { companyId: req.companyId, code: { [Op.in]: accountCodes } },
+      raw: true,
+    });
+    const accountByCode = new Map(accounts.map((account) => [account.code, account]));
+    const ledgerTotals = await ledgerTotalsByAccountCode({ companyId: req.companyId, accountCodes, asOf, branchId });
+    const ledgerBalance = (code) => {
+      const account = accountByCode.get(code) || { nature: code === "1300" ? "debit" : "credit" };
+      const totals = ledgerTotals.get(code) || { debitTotal: 0, creditTotal: 0 };
+      return accountSignedBalance(account, totals.debitTotal, totals.creditTotal);
+    };
+
+    const customers = await models.Customer.findAll({
+      where: { companyId: req.companyId },
+      attributes: ["id", "balance", "status"],
+      raw: true,
+    });
+    const suppliers = await models.Supplier.findAll({
+      where: { companyId: req.companyId },
+      attributes: ["id", "due", "status"],
+      raw: true,
+    });
+    const customerBalanceTotal = round4(customers.reduce((sum, customer) => sum + (Number(customer.balance) || 0), 0));
+    const supplierDueTotal = round4(suppliers.reduce((sum, supplier) => sum + (Number(supplier.due) || 0), 0));
+
+    let customerCreditAvailableTotal = null;
+    let customerCreditWarning = null;
+    try {
+      const creditRows = await models.CustomerCreditTransaction.findAll({
+        where: { companyId: req.companyId, status: "active" },
+        attributes: ["direction", "amount"],
+        raw: true,
+      });
+      customerCreditAvailableTotal = round4(creditRows.reduce((sum, row) => {
+        const amount = Number(row.amount) || 0;
+        return sum + (row.direction === "credit_out" ? -amount : amount);
+      }, 0));
+    } catch (err) {
+      customerCreditWarning = "customer_credit_transactions_unavailable";
+    }
+
+    const arGlBalance = ledgerBalance("1300");
+    const apGlBalance = ledgerBalance("2100");
+    const depositsGlBalance = ledgerBalance("2300");
+    const items = [
+      {
+        key: "accountsReceivable",
+        accountCode: "1300",
+        accountName: accountByCode.get("1300")?.name || "Accounts Receivable",
+        glBalance: arGlBalance,
+        operationalBalance: customerBalanceTotal,
+        operationalSource: "customers.balance",
+        difference: round4(arGlBalance - customerBalanceTotal),
+        recordCount: customers.length,
+      },
+      {
+        key: "accountsPayable",
+        accountCode: "2100",
+        accountName: accountByCode.get("2100")?.name || "Accounts Payable",
+        glBalance: apGlBalance,
+        operationalBalance: supplierDueTotal,
+        operationalSource: "suppliers.due",
+        difference: round4(apGlBalance - supplierDueTotal),
+        recordCount: suppliers.length,
+      },
+      {
+        key: "customerDeposits",
+        accountCode: "2300",
+        accountName: accountByCode.get("2300")?.name || "Customer Deposits",
+        glBalance: depositsGlBalance,
+        operationalBalance: customerCreditAvailableTotal,
+        operationalSource: "customer_credit_transactions.available_credit",
+        difference: customerCreditAvailableTotal === null ? null : round4(depositsGlBalance - customerCreditAvailableTotal),
+        warning: customerCreditWarning,
+      },
+    ];
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        asOf,
+        branchId,
+        items,
+        meta: {
+          ledgerBased: true,
+          reconciliation: true,
+          glSource: "journal_lines",
+          operationalSources: ["customers.balance", "suppliers.due", "customer_credit_transactions"],
+          readOnly: true,
+          accounts: ["1300", "2100", "2300"],
+          partyLevel: false,
+          reason: "Journal lines do not store customerId/supplierId",
+        },
       },
     });
   } catch (error) {
@@ -5700,6 +6300,8 @@ router.get("/reports/tax-summary", authMiddleware, requirePermission("reports.vi
     const payload = {
       generatedAt: new Date().toISOString(),
       basis: "invoice",
+      source: "source_documents",
+      ledgerBased: false,
       postedOnly: true,
       returnsNetted: "via_negative_invoice_totals",
       // Phase 12B (UNCHANGED for backward compatibility — verify-vat-output): the
@@ -5810,6 +6412,8 @@ router.get("/reports/profit-summary", authMiddleware, requirePermission("reports
     const payload = {
       generatedAt: new Date().toISOString(),
       basis: "invoice-items",
+      source: "source_documents",
+      ledgerBased: false,
       postedOnly: true,
       includedTypes: ["sale"],
       returnsExchanges: "excluded_pending_item_signing_review",
@@ -7417,32 +8021,59 @@ router.post("/payslips/:id/pay", authMiddleware, async (req, res, next) => {
     const slip = await models.Payslip.findOne({ where: { id: req.params.id, companyId: req.companyId } });
     if (!slip) return res.status(404).json({ success: false, message: "كشف الراتب غير موجود" });
 
-    // Idempotency: a retry of the same pay request returns the already-paid
-    // payslip instead of posting the salary payment twice.
+    // Phase 21.5 — central race-safe idempotency (unique company_id+scope+key),
+    // replacing the optional-key lookup-only check. The key is now REQUIRED and
+    // req.params (the payslip id) is folded into the request hash.
     const idempotencyKey = req.headers["idempotency-key"] || req.body.idempotencyKey;
-    if (idempotencyKey && slip.idempotencyKey === idempotencyKey) {
-      const out = slip.toJSON();
-      return res.status(200).json({ success: true, ...out, data: out });
+    if (!idempotencyKey || !String(idempotencyKey).trim()) {
+      return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لصرف الراتب" });
     }
+    const idemScope = "payroll.payslip_payment";
+    const idemRequestHash = idempotencyService.hashRequest(idemScope, req.body, req.params);
 
     if (slip.status === "paid") return res.status(409).json({ success: false, message: "تم صرف الراتب بالفعل" });
 
     const method = req.body.paymentMethod || "Cash";
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
-    let journalEntry = null;
+
+    let idemResponseBody = null;
     try {
-      journalEntry = await postingService.postPayrollEntry(slip.toJSON(), method, actor);
-    } catch (postErr) {
-      logger.error(`[Payroll] Failed to post payslip ${slip.id}: ${postErr.message}`);
+      await models.sequelize.transaction(async (t) => {
+        // Claim the idempotency key FIRST inside the business transaction; a
+        // concurrent duplicate fails the unique insert → rollback → replay.
+        const idemClaim = await idempotencyService.claim({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash, transaction: t });
+        if (!idemClaim.claimed) {
+          const dup = new Error("__IDEM_DUPLICATE__");
+          dup.__idemDuplicate = true;
+          throw dup;
+        }
+        const idemRequest = idemClaim.request;
+
+        // Phase 21.5 — post the payroll journal INSIDE the transaction (was a
+        // best-effort post-then-swallow before): a posting failure now rolls back
+        // the whole payment, so a payslip is never marked paid without its GL entry.
+        const journalEntry = await postingService.postPayrollEntry(slip.toJSON(), method, actor, { transaction: t });
+        await slip.update({
+          status: "paid", paidDate: new Date().toISOString().slice(0, 10),
+          paymentMethod: method, journalEntryId: journalEntry ? journalEntry.id : null,
+          idempotencyKey: idempotencyKey || slip.idempotencyKey
+        }, { transaction: t });
+
+        const out = slip.toJSON();
+        out.journalEntry = journalEntry;
+        idemResponseBody = { success: true, ...out, data: out };
+        await idempotencyService.succeed({ request: idemRequest, statusCode: 200, responseBody: idemResponseBody, transaction: t });
+      });
+    } catch (txErr) {
+      if (txErr && txErr.__idemDuplicate) {
+        const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash });
+        if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+        return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+      }
+      throw txErr;
     }
-    await slip.update({
-      status: "paid", paidDate: new Date().toISOString().slice(0, 10),
-      paymentMethod: method, journalEntryId: journalEntry ? journalEntry.id : null,
-      idempotencyKey: idempotencyKey || slip.idempotencyKey
-    });
-    const out = slip.toJSON();
-    out.journalEntry = journalEntry;
-    return res.status(200).json({ success: true, ...out, data: out });
+
+    return res.status(200).json(idemResponseBody);
   } catch (error) {
     next(error);
   }
@@ -7680,13 +8311,16 @@ router.post("/installments/:id/pay", authMiddleware, async (req, res, next) => {
     });
     if (!inst) return res.status(404).json({ success: false, message: "القسط غير موجود" });
 
-    // Idempotency: a retry of the exact same payment request returns the
-    // already-applied installment instead of charging it again.
+    // Phase 21.4 — central race-safe idempotency (unique company_id+scope+key),
+    // replacing the optional-key lookup-only check. The key is now REQUIRED and
+    // req.params (the installment id) is folded into the request hash, so one key
+    // cannot be reused across different installments.
     const idempotencyKey = req.headers["idempotency-key"] || req.body.idempotencyKey;
-    if (idempotencyKey && inst.idempotencyKey === idempotencyKey) {
-      const out = inst.toJSON();
-      return res.status(200).json({ success: true, ...out, data: out });
+    if (!idempotencyKey || !String(idempotencyKey).trim()) {
+      return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لتحصيل القسط" });
     }
+    const idemScope = "installment.payment";
+    const idemRequestHash = idempotencyService.hashRequest(idemScope, req.body, req.params);
 
     if (inst.status === "paid") {
       return res.status(409).json({ success: false, message: "القسط مدفوع بالفعل" });
@@ -7739,64 +8373,119 @@ router.post("/installments/:id/pay", authMiddleware, async (req, res, next) => {
     // collection, so we never leave a paid installment / Payment without a GL
     // entry, nor a CashTransaction without its journalEntryId. The idempotency
     // early-return above guarantees a replay never reaches this block, so
-    // nothing is duplicated. No Customer.balance writer is added. The
-    // CashTransaction is an operational treasury LOG only — it is linked to the
-    // EXISTING installment journal and NO postCashEntry is called, so there is
-    // no second journal and no double-posting (mirrors the POS/invoice-post
-    // pattern, not the supplier-payment pattern that is itself the journal).
+    // nothing is duplicated. The operational AR mirrors (Customer.balance and
+    // Invoice paid/remaining amounts) are updated only on this fresh mutation
+    // path, inside the same transaction. The CashTransaction is an operational
+    // treasury LOG only — it is linked to the EXISTING installment journal and
+    // NO postCashEntry is called, so there is no second journal and no
+    // double-posting (mirrors the POS/invoice-post pattern, not the
+    // supplier-payment pattern that is itself the journal).
     let installmentPayment = null;
     let journalEntry = null;
-    await models.sequelize.transaction(async (t) => {
-      await inst.update({
-        paidAmount: newPaid,
-        status,
-        paidDate: payDate,
-        idempotencyKey: idempotencyKey || inst.idempotencyKey
-      }, { transaction: t });
+    let idemResponseBody = null;
+    try {
+      await models.sequelize.transaction(async (t) => {
+        // Phase 21.4 — claim the idempotency key FIRST inside the business
+        // transaction; a concurrent duplicate fails the unique insert → the
+        // transaction rolls back and we replay/conflict from the stored row.
+        const idemClaim = await idempotencyService.claim({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash, transaction: t });
+        if (!idemClaim.claimed) {
+          const dup = new Error("__IDEM_DUPLICATE__");
+          dup.__idemDuplicate = true;
+          throw dup;
+        }
+        const idemRequest = idemClaim.request;
 
-      installmentPayment = await models.Payment.create({
-        id: `PAY-INST-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        companyId: inst.companyId,
-        branchId,
-        invoiceId: inst.invoiceId,
-        paymentMethod: method,
-        amount,
-        reference: req.body.reference || `Installment #${inst.sequence}`,
-        date: payDate,
-        notes: req.body.notes || `تحصيل قسط ${inst.id}`
-      }, { transaction: t });
+        const invoice = await models.Invoice.findOne({
+          where: { id: inst.invoiceId, companyId: req.companyId },
+          transaction: t,
+          lock: { level: t.LOCK.UPDATE, of: models.Invoice }
+        });
+        if (!invoice) throw new NotFoundError("الفاتورة المرتبطة بالقسط غير موجودة");
 
-      journalEntry = await postingService.postInstallmentPayment(
-        inst.toJSON(), amount, method, actor, { transaction: t }
-      );
+        const customerId = inst.customerId || invoice.customerId;
+        const customer = customerId
+          ? await models.Customer.findOne({
+              where: { id: customerId, companyId: req.companyId },
+              transaction: t,
+              lock: { level: t.LOCK.UPDATE, of: models.Customer }
+            })
+          : null;
+        if (customerId && !customer) throw new NotFoundError("العميل المرتبط بالقسط غير موجود");
 
-      await models.CashTransaction.create({
-        id: `TX-INST-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        companyId: inst.companyId,
-        type: "cash_in",
-        account: treasuryAccount,
-        amount,
-        category: "تحصيل قسط",
-        description: `تحصيل قسط ${inst.id} — فاتورة ${inst.invoiceId}`,
-        reference: inst.invoiceId,
-        branch: inst.branch || "Main Branch",
-        branchId,
-        date: payDate,
-        createdBy: req.user ? req.user.id : "System",
-        status: "posted",
-        journalEntryId: journalEntry ? journalEntry.id : null
-      }, { transaction: t });
-    });
+        await inst.update({
+          paidAmount: newPaid,
+          status,
+          paidDate: payDate,
+          idempotencyKey: idempotencyKey || inst.idempotencyKey
+        }, { transaction: t });
+
+        await invoice.update({
+          remainingAmount: Math.max(0, round4(Number(invoice.remainingAmount || 0) - amount)),
+          paidAmount: round4(Number(invoice.paidAmount || 0) + amount)
+        }, { transaction: t });
+
+        if (customer) {
+          await customer.update({
+            balance: Math.max(0, round4(Number(customer.balance || 0) - amount))
+          }, { transaction: t });
+        }
+
+        installmentPayment = await models.Payment.create({
+          id: `PAY-INST-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          companyId: inst.companyId,
+          branchId,
+          invoiceId: inst.invoiceId,
+          paymentMethod: method,
+          amount,
+          reference: req.body.reference || `Installment #${inst.sequence}`,
+          date: payDate,
+          notes: req.body.notes || `تحصيل قسط ${inst.id}`
+        }, { transaction: t });
+
+        journalEntry = await postingService.postInstallmentPayment(
+          inst.toJSON(), amount, method, actor, { transaction: t }
+        );
+
+        await models.CashTransaction.create({
+          id: `TX-INST-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          companyId: inst.companyId,
+          type: "cash_in",
+          account: treasuryAccount,
+          amount,
+          category: "تحصيل قسط",
+          description: `تحصيل قسط ${inst.id} — فاتورة ${inst.invoiceId}`,
+          reference: inst.invoiceId,
+          branch: inst.branch || "Main Branch",
+          branchId,
+          date: payDate,
+          createdBy: req.user ? req.user.id : "System",
+          status: "posted",
+          journalEntryId: journalEntry ? journalEntry.id : null
+        }, { transaction: t });
+
+        // Persist the success response for idempotent replay BEFORE commit.
+        const out = inst.toJSON();
+        out.journalEntry = journalEntry;
+        out.payment = installmentPayment;
+        idemResponseBody = { success: true, ...out, data: out };
+        await idempotencyService.succeed({ request: idemRequest, statusCode: 200, responseBody: idemResponseBody, transaction: t });
+      });
+    } catch (txErr) {
+      if (txErr && txErr.__idemDuplicate) {
+        const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash });
+        if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+        return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+      }
+      throw txErr;
+    }
 
     if (inst.customerId) {
       const { recalculateCustomerNetPurchases } = require("../services/customer-purchases.service");
       await recalculateCustomerNetPurchases(models, req.companyId, inst.customerId);
     }
 
-    const out = inst.toJSON();
-    out.journalEntry = journalEntry;
-    out.payment = installmentPayment;
-    return res.status(200).json({ success: true, ...out, data: out });
+    return res.status(200).json(idemResponseBody);
   } catch (error) {
     next(error);
   }
@@ -8004,66 +8693,84 @@ router.post("/treasury/transactions", authMiddleware, requirePermission("treasur
     const id = `CT-${Date.now()}`;
     const now = new Date().toISOString().slice(0, 16).replace("T", " ");
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
-    const idempotencyKey = req.headers["idempotency-key"] || b.idempotencyKey;
 
-    // Idempotency: a retried/double-clicked entry returns the original transaction
-    // instead of recording the cash movement twice. (No unique index yet, so a
-    // narrow race window remains between concurrent same-key requests.)
-    if (idempotencyKey) {
-      const existing = await models.CashTransaction.findOne({
-        where: { idempotencyKey, companyId: req.companyId }
+    // Phase 21.4 — central race-safe idempotency (unique company_id+scope+key),
+    // replacing the optional-key lookup-only check that admitted a race window.
+    // The key is now REQUIRED and req.params is folded into the request hash.
+    const idempotencyKey = req.headers["idempotency-key"] || b.idempotencyKey;
+    if (!idempotencyKey || !String(idempotencyKey).trim()) {
+      return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لعملية الخزينة" });
+    }
+    const idemScope = "treasury.cash_transaction";
+    const idemRequestHash = idempotencyService.hashRequest(idemScope, b, req.params);
+
+    let idemResponseBody = null;
+    try {
+      await models.sequelize.transaction(async (t) => {
+        // Claim the idempotency key FIRST inside the business transaction; a
+        // concurrent duplicate fails the unique insert → rollback → replay.
+        const idemClaim = await idempotencyService.claim({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash, transaction: t });
+        if (!idemClaim.claimed) {
+          const dup = new Error("__IDEM_DUPLICATE__");
+          dup.__idemDuplicate = true;
+          throw dup;
+        }
+        const idemRequest = idemClaim.request;
+
+        const tx = await models.CashTransaction.create({
+          id,
+          companyId: req.companyId,
+          type,
+          account: b.account || "cash",
+          toAccount: b.toAccount || null,
+          amount,
+          category: b.category || null,
+          counterAccountCode: b.counterAccountCode || null,
+          description: b.description || null,
+          reference: b.reference || null,
+          branch: b.branch || req.branchId || "Main Branch",
+          date: b.date || now.slice(0, 10),
+          createdBy: actor,
+          status: "posted",
+          idempotencyKey: idempotencyKey || null
+        }, { transaction: t });
+
+        // Post the GL entry inside the SAME transaction; any failure rolls back the
+        // CashTransaction too (no orphan cash movement without a journal).
+        const journalEntry = await postingService.postCashEntry(tx.toJSON(), actor, { transaction: t });
+        await tx.update({ journalEntryId: journalEntry.id }, { transaction: t });
+
+        await auditService.record(req.companyId, {
+          action: "treasury_transaction_created",
+          description: `Treasury ${type} ${amount} (${b.account || "cash"})${b.category ? " — " + b.category : ""}`,
+          user: actor,
+          userId: req.user ? req.user.id : null,
+          place: tx.branch,
+          branch: tx.branch,
+          sourceDocument: tx.id,
+          severity: "info",
+          after: JSON.stringify({
+            id: tx.id, type, account: tx.account, toAccount: tx.toAccount, amount,
+            category: tx.category, reference: tx.reference, journalEntryId: journalEntry.id,
+          }),
+        }, { transaction: t });
+
+        // Persist the success response for idempotent replay BEFORE commit.
+        const out = tx.toJSON();
+        out.journalEntry = journalEntry;
+        idemResponseBody = { success: true, ...out, data: out };
+        await idempotencyService.succeed({ request: idemRequest, statusCode: 201, responseBody: idemResponseBody, transaction: t });
       });
-      if (existing) {
-        const out = existing.toJSON();
-        return res.status(200).json({ success: true, ...out, data: out, meta: { idempotentReplay: true } });
+    } catch (txErr) {
+      if (txErr && txErr.__idemDuplicate) {
+        const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash });
+        if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+        return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
       }
+      throw txErr;
     }
 
-    const result = await models.sequelize.transaction(async (t) => {
-      const tx = await models.CashTransaction.create({
-        id,
-        companyId: req.companyId,
-        type,
-        account: b.account || "cash",
-        toAccount: b.toAccount || null,
-        amount,
-        category: b.category || null,
-        counterAccountCode: b.counterAccountCode || null,
-        description: b.description || null,
-        reference: b.reference || null,
-        branch: b.branch || req.branchId || "Main Branch",
-        date: b.date || now.slice(0, 10),
-        createdBy: actor,
-        status: "posted",
-        idempotencyKey: idempotencyKey || null
-      }, { transaction: t });
-
-      // Post the GL entry inside the SAME transaction; any failure rolls back the
-      // CashTransaction too (no orphan cash movement without a journal).
-      const journalEntry = await postingService.postCashEntry(tx.toJSON(), actor, { transaction: t });
-      await tx.update({ journalEntryId: journalEntry.id }, { transaction: t });
-
-      await auditService.record(req.companyId, {
-        action: "treasury_transaction_created",
-        description: `Treasury ${type} ${amount} (${b.account || "cash"})${b.category ? " — " + b.category : ""}`,
-        user: actor,
-        userId: req.user ? req.user.id : null,
-        place: tx.branch,
-        branch: tx.branch,
-        sourceDocument: tx.id,
-        severity: "info",
-        after: JSON.stringify({
-          id: tx.id, type, account: tx.account, toAccount: tx.toAccount, amount,
-          category: tx.category, reference: tx.reference, journalEntryId: journalEntry.id,
-        }),
-      }, { transaction: t });
-
-      const out = tx.toJSON();
-      out.journalEntry = journalEntry;
-      return out;
-    });
-
-    return res.status(201).json({ success: true, ...result, data: result });
+    return res.status(201).json(idemResponseBody);
   } catch (error) {
     next(error);
   }

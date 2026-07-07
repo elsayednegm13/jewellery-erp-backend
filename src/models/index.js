@@ -48,6 +48,8 @@ const StockAudit = require("./stockAudit.model");
 const StockAuditItem = require("./stockAuditItem.model");
 const Product = require("./product.model");
 const StockMovement = require("./stockMovement.model");
+const IdempotencyRequest = require("./idempotencyRequest.model");
+const CustomerCreditTransaction = require("./customerCreditTransaction.model");
 
 // Define Associations
 
@@ -220,6 +222,12 @@ CustomerAttachment.belongsTo(Customer, { foreignKey: "customerId", as: "customer
 Company.hasMany(CustomerAttachment, { foreignKey: "companyId", as: "customerAttachments" });
 CustomerAttachment.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
+// Customer Credit Ledger (Phase 23-Fix) — minimal, read-side associations only.
+Company.hasMany(CustomerCreditTransaction, { foreignKey: "companyId", as: "customerCreditTransactions" });
+CustomerCreditTransaction.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Customer.hasMany(CustomerCreditTransaction, { foreignKey: "customerId", as: "creditTransactions" });
+CustomerCreditTransaction.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
+
 // Supplier relationships
 Supplier.hasMany(SupplierDocument, { foreignKey: "supplierId", as: "documents" });
 SupplierDocument.belongsTo(Supplier, { foreignKey: "supplierId", as: "supplier" });
@@ -295,5 +303,7 @@ module.exports = {
   StockAudit,
   StockAuditItem,
   Product,
-  StockMovement
+  StockMovement,
+  IdempotencyRequest,
+  CustomerCreditTransaction
 };

@@ -412,17 +412,33 @@ class PostingService {
     const subtotal = round(invoice.subtotal != null ? invoice.subtotal : total - tax);
     const cost = round(items.reduce((s, it) => s + (Number(it.cost) || 0) * (Number(it.quantity) || 1), 0));
 
+    // Phase 21.2: the return money leg splits between customer receivable relief
+    // (Cr AR 1300) and an actual cash/bank refund (Cr Cash 1110 / Bank 1120).
+    // Callers pass { receivableReliefAmount, cashRefundAmount, cashAccountCode };
+    // when omitted (legacy callers) this falls back to the previous behaviour —
+    // a full cash refund on 1110 — so the entry still balances to `total`.
+    const cashAccountCode = opts.cashAccountCode || "1110";
+    const receivableRelief = round(opts.receivableReliefAmount != null ? opts.receivableReliefAmount : 0);
+    const cashRefund = round(opts.cashRefundAmount != null ? opts.cashRefundAmount : total - receivableRelief);
+    const moneyLegLines = [];
+    if (receivableRelief > 0) {
+      moneyLegLines.push({ accountCode: "1300", debit: 0, credit: receivableRelief, description: `تخفيض ذمم العميل — مرتجع فاتورة ${invoice.id}` });
+    }
+    if (cashRefund > 0) {
+      moneyLegLines.push({ accountCode: cashAccountCode, debit: 0, credit: cashRefund, description: `مرتجع نقدي — فاتورة ${invoice.id}` });
+    }
+
     const byKarat = await this.resolveAccountingByKarat(companyId, opts);
     const lines = [];
     if (byKarat) {
       // Reverse the sale split: Dr revenue / Cr COGS / Dr inventory, per karat.
       lines.push(...karatSplitLines({ items, revenueTotal: subtotal, totalCost: cost, reverse: true }));
       if (tax > 0) lines.push({ accountCode: "2200", debit: tax, credit: 0, description: "عكس ضريبة" });
-      lines.push({ accountCode: "1110", debit: 0, credit: total, description: `مرتجع فاتورة ${invoice.id}` });
+      lines.push(...moneyLegLines);
     } else {
       lines.push({ accountCode: "4100", debit: subtotal, credit: 0, description: "عكس إيراد مبيعات" });
       if (tax > 0) lines.push({ accountCode: "2200", debit: tax, credit: 0, description: "عكس ضريبة" });
-      lines.push({ accountCode: "1110", debit: 0, credit: total, description: `مرتجع فاتورة ${invoice.id}` });
+      lines.push(...moneyLegLines);
       if (cost > 0) {
         lines.push({ accountCode: "1200", debit: cost, credit: 0, description: "إرجاع للمخزون" });
         lines.push({ accountCode: "5000", debit: 0, credit: cost, description: "عكس التكلفة" });
