@@ -15,6 +15,12 @@ const PERMISSIONS = [
   "reservations.refund_request", "reservations.refund_approve", "reservations.refund_reject", "reservations.refund_execute",
   "reservations.refund_method_override", "reservations.audit_view", "reservations.reports_view", "reservations.reports_export",
   "reservations.statement_view", "reservations.configure_account",
+  "gold_purchase.cgp.view", "gold_purchase.cgp.view_all", "gold_purchase.cgp.view_branch", "gold_purchase.cgp.view_own",
+  "gold_purchase.cgp.create", "gold_purchase.cgp.update_draft", "gold_purchase.cgp.validate", "gold_purchase.cgp.submit",
+  "gold_purchase.cgp.approve", "gold_purchase.cgp.reject", "gold_purchase.cgp.void",
+  "gold_purchase.igp.view", "gold_purchase.igp.view_all", "gold_purchase.igp.view_branch", "gold_purchase.igp.view_own",
+  "gold_purchase.igp.create", "gold_purchase.igp.update_draft", "gold_purchase.igp.validate", "gold_purchase.igp.submit",
+  "gold_purchase.igp.approve", "gold_purchase.igp.reject", "gold_purchase.igp.void",
   "users.view", "users.create", "users.update", "users.delete", "users.manage",
   "roles.view", "roles.manage", "permissions.manage",
   "notifications.view", "notifications.manage", "approvals.view", "approvals.manage",
@@ -46,8 +52,10 @@ const ROLE_DEFS = {
 async function ensurePermissions() {
   const rows = [];
   for (const name of PERMISSIONS) {
-    const [module, action] = name.split(".");
-    rows.push({ id: `PERM-${name}`, name, module, action, description: name });
+    const parts = name.split(".");
+    const action = parts.pop();
+    const moduleName = parts.join(".");
+    rows.push({ id: `PERM-${name}`, name, module: moduleName, action, description: name });
   }
   await Permission.bulkCreate(rows, { ignoreDuplicates: true });
 }

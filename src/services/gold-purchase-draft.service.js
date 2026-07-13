@@ -3,9 +3,10 @@ const Decimal = require("decimal.js");
 const { Op } = require("sequelize");
 const models = require("../models");
 const auditService = require("./audit.service");
+const permissionService = require("./permission.service");
 const measurement = require("./gold-purchase-measurement.service");
 const { normalizeCurrencyCode } = require("../utils/currency");
-const { ValidationError, NotFoundError, ConflictError, ForbiddenError } = require("../utils/errors");
+const { AppError, ValidationError, NotFoundError, ConflictError, ForbiddenError } = require("../utils/errors");
 
 const CONFIG = {
   cgp: {
@@ -29,6 +30,35 @@ const CONFIG = {
 };
 
 const actorName = (user) => [user?.firstName, user?.lastName].filter(Boolean).join(" ") || "System";
+
+const LEGACY_READ = { cgp: "sales.view", igp: "suppliers.view" };
+
+async function accessProfile(kind, context, { reviewer = false } = {}) {
+  const names = new Set(await permissionService.getUserPermissionNames(context.user));
+  const prefix = `gold_purchase.${kind}`;
+  const dedicated = names.has(`${prefix}.view`);
+  if (dedicated) {
+    if (names.has(`${prefix}.view_all`)) return { mode: "all", dedicated: true, names };
+    if (names.has(`${prefix}.view_branch`)) return { mode: "branch", dedicated: true, names };
+    if (!reviewer && names.has(`${prefix}.view_own`)) return { mode: "own", dedicated: true, names };
+    throw new ForbiddenError(reviewer ? "Approval requires branch or company visibility" : "Gold Purchase visibility scope is required");
+  }
+  if (!reviewer && names.has(LEGACY_READ[kind])) return { mode: "branch", dedicated: false, names };
+  throw new ForbiddenError("Gold Purchase view permission is required");
+}
+
+function scopeWhere(context, profile) {
+  const where = { companyId: context.companyId };
+  if (profile.mode === "branch" || profile.mode === "own") where.branchId = context.branchId;
+  if (profile.mode === "own") where.createdBy = context.user.id;
+  return where;
+}
+
+function assertMutable(document) {
+  if (["submitted", "approved"].includes(document.status)) {
+    throw new AppError("Submitted and approved Gold Purchase documents are immutable", 409, "DOCUMENT_IMMUTABLE");
+  }
+}
 const roundMoney = (value, field) => {
   if (value === null || value === undefined || value === "") return null;
   try {
@@ -164,7 +194,8 @@ async function create(kind, context, body, transaction) {
     [cfg.refKey]: body[cfg.refKey], [cfg.dateKey]: body[cfg.dateKey],
     ...(kind === "igp" ? { supplierReference: body.supplierReference || null } : {}),
     currency: validated.currency, exchangeRate: validated.exchangeRate, status: "draft", version: 1,
-    notes: body.notes || null, createdBy: context.user.id, updatedBy: context.user.id
+    notes: body.notes || null, createdBy: context.user.id, updatedBy: context.user.id,
+    revisionNumber: 1, rootDocumentId: id
   }, { transaction });
   await cfg.Item.bulkCreate(items.map((item) => ({ ...item, id: `${id}:L${item.lineNumber}`, companyId: context.companyId, documentId: id, version: 1 })), { transaction });
   const full = await cfg.Document.findByPk(id, { include: [{ model: cfg.Item, as: "items" }, { model: cfg.Reference, as: cfg.includeAlias, attributes: ["id", "name"] }, { model: models.Branch, as: "branch", attributes: ["id", "name"] }], transaction });
@@ -174,7 +205,8 @@ async function create(kind, context, body, transaction) {
 
 async function findScoped(kind, context, id, transaction, { includeVoided = false, lock = false } = {}) {
   const cfg = CONFIG[kind];
-  const where = { id, companyId: context.companyId, branchId: context.branchId };
+  const profile = await accessProfile(kind, context);
+  const where = { id, ...scopeWhere(context, profile) };
   if (!includeVoided) where.voidedAt = null;
   // PostgreSQL cannot apply FOR UPDATE to the nullable side of the outer joins
   // used by the response projection. Lock the draft header first, then load its
@@ -195,6 +227,7 @@ async function findScoped(kind, context, id, transaction, { includeVoided = fals
 async function update(kind, context, id, body, transaction) {
   const cfg = CONFIG[kind];
   const document = await findScoped(kind, context, id, transaction, { lock: true });
+  assertMutable(document);
   const expectedVersion = parseVersion(body.version);
   if (document.version !== expectedVersion) throw new ConflictError("Gold Purchase draft version conflict");
   const merged = { ...document.toJSON(), ...body, branchId: document.branchId, [cfg.refKey]: body[cfg.refKey] || document[cfg.refKey], [cfg.dateKey]: body[cfg.dateKey] || document[cfg.dateKey], items: body.items || document.items.map((i) => i.toJSON()) };
@@ -221,6 +254,7 @@ async function update(kind, context, id, body, transaction) {
 async function validate(kind, context, id, expectedVersion, transaction) {
   const cfg = CONFIG[kind];
   const document = await findScoped(kind, context, id, transaction, { lock: true });
+  assertMutable(document);
   const version = parseVersion(expectedVersion);
   if (document.version !== version) throw new ConflictError("Gold Purchase draft version conflict");
   if (document.status === "validated") throw new ConflictError("Gold Purchase draft is already validated");
@@ -232,6 +266,7 @@ async function validate(kind, context, id, expectedVersion, transaction) {
 
 async function voidDraft(kind, context, id, body, transaction) {
   const document = await findScoped(kind, context, id, transaction, { lock: true });
+  assertMutable(document);
   const version = parseVersion(body.version);
   if (document.version !== version) throw new ConflictError("Gold Purchase draft version conflict");
   const reason = String(body.reason || "").trim();
@@ -257,10 +292,16 @@ function pagination(query) {
 async function list(kind, context, query, includeVoided) {
   const cfg = CONFIG[kind];
   const { page, limit, offset } = pagination(query);
-  if (query.branchId && query.branchId !== context.branchId) {
-    return { items: [], pagination: { total: 0, page, limit, pages: 0 }, filters: { ...query, branchId: context.branchId } };
+  const profile = await accessProfile(kind, context);
+  if (query.branchId && profile.mode !== "all" && query.branchId !== context.branchId) {
+    return { items: [], pagination: { total: 0, page, limit, pages: 0 }, filters: { ...query } };
   }
-  const where = { companyId: context.companyId, branchId: context.branchId };
+  if (query.branchId && profile.mode === "all") {
+    const available = await models.Branch.findOne({ where: { id: query.branchId, companyId: context.companyId } });
+    if (!available) return { items: [], pagination: { total: 0, page, limit, pages: 0 }, filters: { ...query } };
+  }
+  const where = { ...scopeWhere(context, profile) };
+  if (query.branchId) where.branchId = query.branchId;
   if (!includeVoided) where.voidedAt = null;
   for (const key of ["status", "draftNumber", cfg.refKey]) if (query[key]) where[key] = query[key];
   if (query.dateFrom || query.dateTo) where[cfg.dateKey] = { ...(query.dateFrom ? { [Op.gte]: query.dateFrom } : {}), ...(query.dateTo ? { [Op.lte]: query.dateTo } : {}) };
@@ -273,7 +314,7 @@ async function list(kind, context, query, includeVoided) {
     include: [{ model: cfg.Item, as: "items", where: itemWhere, required: hasItemFilter }, { model: cfg.Reference, as: cfg.includeAlias, attributes: ["id", "name"] }, { model: models.Branch, as: "branch", attributes: ["id", "name"] }],
     distinct: true, order: [[cfg.dateKey, "DESC"], ["createdAt", "DESC"], ["id", "ASC"]], limit, offset
   });
-  return { items: result.rows.map(serialize), pagination: { total: result.count, page, limit, pages: Math.ceil(result.count / limit) }, filters: { ...query, branchId: context.branchId } };
+  return { items: result.rows.map(serialize), pagination: { total: result.count, page, limit, pages: Math.ceil(result.count / limit) }, filters: { ...query } };
 }
 
-module.exports = { create, update, validate, voidDraft, findScoped, list, serialize };
+module.exports = { CONFIG, create, update, validate, voidDraft, findScoped, list, serialize, normalizeItem, validateHeader, nextDraftNumber, parseVersion, accessProfile, scopeWhere, actorName };

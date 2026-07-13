@@ -41,6 +41,7 @@ const CustomerGoldPurchaseDocument = require("./customerGoldPurchaseDocument.mod
 const CustomerGoldPurchaseItem = require("./customerGoldPurchaseItem.model");
 const InvestmentGoldPurchaseDocument = require("./investmentGoldPurchaseDocument.model");
 const InvestmentGoldPurchaseItem = require("./investmentGoldPurchaseItem.model");
+const GoldPurchaseApprovalRequest = require("./goldPurchaseApprovalRequest.model");
 const Account = require("./account.model");
 const JournalEntry = require("./journalEntry.model");
 const JournalLine = require("./journalLine.model");
@@ -326,6 +327,15 @@ InvestmentGoldPurchaseDocument.belongsTo(Supplier, { foreignKey: "supplierId", a
 InvestmentGoldPurchaseDocument.hasMany(InvestmentGoldPurchaseItem, { foreignKey: "documentId", as: "items" });
 InvestmentGoldPurchaseItem.belongsTo(InvestmentGoldPurchaseDocument, { foreignKey: "documentId", as: "document" });
 
+Company.hasMany(GoldPurchaseApprovalRequest, { foreignKey: "companyId", as: "goldPurchaseApprovalRequests" });
+GoldPurchaseApprovalRequest.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(GoldPurchaseApprovalRequest, { foreignKey: "branchId", as: "goldPurchaseApprovalRequests" });
+GoldPurchaseApprovalRequest.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+User.hasMany(GoldPurchaseApprovalRequest, { foreignKey: "requestedBy", as: "requestedGoldPurchaseApprovals" });
+GoldPurchaseApprovalRequest.belongsTo(User, { foreignKey: "requestedBy", as: "requester" });
+User.hasMany(GoldPurchaseApprovalRequest, { foreignKey: "reviewedBy", as: "reviewedGoldPurchaseApprovals" });
+GoldPurchaseApprovalRequest.belongsTo(User, { foreignKey: "reviewedBy", as: "reviewer" });
+
 Customer.hasMany(CustomerAttachment, { foreignKey: "customerId", as: "attachments" });
 CustomerAttachment.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
 Company.hasMany(CustomerAttachment, { foreignKey: "companyId", as: "customerAttachments" });
@@ -406,6 +416,7 @@ module.exports = {
   CustomerGoldPurchaseItem,
   InvestmentGoldPurchaseDocument,
   InvestmentGoldPurchaseItem,
+  GoldPurchaseApprovalRequest,
   Account,
   JournalEntry,
   JournalLine,
