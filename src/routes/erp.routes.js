@@ -4404,7 +4404,31 @@ router.post("/reservation-refunds/:id/execute", authMiddleware, requireAnyPermis
 });
 
 // ─── Phase 32.6-Fix C — Item amendments, expiry extension, renewal ──────────
-router.post("/reservations/:id/amend-items", authMiddleware, requireAnyPermission(reservationPerms.amendItems), async (req, res, next) => {
+const authorizeReservationAmendment = async (req, _res, next) => {
+  try {
+    const body = req.body || {};
+    const hasValues = (value) => Array.isArray(value) && value.length > 0;
+    const hasRepricing = hasValues(body.repriceItemIds);
+    const hasOrdinaryAmendment = hasValues(body.addAssetIds)
+      || hasValues(body.removeItemIds)
+      || hasValues(body.replacements);
+    const requiresOrdinaryAmendment = hasOrdinaryAmendment || !hasRepricing;
+
+    if (requiresOrdinaryAmendment) {
+      const canAmend = await permissionService.userHasAnyPermission(req.user, reservationPerms.amendItems);
+      if (!canAmend) return next(new ForbiddenError("Ordinary reservation amendments require amendment permission."));
+    }
+    if (hasRepricing) {
+      const canReprice = await permissionService.userHasPermission(req.user, "reservations.reprice_items");
+      if (!canReprice) return next(new ForbiddenError("Reservation item repricing requires repricing permission."));
+    }
+    return next();
+  } catch (error) {
+    return next(error);
+  }
+};
+
+router.post("/reservations/:id/amend-items", authMiddleware, authorizeReservationAmendment, async (req, res, next) => {
   try {
     const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
     const result = await reservationService.amendItems({
@@ -7940,6 +7964,31 @@ function reservationReportFilters(req) {
   return { where, filters: { from, to, branchId, status } };
 }
 
+async function secureReservationReportVisibilityWhere(req, requestedBranchId = null) {
+  const maximumWhere = await reservationService._internal.reservationVisibilityWhere(req.companyId, req.user, req.branchId);
+
+  // Own-scope visibility is also bounded by the authenticated branch context.
+  if (maximumWhere[Op.or] && req.branchId) maximumWhere.branchId = req.branchId;
+  if (!requestedBranchId || maximumWhere.id === "__NO_VISIBLE_RESERVATION_SCOPE__") return maximumWhere;
+
+  // A scoped actor may only repeat their authenticated branch. A different
+  // query branch produces the normal secure-empty report contract.
+  if (maximumWhere.branchId) {
+    if (maximumWhere.branchId !== requestedBranchId) {
+      return { ...maximumWhere, id: "__FORCE_EMPTY_SET__" };
+    }
+    return maximumWhere;
+  }
+
+  // Company-wide actors may narrow to an active branch in their company.
+  // Missing and wrong-company branch identifiers are indistinguishable.
+  const branchExists = await models.Branch.count({
+    where: { id: requestedBranchId, companyId: req.companyId, isActive: true }
+  });
+  if (!branchExists) throw new ValidationError("Invalid or unavailable branchId.");
+  return { ...maximumWhere, branchId: requestedBranchId };
+}
+
 async function secureReservationReportFilters(req) {
   const from = req.query.from ? String(req.query.from) : null;
   const to = req.query.to ? String(req.query.to) : null;
@@ -7952,7 +8001,7 @@ async function secureReservationReportFilters(req) {
   if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
   if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
 
-  const baseWhere = await reservationService._internal.reservationVisibilityWhere(req.companyId, req.user, branchId);
+  const baseWhere = await secureReservationReportVisibilityWhere(req, branchId);
   const where = { ...baseWhere };
 
   if (baseWhere.id === "__NO_VISIBLE_RESERVATION_SCOPE__") {
@@ -7973,6 +8022,30 @@ async function secureReservationReportFilters(req) {
   return { where, filters: { from, to, branchId, status, customerId, salesperson } };
 }
 
+function reservationReportPagination(req, isExport = false) {
+  const parsePositiveInteger = (value, field) => {
+    const raw = String(value);
+    if (!/^\d+$/.test(raw) || Number(raw) < 1) throw new ValidationError(`${field} must be a positive integer.`);
+    return Number(raw);
+  };
+  if (isExport) return { page: 1, limit: null, offset: 0 };
+  const page = req.query.page === undefined ? 1 : parsePositiveInteger(req.query.page, "page");
+  const limit = req.query.limit === undefined ? 50 : Math.min(100, parsePositiveInteger(req.query.limit, "limit"));
+  return { page, limit, offset: (page - 1) * limit };
+}
+
+function reservationReportPaginationMeta(total, pagination, isExport = false) {
+  if (isExport) {
+    return { total, page: 1, limit: total, pages: total === 0 ? 0 : 1 };
+  }
+  return {
+    total,
+    page: pagination.page,
+    limit: pagination.limit,
+    pages: total === 0 ? 0 : Math.ceil(total / pagination.limit)
+  };
+}
+
 router.get("/reports/reservations/summary", authMiddleware, requireAnyPermission(reservationPerms.reportsView), async (req, res, next) => {
   try {
     const isExport = req.query.export === "true";
@@ -7981,8 +8054,13 @@ router.get("/reports/reservations/summary", authMiddleware, requireAnyPermission
       if (!hasExport) throw new ForbiddenError("Insufficient permissions to export reports.");
     }
     const { where, filters } = await secureReservationReportFilters(req);
-    const reservations = await models.Reservation.findAll({ where, raw: true });
-    const totals = reservations.reduce((acc, row) => {
+    const pagination = reservationReportPagination(req, isExport);
+    const order = [["createdAt", "DESC"], ["id", "ASC"]];
+    const totalRows = await models.Reservation.findAll({ where, order, raw: true });
+    const reservations = isExport
+      ? totalRows
+      : await models.Reservation.findAll({ where, order, limit: pagination.limit, offset: pagination.offset, raw: true });
+    const totals = totalRows.reduce((acc, row) => {
       acc.count += 1;
       acc.agreedTotal = round4(acc.agreedTotal + Number(row.agreedTotal || 0));
       acc.paidTotal = round4(acc.paidTotal + Number(row.paidTotal || 0));
@@ -7991,7 +8069,8 @@ router.get("/reports/reservations/summary", authMiddleware, requireAnyPermission
       acc.byStatus[row.status] = (acc.byStatus[row.status] || 0) + 1;
       return acc;
     }, { count: 0, agreedTotal: 0, paidTotal: 0, remainingTotal: 0, excessTotal: 0, byStatus: {} });
-    return res.status(200).json({ success: true, data: { filters, totals, items: reservations }, items: reservations });
+    const paginationMeta = reservationReportPaginationMeta(totalRows.length, pagination, isExport);
+    return res.status(200).json({ success: true, data: { filters, totals, pagination: paginationMeta, items: reservations }, items: reservations });
   } catch (error) {
     next(error);
   }
@@ -8006,35 +8085,89 @@ router.get("/reports/reservations/payments", authMiddleware, requireAnyPermissio
     }
     const from = req.query.from ? String(req.query.from) : null;
     const to = req.query.to ? String(req.query.to) : null;
+    const requestedBranchId = req.query.branchId ? String(req.query.branchId) : null;
     if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
     if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
     if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
 
-    const baseWhere = await reservationService._internal.reservationVisibilityWhere(req.companyId, req.user, req.query.branchId);
+    const pagination = reservationReportPagination(req, isExport);
+    const { page } = pagination;
+    const limit = pagination.limit ?? 0;
+
+    const baseWhere = await secureReservationReportVisibilityWhere(req, requestedBranchId);
     if (baseWhere.id === "__NO_VISIBLE_RESERVATION_SCOPE__") {
-      return res.status(200).json({ success: true, data: { filters: { from, to, branchId: req.query.branchId || null }, totals: { count: 0, amount: 0, byMethod: {} }, items: [] }, items: [] });
+      return res.status(200).json({
+        success: true,
+        data: {
+          filters: { from, to, branchId: requestedBranchId },
+          totals: { count: 0, amount: 0, byMethod: {} },
+          pagination: { total: 0, page, limit, pages: 0 },
+          items: []
+        },
+        items: []
+      });
     }
 
     const where = { companyId: req.companyId };
-    if (baseWhere.branchId) {
-      where.branchId = baseWhere.branchId;
-    } else if (req.query.branchId) {
-      where.branchId = String(req.query.branchId);
-    }
+    const reservationWhere = { ...baseWhere };
 
     if (from || to) {
       where.receivedAt = {};
       if (from) where.receivedAt[Op.gte] = new Date(`${from}T00:00:00.000Z`);
       if (to) where.receivedAt[Op.lte] = new Date(`${to}T23:59:59.999Z`);
     }
-    const payments = await models.ReservationPayment.findAll({ where, order: [["receivedAt", "ASC"]], raw: true });
-    const totals = payments.reduce((acc, row) => {
+
+    const include = [
+      {
+        model: models.Reservation,
+        as: "reservation",
+        required: true,
+        where: reservationWhere,
+        attributes: ["id", "customerId", "customerName", "branchId"]
+      },
+      {
+        model: models.Customer,
+        as: "customer",
+        required: true,
+        where: { companyId: req.companyId },
+        attributes: ["id", "name"]
+      }
+    ];
+
+    const totalRows = await models.ReservationPayment.findAll({
+      where,
+      include,
+      attributes: ["amount", "paymentMethod"],
+      raw: true,
+      nest: true
+    });
+    const totals = totalRows.reduce((acc, row) => {
       acc.count += 1;
       acc.amount = round4(acc.amount + Number(row.amount || 0));
       acc.byMethod[row.paymentMethod] = round4((acc.byMethod[row.paymentMethod] || 0) + Number(row.amount || 0));
       return acc;
     }, { count: 0, amount: 0, byMethod: {} });
-    return res.status(200).json({ success: true, data: { filters: { from, to, branchId: req.query.branchId || null }, totals, items: payments }, items: payments });
+
+    const total = totalRows.length;
+    const payments = await models.ReservationPayment.findAll({
+      where,
+      include,
+      order: [["receivedAt", "ASC"], ["id", "ASC"]],
+      ...(isExport ? {} : { limit, offset: pagination.offset }),
+      raw: true,
+      nest: true
+    });
+    const items = payments.map((payment) => ({
+      ...payment,
+      reservationNumber: payment.reservation?.id || payment.reservationId,
+      customerName: payment.customer?.name || payment.reservation?.customerName || null
+    }));
+    const paginationMeta = reservationReportPaginationMeta(total, pagination, isExport);
+    return res.status(200).json({
+      success: true,
+      data: { filters: { from, to, branchId: requestedBranchId }, totals, pagination: paginationMeta, items },
+      items
+    });
   } catch (error) {
     next(error);
   }
@@ -8052,19 +8185,14 @@ router.get("/reports/reservations/unsettled-advances", authMiddleware, requireAn
     where.status = { [Op.in]: ["active", "partially_paid", "fully_paid"] };
     where.paidTotal = { [Op.gt]: 0 };
 
-    const limit = isExport ? 100000 : (req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50);
-    const page = isExport ? 1 : (req.query.page ? Math.max(1, Number(req.query.page)) : 1);
-    const offset = (page - 1) * limit;
+    const pagination = reservationReportPagination(req, isExport);
+    const order = [["createdAt", "DESC"], ["id", "ASC"]];
+    const totalRows = await models.Reservation.findAll({ where, order, raw: true });
+    const rows = isExport
+      ? totalRows
+      : await models.Reservation.findAll({ where, order, limit: pagination.limit, offset: pagination.offset, raw: true });
 
-    const { count, rows } = await models.Reservation.findAndCountAll({
-      where,
-      limit,
-      offset,
-      order: [["createdAt", "DESC"]],
-      raw: true
-    });
-
-    const totals = rows.reduce((acc, row) => {
+    const totals = totalRows.reduce((acc, row) => {
       acc.count += 1;
       acc.agreedTotal = round4(acc.agreedTotal + Number(row.agreedTotal || 0));
       acc.paidTotal = round4(acc.paidTotal + Number(row.paidTotal || 0));
@@ -8076,7 +8204,7 @@ router.get("/reports/reservations/unsettled-advances", authMiddleware, requireAn
       success: true,
       data: {
         filters,
-        pagination: { total: count, page, limit, pages: Math.ceil(count / limit) },
+        pagination: reservationReportPaginationMeta(totalRows.length, pagination, isExport),
         totals,
         items: rows
       },
@@ -8105,19 +8233,14 @@ router.get("/reports/reservations/completions", authMiddleware, requireAnyPermis
       if (req.query.to) where.completedAt[Op.lte] = new Date(`${req.query.to}T23:59:59.999Z`);
     }
 
-    const limit = isExport ? 100000 : (req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50);
-    const page = isExport ? 1 : (req.query.page ? Math.max(1, Number(req.query.page)) : 1);
-    const offset = (page - 1) * limit;
+    const pagination = reservationReportPagination(req, isExport);
+    const order = [["completedAt", "DESC"], ["id", "ASC"]];
+    const totalRows = await models.Reservation.findAll({ where, order, raw: true });
+    const rows = isExport
+      ? totalRows
+      : await models.Reservation.findAll({ where, order, limit: pagination.limit, offset: pagination.offset, raw: true });
 
-    const { count, rows } = await models.Reservation.findAndCountAll({
-      where,
-      limit,
-      offset,
-      order: [["completedAt", "DESC"]],
-      raw: true
-    });
-
-    const totals = rows.reduce((acc, row) => {
+    const totals = totalRows.reduce((acc, row) => {
       acc.count += 1;
       acc.agreedTotal = round4(acc.agreedTotal + Number(row.agreedTotal || 0));
       acc.paidTotal = round4(acc.paidTotal + Number(row.paidTotal || 0));
@@ -8128,7 +8251,7 @@ router.get("/reports/reservations/completions", authMiddleware, requireAnyPermis
       success: true,
       data: {
         filters,
-        pagination: { total: count, page, limit, pages: Math.ceil(count / limit) },
+        pagination: reservationReportPaginationMeta(totalRows.length, pagination, isExport),
         totals,
         items: rows
       },
@@ -8157,19 +8280,14 @@ router.get("/reports/reservations/cancellations-refunds", authMiddleware, requir
       if (req.query.to) where.cancelledAt[Op.lte] = new Date(`${req.query.to}T23:59:59.999Z`);
     }
 
-    const limit = isExport ? 100000 : (req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50);
-    const page = isExport ? 1 : (req.query.page ? Math.max(1, Number(req.query.page)) : 1);
-    const offset = (page - 1) * limit;
+    const pagination = reservationReportPagination(req, isExport);
+    const order = [["cancelledAt", "DESC"], ["id", "ASC"]];
+    const totalRows = await models.Reservation.findAll({ where, order, raw: true });
+    const rows = isExport
+      ? totalRows
+      : await models.Reservation.findAll({ where, order, limit: pagination.limit, offset: pagination.offset, raw: true });
 
-    const { count, rows } = await models.Reservation.findAndCountAll({
-      where,
-      limit,
-      offset,
-      order: [["cancelledAt", "DESC"]],
-      raw: true
-    });
-
-    const totals = rows.reduce((acc, row) => {
+    const totals = totalRows.reduce((acc, row) => {
       acc.count += 1;
       acc.agreedTotal = round4(acc.agreedTotal + Number(row.agreedTotal || 0));
       acc.paidTotal = round4(acc.paidTotal + Number(row.paidTotal || 0));
@@ -8182,7 +8300,7 @@ router.get("/reports/reservations/cancellations-refunds", authMiddleware, requir
       success: true,
       data: {
         filters,
-        pagination: { total: count, page, limit, pages: Math.ceil(count / limit) },
+        pagination: reservationReportPaginationMeta(totalRows.length, pagination, isExport),
         totals,
         items: rows
       },
@@ -8212,19 +8330,14 @@ router.get("/reports/reservations/expiry", authMiddleware, requireAnyPermission(
       if (req.query.to) where.expiredAt[Op.lte] = new Date(`${req.query.to}T23:59:59.999Z`);
     }
 
-    const limit = isExport ? 100000 : (req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50);
-    const page = isExport ? 1 : (req.query.page ? Math.max(1, Number(req.query.page)) : 1);
-    const offset = (page - 1) * limit;
+    const pagination = reservationReportPagination(req, isExport);
+    const order = [["expiredAt", "DESC"], ["id", "ASC"]];
+    const totalRows = await models.Reservation.findAll({ where, order, raw: true });
+    const rows = isExport
+      ? totalRows
+      : await models.Reservation.findAll({ where, order, limit: pagination.limit, offset: pagination.offset, raw: true });
 
-    const { count, rows } = await models.Reservation.findAndCountAll({
-      where,
-      limit,
-      offset,
-      order: [["expiredAt", "DESC"]],
-      raw: true
-    });
-
-    const totals = rows.reduce((acc, row) => {
+    const totals = totalRows.reduce((acc, row) => {
       acc.count += 1;
       acc.agreedTotal = round4(acc.agreedTotal + Number(row.agreedTotal || 0));
       acc.paidTotal = round4(acc.paidTotal + Number(row.paidTotal || 0));
@@ -8235,7 +8348,7 @@ router.get("/reports/reservations/expiry", authMiddleware, requireAnyPermission(
       success: true,
       data: {
         filters,
-        pagination: { total: count, page, limit, pages: Math.ceil(count / limit) },
+        pagination: reservationReportPaginationMeta(totalRows.length, pagination, isExport),
         totals,
         items: rows
       },
@@ -8259,23 +8372,27 @@ router.get("/reports/reservations/amendments", authMiddleware, requireAnyPermiss
     const branchId = req.query.branchId ? String(req.query.branchId) : null;
     if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
     if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
+    if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
 
-    const baseWhere = await reservationService._internal.reservationVisibilityWhere(req.companyId, req.user, branchId);
+    const baseWhere = await secureReservationReportVisibilityWhere(req, branchId);
+    const pagination = reservationReportPagination(req, isExport);
 
-    const limit = isExport ? 100000 : (req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50);
-    const page = isExport ? 1 : (req.query.page ? Math.max(1, Number(req.query.page)) : 1);
-    const offset = (page - 1) * limit;
-
-    if (baseWhere.id === "__NO_VISIBLE_RESERVATION_SCOPE__") {
-      return res.status(200).json({ success: true, data: { filters: { from, to, branchId }, pagination: { total: 0, page, limit, pages: 0 }, totals: {}, items: [] }, items: [] });
+    const visibleReservations = await models.Reservation.findAll({ where: baseWhere, attributes: ["id"], raw: true });
+    const visibleReservationIds = visibleReservations.map((row) => row.id);
+    if (!visibleReservationIds.length) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          filters: { from, to, branchId },
+          pagination: reservationReportPaginationMeta(0, pagination, isExport),
+          totals: { count: 0, totalBefore: 0, totalAfter: 0 },
+          items: []
+        },
+        items: []
+      });
     }
 
-    const where = { companyId: req.companyId };
-    if (baseWhere.branchId) {
-      where.branchId = baseWhere.branchId;
-    } else if (branchId) {
-      where.branchId = branchId;
-    }
+    const where = { companyId: req.companyId, reservationId: { [Op.in]: visibleReservationIds } };
 
     if (from || to) {
       where.createdAt = {};
@@ -8283,15 +8400,13 @@ router.get("/reports/reservations/amendments", authMiddleware, requireAnyPermiss
       if (to) where.createdAt[Op.lte] = new Date(`${to}T23:59:59.999Z`);
     }
 
-    const { count, rows } = await models.ReservationAmendment.findAndCountAll({
-      where,
-      limit,
-      offset,
-      order: [["createdAt", "DESC"]],
-      raw: true
-    });
+    const order = [["createdAt", "DESC"], ["id", "ASC"]];
+    const totalRows = await models.ReservationAmendment.findAll({ where, order, raw: true });
+    const rows = isExport
+      ? totalRows
+      : await models.ReservationAmendment.findAll({ where, order, limit: pagination.limit, offset: pagination.offset, raw: true });
 
-    const totals = rows.reduce((acc, row) => {
+    const totals = totalRows.reduce((acc, row) => {
       acc.count += 1;
       acc.totalBefore = round4(acc.totalBefore + Number(row.beforeTotal || 0));
       acc.totalAfter = round4(acc.totalAfter + Number(row.afterTotal || 0));
@@ -8302,7 +8417,7 @@ router.get("/reports/reservations/amendments", authMiddleware, requireAnyPermiss
       success: true,
       data: {
         filters: { from, to, branchId },
-        pagination: { total: count, page, limit, pages: Math.ceil(count / limit) },
+        pagination: reservationReportPaginationMeta(totalRows.length, pagination, isExport),
         totals,
         items: rows
       },
@@ -8326,23 +8441,27 @@ router.get("/reports/reservations/renewals", authMiddleware, requireAnyPermissio
     const branchId = req.query.branchId ? String(req.query.branchId) : null;
     if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
     if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
+    if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
 
-    const baseWhere = await reservationService._internal.reservationVisibilityWhere(req.companyId, req.user, branchId);
+    const baseWhere = await secureReservationReportVisibilityWhere(req, branchId);
+    const pagination = reservationReportPagination(req, isExport);
 
-    const limit = isExport ? 100000 : (req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50);
-    const page = isExport ? 1 : (req.query.page ? Math.max(1, Number(req.query.page)) : 1);
-    const offset = (page - 1) * limit;
-
-    if (baseWhere.id === "__NO_VISIBLE_RESERVATION_SCOPE__") {
-      return res.status(200).json({ success: true, data: { filters: { from, to, branchId }, pagination: { total: 0, page, limit, pages: 0 }, totals: {}, items: [] }, items: [] });
+    const visibleReservations = await models.Reservation.findAll({ where: baseWhere, attributes: ["id"], raw: true });
+    const visibleReservationIds = visibleReservations.map((row) => row.id);
+    if (!visibleReservationIds.length) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          filters: { from, to, branchId },
+          pagination: reservationReportPaginationMeta(0, pagination, isExport),
+          totals: { count: 0, sourceTransferableBalance: 0, successorTotal: 0, transferAmount: 0, excessRefundAmount: 0 },
+          items: []
+        },
+        items: []
+      });
     }
 
-    const where = { companyId: req.companyId };
-    if (baseWhere.branchId) {
-      where.branchId = baseWhere.branchId;
-    } else if (branchId) {
-      where.branchId = branchId;
-    }
+    const where = { companyId: req.companyId, sourceReservationId: { [Op.in]: visibleReservationIds } };
 
     if (from || to) {
       where.requestedAt = {};
@@ -8350,15 +8469,13 @@ router.get("/reports/reservations/renewals", authMiddleware, requireAnyPermissio
       if (to) where.requestedAt[Op.lte] = new Date(`${to}T23:59:59.999Z`);
     }
 
-    const { count, rows } = await models.ReservationRenewal.findAndCountAll({
-      where,
-      limit,
-      offset,
-      order: [["requestedAt", "DESC"]],
-      raw: true
-    });
+    const order = [["requestedAt", "DESC"], ["id", "ASC"]];
+    const totalRows = await models.ReservationRenewal.findAll({ where, order, raw: true });
+    const rows = isExport
+      ? totalRows
+      : await models.ReservationRenewal.findAll({ where, order, limit: pagination.limit, offset: pagination.offset, raw: true });
 
-    const totals = rows.reduce((acc, row) => {
+    const totals = totalRows.reduce((acc, row) => {
       acc.count += 1;
       acc.sourceTransferableBalance = round4(acc.sourceTransferableBalance + Number(row.sourceTransferableBalance || 0));
       acc.successorTotal = round4(acc.successorTotal + Number(row.successorTotal || 0));
@@ -8371,7 +8488,7 @@ router.get("/reports/reservations/renewals", authMiddleware, requireAnyPermissio
       success: true,
       data: {
         filters: { from, to, branchId },
-        pagination: { total: count, page, limit, pages: Math.ceil(count / limit) },
+        pagination: reservationReportPaginationMeta(totalRows.length, pagination, isExport),
         totals,
         items: rows
       },
@@ -8391,6 +8508,7 @@ router.get("/reports/reservations/reconciliation", authMiddleware, requireAnyPer
     }
 
     const { where, filters } = await secureReservationReportFilters(req);
+    const pagination = reservationReportPagination(req, isExport);
 
     // Dynamic validation of configured advances account
     const advancesSetting = await models.Setting.findOne({ where: { companyId: req.companyId, key: "reservationAdvancesAccountId" } });
@@ -8400,6 +8518,7 @@ router.get("/reports/reservations/reconciliation", authMiddleware, requireAnyPer
         success: true,
         data: {
           filters,
+          pagination: reservationReportPaginationMeta(0, pagination, isExport),
           totals: { reconciledCount: 0, mismatchCount: 0, unsupportedCount: 0, netDifference: 0 },
           glReconciliation: {
             configured: false,
@@ -8420,6 +8539,7 @@ router.get("/reports/reservations/reconciliation", authMiddleware, requireAnyPer
         success: true,
         data: {
           filters,
+          pagination: reservationReportPaginationMeta(0, pagination, isExport),
           totals: { reconciledCount: 0, mismatchCount: 0, unsupportedCount: 0, netDifference: 0 },
           glReconciliation: {
             configured: false,
@@ -8438,6 +8558,7 @@ router.get("/reports/reservations/reconciliation", authMiddleware, requireAnyPer
         success: true,
         data: {
           filters,
+          pagination: reservationReportPaginationMeta(0, pagination, isExport),
           totals: { reconciledCount: 0, mismatchCount: 0, unsupportedCount: 0, netDifference: 0 },
           glReconciliation: {
             configured: false,
@@ -8456,6 +8577,7 @@ router.get("/reports/reservations/reconciliation", authMiddleware, requireAnyPer
         success: true,
         data: {
           filters,
+          pagination: reservationReportPaginationMeta(0, pagination, isExport),
           totals: { reconciledCount: 0, mismatchCount: 0, unsupportedCount: 0, netDifference: 0 },
           glReconciliation: {
             configured: false,
@@ -8476,6 +8598,7 @@ router.get("/reports/reservations/reconciliation", authMiddleware, requireAnyPer
         success: true,
         data: {
           filters,
+          pagination: reservationReportPaginationMeta(0, pagination, isExport),
           totals: { reconciledCount: 0, mismatchCount: 0, unsupportedCount: 0, netDifference: 0 },
           glReconciliation: {
             configured: false,
@@ -8494,6 +8617,7 @@ router.get("/reports/reservations/reconciliation", authMiddleware, requireAnyPer
         success: true,
         data: {
           filters,
+          pagination: reservationReportPaginationMeta(0, pagination, isExport),
           totals: { reconciledCount: 0, mismatchCount: 0, unsupportedCount: 0, netDifference: 0 },
           glReconciliation: {
             configured: false,
@@ -8512,6 +8636,7 @@ router.get("/reports/reservations/reconciliation", authMiddleware, requireAnyPer
         success: true,
         data: {
           filters,
+          pagination: reservationReportPaginationMeta(0, pagination, isExport),
           totals: { reconciledCount: 0, mismatchCount: 0, unsupportedCount: 0, netDifference: 0 },
           glReconciliation: {
             configured: false,
@@ -8526,7 +8651,7 @@ router.get("/reports/reservations/reconciliation", authMiddleware, requireAnyPer
     }
 
     // Fetch reservations
-    const reservations = await models.Reservation.findAll({ where, order: [["createdAt", "DESC"]], raw: true });
+    const reservations = await models.Reservation.findAll({ where, order: [["createdAt", "DESC"], ["id", "ASC"]], raw: true });
     const ids = reservations.map((r) => r.id);
 
     // Fetch related records
@@ -8591,6 +8716,7 @@ router.get("/reports/reservations/reconciliation", authMiddleware, requireAnyPer
         where: { companyId: req.companyId, status: "posted" }
       }],
       where: { accountId: advancesAccount.id },
+      order: [[{ model: models.JournalEntry, as: "journalEntry" }, "date", "DESC"], [{ model: models.JournalEntry, as: "journalEntry" }, "id", "ASC"], ["id", "ASC"]],
       raw: true,
       nest: true
     });
@@ -8691,43 +8817,50 @@ router.get("/reports/reservations/reconciliation", authMiddleware, requireAnyPer
       });
     }
 
-    // Append unattributable lines as unsupported_legacy rows
-    for (const line of unattributableLines) {
-      unsupportedCount++;
-      const glLiability = round4(line.credit - line.debit);
-      const difference = round4(0 - glLiability);
+    const hasCompanyWideVisibility = ["admin", "owner"].includes(req.user?.role)
+      || await permissionService.userHasAnyPermission(req.user, ["reservations.view_all", "sales.view"]);
+    const mayViewUnattributableDiagnostics = hasCompanyWideVisibility && !filters.branchId;
 
-      glSum = round4(glSum + glLiability);
+    // Unattributable GL diagnostics have company-wide accounting scope. They
+    // are excluded from branch/own scope and from company-wide requests that
+    // explicitly narrow to a branch, including totals and export output.
+    if (mayViewUnattributableDiagnostics) {
+      for (const line of unattributableLines) {
+        unsupportedCount++;
+        const glLiability = round4(line.credit - line.debit);
+        const difference = round4(0 - glLiability);
 
-      detailItems.push({
-        reservationId: null,
-        reservationNumber: null,
-        customerId: null,
-        customerName: null,
-        branchId: null,
-        status: "unsupported_legacy",
-        expectedLiabilityBalance: 0,
-        glLiabilityBalance: glLiability,
-        difference,
-        reconciliationStatus: "unsupported_legacy",
-        investigationFlag: true,
-        details: {
-          journalLineId: line.journalLineId,
-          journalEntryId: line.journalEntryId,
-          description: line.description,
-          sourceType: line.sourceType,
-          sourceId: line.sourceId,
-          date: line.date
-        }
-      });
+        glSum = round4(glSum + glLiability);
+
+        detailItems.push({
+          reservationId: null,
+          reservationNumber: null,
+          customerId: null,
+          customerName: null,
+          branchId: null,
+          status: "unsupported_legacy",
+          expectedLiabilityBalance: 0,
+          glLiabilityBalance: glLiability,
+          difference,
+          reconciliationStatus: "unsupported_legacy",
+          investigationFlag: true,
+          details: {
+            journalLineId: line.journalLineId,
+            journalEntryId: line.journalEntryId,
+            description: line.description,
+            sourceType: line.sourceType,
+            sourceId: line.sourceId,
+            date: line.date
+          }
+        });
+      }
     }
 
-    // Pagination for items
-    const limit = isExport ? 100000 : (req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50);
-    const page = isExport ? 1 : (req.query.page ? Math.max(1, Number(req.query.page)) : 1);
-    const offset = (page - 1) * limit;
-
-    const paginatedItems = detailItems.slice(offset, offset + limit);
+    // Pagination applies only after the final authorized logical row set has
+    // been assembled, so hidden GL lines cannot influence counts or pages.
+    const paginatedItems = isExport
+      ? detailItems
+      : detailItems.slice(pagination.offset, pagination.offset + pagination.limit);
 
     const totals = {
       reconciledCount,
@@ -8755,7 +8888,7 @@ router.get("/reports/reservations/reconciliation", authMiddleware, requireAnyPer
       success: true,
       data: {
         filters,
-        pagination: { total: detailItems.length, page, limit, pages: Math.ceil(detailItems.length / limit) },
+        pagination: reservationReportPaginationMeta(detailItems.length, pagination, isExport),
         totals,
         glReconciliation,
         items: paginatedItems
