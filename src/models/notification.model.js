@@ -39,6 +39,18 @@ const Notification = sequelize.define("Notification", {
     type: DataTypes.STRING,
     field: "entity_id"
   },
+  sourceType: {
+    type: DataTypes.STRING,
+    field: "source_type"
+  },
+  sourceId: {
+    type: DataTypes.STRING,
+    field: "source_id"
+  },
+  eventKey: {
+    type: DataTypes.STRING,
+    field: "event_key"
+  },
   isRead: {
     type: DataTypes.BOOLEAN,
     field: "is_read",

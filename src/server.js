@@ -3,6 +3,7 @@ const app = require("./app");
 const sequelize = require("./config/database");
 const logger = require("./utils/logger");
 const ensureAdmin = require("./bootstrap/ensureAdmin");
+const reservationExpiryScheduler = require("./services/reservation-expiry-scheduler");
 
 const PORT = process.env.PORT || 8000;
 
@@ -17,6 +18,14 @@ const startServer = async () => {
       await ensureAdmin();
     } catch (bootErr) {
       logger.error(`[Bootstrap] ensureAdmin failed: ${bootErr.message}`);
+    }
+
+    // Phase 32.6-Fix C — start the reservation automatic-expiry scheduler
+    // (no-op in test/verifier mode).
+    try {
+      reservationExpiryScheduler.start();
+    } catch (schedErr) {
+      logger.error(`[Bootstrap] reservation expiry scheduler failed to start: ${schedErr.message}`);
     }
 
     // Start Express Server

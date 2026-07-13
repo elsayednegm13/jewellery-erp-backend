@@ -13,8 +13,13 @@ const StockMovement = sequelize.define("StockMovement", {
   },
   productId: {
     type: DataTypes.STRING,
-    allowNull: false,
+    allowNull: true,
     field: "product_id"
+  },
+  assetId: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    field: "asset_id"
   },
   productCode: {
     type: DataTypes.STRING,

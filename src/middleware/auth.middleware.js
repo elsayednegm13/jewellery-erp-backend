@@ -37,6 +37,7 @@ const authMiddleware = async (req, res, next) => {
     const headerBranchId = req.headers["x-branch-id"];
     const COMPANY_LEVEL_PREFIXES = [
       "/settings",
+      "/barcode-settings",
       "/branches",
       "/auth",
       "/health",

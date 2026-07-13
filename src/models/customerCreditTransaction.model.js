@@ -33,7 +33,8 @@ const CustomerCreditTransaction = sequelize.define("CustomerCreditTransaction", 
     field: "customer_id"
   },
   // opening_balance | return_credit | exchange_credit | overpayment |
-  // credit_application | credit_refund | manual_adjustment | migration_seed
+  // credit_application | credit_refund | manual_deposit |
+  // manual_adjustment | migration_seed
   sourceType: {
     type: DataTypes.STRING(40),
     allowNull: false,
@@ -41,7 +42,7 @@ const CustomerCreditTransaction = sequelize.define("CustomerCreditTransaction", 
     validate: {
       isIn: [[
         "opening_balance", "return_credit", "exchange_credit", "overpayment",
-        "credit_application", "credit_refund", "manual_adjustment", "migration_seed"
+        "credit_application", "credit_refund", "manual_deposit", "manual_adjustment", "migration_seed"
       ]]
     }
   },

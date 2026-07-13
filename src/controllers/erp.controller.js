@@ -57,11 +57,7 @@ function getPurityFromKarat(karat) {
   return null;
 }
 
-function generateBarcode() {
-  return String(Date.now()).slice(-13).padStart(13, "6");
-}
-
-function normalizeAssetCreatePayload(payload, req) {
+async function normalizeAssetCreatePayload(payload, req) {
   if (req.body.type && !payload.type) payload.type = req.body.type;
   if (!payload.type) payload.type = "gold-piece";
 
@@ -79,11 +75,56 @@ function normalizeAssetCreatePayload(payload, req) {
   payload.branch = payload.branch || req.branchId || "Main Branch";
   payload.location = payload.location || "Showroom";
   payload.status = payload.status || "available";
-  payload.barcode = payload.barcode || generateBarcode();
   payload.source = payload.source || "Manual entry";
   if (purity !== null && purity !== undefined) payload.purity = purity;
 
+  // Phase 32.1-Fix: final stored barcode identity is allocated only by the
+  // backend from company-scoped editable taxonomy rows. Client-supplied final
+  // barcode/component values are overwritten, never trusted.
+  const barcodeIdentityService = require("../services/barcode-identity.service");
+  const identity = await barcodeIdentityService.generateBarcodeForAsset({
+    companyId: req.companyId,
+    assetType: payload.type,
+    inventoryCode: payload.inventoryCode,
+    itemCode: payload.itemCode,
+    karat: payload.karat,
+    inventorySubtype: payload.inventorySubtype,
+  });
+  Object.assign(payload, identity);
+  payload.metadataSchemaVersion = payload.metadataSchemaVersion || 1;
+  payload.metadata = payload.metadata || {};
+
   return payload;
+}
+
+const ASSET_IDENTITY_FIELDS = Object.freeze({
+  type: "type",
+  karat: "karat",
+  inventoryCode: "inventoryCode",
+  inventory_code: "inventoryCode",
+  itemCode: "itemCode",
+  item_code: "itemCode",
+  karatCode: "karatCode",
+  karat_code: "karatCode",
+  barcodeSerial: "barcodeSerial",
+  barcode_serial: "barcodeSerial",
+  barcode: "barcode",
+  barcodeGeneratedAt: "barcodeGeneratedAt",
+  barcode_generated_at: "barcodeGeneratedAt",
+  barcodeRevision: "barcodeRevision",
+  barcode_revision: "barcodeRevision",
+});
+
+function changedAssetIdentityField(item, body = {}) {
+  for (const [requestField, modelField] of Object.entries(ASSET_IDENTITY_FIELDS)) {
+    if (!Object.prototype.hasOwnProperty.call(body, requestField)) continue;
+    const current = item[modelField];
+    const requested = body[requestField];
+    const currentComparable = current instanceof Date ? current.toISOString() : String(current ?? "");
+    const requestedComparable = requested instanceof Date ? requested.toISOString() : String(requested ?? "");
+    if (currentComparable !== requestedComparable) return requestField;
+  }
+  return null;
 }
 
 const GENERATED_ID_FORMATS = {
@@ -414,7 +455,7 @@ class ErpController {
       }
 
       if (this.model.name === "Asset") {
-        normalizeAssetCreatePayload(payload, req);
+        await normalizeAssetCreatePayload(payload, req);
       }
 
       // Ensure primary key is present if frontend generates IDs (like AST-2026-..., CUS-..., SUP-...)
@@ -505,6 +546,19 @@ class ErpController {
       }
 
       const originalState = item.toJSON();
+
+      // A barcode is the permanent operational identity. Existing legacy rows
+      // also carry a barcode, so they receive the same protection even though
+      // their new component columns remain NULL until a future approved phase.
+      if (this.model.name === "Asset" && item.barcode) {
+        const changedIdentityField = changedAssetIdentityField(item, req.body || {});
+        if (changedIdentityField) {
+          throw new ValidationError(
+            "Barcode identity fields cannot be changed after generation. Create a new taxonomy code instead; historical barcodes remain immutable.",
+            { [changedIdentityField]: ["Used barcode identity is locked"] }
+          );
+        }
+      }
 
       // Phase 10M: Supplier.due is system-managed (frozen) — silently ignore any
       // `due` in the body so it can never be edited via generic CRUD.

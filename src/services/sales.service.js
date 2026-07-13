@@ -160,4 +160,77 @@ function resolvePayment({ paymentMethod, total, body = {}, installmentRules = {}
   return { paidAmount, remainingAmount, status, installmentsToCreate };
 }
 
-module.exports = { roundMoney, computeTotals, buildInstallmentSchedule, resolvePayment };
+/**
+ * Phase 30 — validate/normalize the operator-selected settlement of the EXCESS
+ * that remains AFTER receivable-first AR relief on a return/exchange. The excess
+ * can be split across a cash refund (1110), a bank refund (1120), and customer
+ * store credit (2300); the parts must sum to the excess. Pure validation — no DB.
+ *
+ * @param {object} p
+ * @param {number} p.excessAmount   value owed back to the customer after AR relief
+ * @param {object} [p.settlement]   { cashAmount, bankAmount, creditAmount,
+ *                                    cashAccountCode, bankAccountCode,
+ *                                    reference?, description? }
+ * @param {boolean} p.hasCustomer   whether the invoice has a customer (credit needs one)
+ * @param {number} [p.tolerance]    money tolerance (default 0.01)
+ * @returns {{provided:boolean, cashAmount:number, bankAmount:number,
+ *            creditAmount:number, cashAccountCode:string, bankAccountCode:string,
+ *            reference:(string|null), description:(string|null)}}
+ *          `provided:false` when no settlement object was sent (caller keeps the
+ *          legacy full cash/bank refund default).
+ */
+function resolveExcessSettlement({ excessAmount, settlement, hasCustomer = false, tolerance = 0.01 }) {
+  const excess = roundMoney(excessAmount);
+
+  if (settlement === undefined || settlement === null) {
+    return { provided: false, cashAmount: 0, bankAmount: 0, creditAmount: 0, cashAccountCode: "1110", bankAccountCode: "1120", reference: null, description: null };
+  }
+  if (typeof settlement !== "object" || Array.isArray(settlement)) {
+    throw new ValidationError("settlement must be an object");
+  }
+
+  const cashAmount = roundMoney(Number(settlement.cashAmount) || 0);
+  const bankAmount = roundMoney(Number(settlement.bankAmount) || 0);
+  const creditAmount = roundMoney(Number(settlement.creditAmount) || 0);
+  if (cashAmount < 0 || bankAmount < 0 || creditAmount < 0) {
+    throw new ValidationError("settlement amounts must not be negative");
+  }
+  const sum = roundMoney(cashAmount + bankAmount + creditAmount);
+
+  // No excess to settle → settlement must be absent or all-zero.
+  if (excess <= tolerance) {
+    if (sum > tolerance) {
+      throw new ValidationError("No excess remains after receivable relief; settlement must be zero");
+    }
+    return { provided: true, cashAmount: 0, bankAmount: 0, creditAmount: 0, cashAccountCode: "1110", bankAccountCode: "1120", reference: settlement.reference || null, description: settlement.description || null };
+  }
+
+  if (Math.abs(sum - excess) > tolerance) {
+    throw new ValidationError(`Settlement parts (${sum}) must equal the excess amount (${excess})`);
+  }
+
+  const cashAccountCode = String(settlement.cashAccountCode || "1110");
+  const bankAccountCode = String(settlement.bankAccountCode || "1120");
+  if (cashAmount > 0 && cashAccountCode !== "1110") {
+    throw new ValidationError("cashAccountCode must be 1110 for a cash refund");
+  }
+  if (bankAmount > 0 && bankAccountCode !== "1120") {
+    throw new ValidationError("bankAccountCode must be 1120 for a bank refund");
+  }
+  if (creditAmount > 0 && !hasCustomer) {
+    throw new ValidationError("Customer credit requires a customer on the original invoice");
+  }
+
+  return {
+    provided: true,
+    cashAmount,
+    bankAmount,
+    creditAmount,
+    cashAccountCode: "1110",
+    bankAccountCode: "1120",
+    reference: settlement.reference ? String(settlement.reference) : null,
+    description: settlement.description ? String(settlement.description) : null,
+  };
+}
+
+module.exports = { roundMoney, computeTotals, buildInstallmentSchedule, resolvePayment, resolveExcessSettlement };

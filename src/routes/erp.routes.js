@@ -9,6 +9,8 @@ const journalService = require("../services/journal.service");
 const goldService = require("../services/gold.service");
 const settingsService = require("../services/settings.service");
 const salesService = require("../services/sales.service");
+const exchangePolicyService = require("../services/exchange-policy.service");
+const exchangeDisplayService = require("../services/exchange-display.service");
 const goldCostService = require("../services/gold-cost.service");
 const supplierPaymentState = require("../services/supplier-payment-state.service");
 const auditService = require("../services/audit.service");
@@ -16,6 +18,11 @@ const { emitEntityChanged } = require("../services/realtime-helper.service");
 const notificationService = require("../services/notification.service");
 const idempotencyService = require("../services/idempotency.service");
 const customerCreditService = require("../services/customer-credit.service");
+const barcodeIdentityService = require("../services/barcode-identity.service");
+const reservationService = require("../services/reservation.service");
+const permissionService = require("../services/permission.service");
+const statementReconciliationService = require("../services/statement-reconciliation.service");
+const sourceAwareStatementService = require("../services/source-aware-statement.service");
 const logger = require("../utils/logger");
 const { ValidationError, NotFoundError, ConflictError, ForbiddenError } = require("../utils/errors");
 const uploadMiddleware = require("../middleware/upload.middleware");
@@ -23,6 +30,25 @@ const { moveUploadedFileSafe } = require("../utils/file-move");
 
 const router = express.Router();
 const allowAuthenticated = (req, res, next) => next();
+
+const reservationPerms = {
+  view: ["reservations.view", "reservations.view_all", "reservations.view_branch", "reservations.view_own", "sales.view"],
+  create: ["reservations.create", "sales.create"],
+  recordPayment: ["reservations.record_payment", "sales.create"],
+  completeSale: ["reservations.complete_sale", "sales.create"],
+  cancel: ["reservations.cancel", "sales.approve"],
+  amendItems: ["reservations.amend_items", "sales.approve"],
+  extendExpiry: ["reservations.extend_expiry", "sales.approve"],
+  renew: ["reservations.renew", "sales.approve"],
+  refundRequest: ["reservations.refund_request", "sales.approve"],
+  refundApprove: ["reservations.refund_approve", "approvals.manage"],
+  refundReject: ["reservations.refund_reject", "approvals.manage"],
+  refundExecute: ["reservations.refund_execute", "treasury.update"],
+  auditView: ["reservations.audit_view", "audit.view"],
+  reportsView: ["reservations.reports_view", "reports.view"],
+  reportsExport: ["reservations.reports_export", "reports.export"],
+  statementView: ["reservations.statement_view", "customers.view"],
+};
 
 // Restrict an invoice where-clause to POSTED invoices only — the single source
 // of truth for every financial aggregate (sales totals, customer purchases,
@@ -94,6 +120,55 @@ function linkedRecordsError(req, code, linked) {
   err.errorCode = code || "HAS_LINKED_RECORDS";
   err.linked = linked;
   return err;
+}
+
+// Phase 31.4-Fix — customer-facing invoice search uses a deliberately small,
+// evidence-backed type map. Gift vouchers and customer-gold purchases live in
+// separate domain tables today, so they are not presented as invoice records.
+const SEARCH_PRINT_INVOICE_TYPES = Object.freeze({
+  sale: "sale",
+  return: "return",
+  exchange: "exchange",
+  installment: "installment",
+  deposit: "deposit",
+});
+
+const SEARCH_PRINT_STATUSES = new Set(["draft", "posted", "closed", "cancelled", "returned"]);
+
+function resolveSearchPrintStatus(invoice) {
+  if (invoice.postingStatus === "cancelled" || invoice.status === "cancelled") return "cancelled";
+  if (invoice.postingStatus === "draft") return "draft";
+  if (invoice.type === "return" || invoice.status === "returned") return "returned";
+  if (invoice.postingStatus === "posted" && invoice.status === "paid") return "closed";
+  return "posted";
+}
+
+function searchPrintStatusWhere(status) {
+  if (status === "draft") return { postingStatus: "draft" };
+  if (status === "cancelled") {
+    return { [Op.or]: [{ postingStatus: "cancelled" }, { status: "cancelled" }] };
+  }
+  if (status === "returned") {
+    return {
+      [Op.and]: [
+        { postingStatus: { [Op.ne]: "cancelled" } },
+        { status: { [Op.ne]: "cancelled" } },
+        { [Op.or]: [{ type: "return" }, { status: "returned" }] },
+      ],
+    };
+  }
+  if (status === "closed") {
+    return {
+      postingStatus: "posted",
+      status: "paid",
+      type: { [Op.ne]: "return" },
+    };
+  }
+  return {
+    postingStatus: "posted",
+    status: { [Op.notIn]: ["paid", "returned", "cancelled"] },
+    type: { [Op.ne]: "return" },
+  };
 }
 
 async function countLinkedRecords(checks) {
@@ -534,7 +609,10 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
     let journalEntry = null;
     try {
       if (invoice.type === "deposit") {
-        journalEntry = await postingService.postDepositEntry(invPlain, actor, { transaction: t });
+        journalEntry = await postingService.postDepositEntry(invPlain, actor, {
+          transaction: t,
+          receivedAmount: paidAmount,
+        });
       } else {
         journalEntry = await postingService.postInvoiceEntry(invPlain, invoiceItems, actor, { transaction: t });
       }
@@ -932,12 +1010,35 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
     // keeps the GL money leg, treasury, and customer balance consistent.
     const outstandingBefore = roundVal(Number(originalInvoice.remainingAmount || 0));
     const receivableReliefAmount = roundVal(Math.min(returnedTotal, outstandingBefore));
-    const cashRefundAmount = roundVal(returnedTotal - receivableReliefAmount);
+    const excessAmount = roundVal(returnedTotal - receivableReliefAmount);
     const refundMethodLower = originalInvoice.paymentMethod.toLowerCase();
-    const refundCashAccountCode = (refundMethodLower.includes("card") || refundMethodLower.includes("bank") || refundMethodLower.includes("transfer") || refundMethodLower.includes("شبكة") || refundMethodLower.includes("تحويل")) ? "1120" : "1110";
-    const refundTreasuryAccount = refundCashAccountCode === "1120" ? "bank" : "cash";
+    const originalIsBank = refundMethodLower.includes("card") || refundMethodLower.includes("bank") || refundMethodLower.includes("transfer") || refundMethodLower.includes("شبكة") || refundMethodLower.includes("تحويل");
 
-    // 9. Post GL Journal Entry (posting service expects positive absolute figures)
+    // Phase 30 — operator-selectable settlement of the excess AFTER AR relief.
+    // Absent settlement preserves the legacy default (full excess refunded to
+    // cash/bank on the original invoice's payment-method account); customer credit
+    // is never created unless explicitly requested. Parts must sum to the excess.
+    const settlementInput = salesService.resolveExcessSettlement({
+      excessAmount,
+      settlement: body.settlement,
+      hasCustomer: !!originalInvoice.customerId,
+    });
+    let cashRefundPortion = 0, bankRefundPortion = 0, creditPortion = 0;
+    if (excessAmount > 0.01) {
+      if (settlementInput.provided) {
+        cashRefundPortion = settlementInput.cashAmount;
+        bankRefundPortion = settlementInput.bankAmount;
+        creditPortion = settlementInput.creditAmount;
+      } else if (originalIsBank) {
+        bankRefundPortion = excessAmount;
+      } else {
+        cashRefundPortion = excessAmount;
+      }
+    }
+
+    // 9. Post GL Journal Entry (posting service expects positive absolute figures).
+    // The return journal is the sole GL owner: AR relief (Cr 1300) + cash (Cr 1110)
+    // + bank (Cr 1120) + customer credit (Cr 2300) all in one balanced entry.
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
     let journalEntry = null;
     try {
@@ -950,34 +1051,67 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
       journalEntry = await postingService.postReturnEntry(returnInvoiceForPosting, returnItems, actor, {
         transaction: t,
         receivableReliefAmount,
-        cashRefundAmount,
-        cashAccountCode: refundCashAccountCode
+        cashRefundAmount: cashRefundPortion,
+        bankRefundAmount: bankRefundPortion,
+        customerCreditAmount: creditPortion,
+        cashAccountCode: "1110",
+        bankAccountCode: "1120"
       });
     } catch (postErr) {
       logger.error(`[Posting] Failed to post return journal entry: ${postErr.message}`);
       throw new Error(`خطأ في إنشاء القيد المحاسبي للمرتجع: ${postErr.message}`);
     }
 
-    // 10. Record Treasury Cash Transaction — ONLY for the real cash refund
-    // portion (the excess of the return value over the outstanding receivable).
-    // Pure receivable relief moves no money, so no CashTransaction is created.
-    if (cashRefundAmount > 0) {
+    // 10. Record Treasury Cash Transaction logs — ONLY for the real cash/bank
+    // refund portions (one row per non-zero part). Pure receivable relief and the
+    // customer-credit portion move no cash, so they create no CashTransaction and
+    // no postCashEntry is called (the return journal above already owns the GL).
+    const makeRefundCashTx = async (amount, account) => {
+      if (amount <= 0) return;
       await models.CashTransaction.create({
         id: `TX-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         companyId: req.companyId,
         branchId,
         branch: branchRecord.name,
         type: "cash_out",
-        account: refundTreasuryAccount,
-        amount: cashRefundAmount,
+        account,
+        amount,
         category: "مرتجع مبيعات",
-        description: `مرتجع مبيعات (استرداد نقدي) للفاتورة رقم ${originalInvoice.id} - مستند دائن ${returnInvoiceId}`,
+        description: `مرتجع مبيعات (استرداد ${account === "bank" ? "بنكي" : "نقدي"}) للفاتورة رقم ${originalInvoice.id} - مستند دائن ${returnInvoiceId}`,
         reference: returnInvoiceId,
         date: nowStr.slice(0, 10),
         status: "posted",
         createdBy: req.user ? req.user.id : "System",
         journalEntryId: journalEntry ? journalEntry.id : null
       }, { transaction: t });
+    };
+    await makeRefundCashTx(cashRefundPortion, "cash");
+    await makeRefundCashTx(bankRefundPortion, "bank");
+
+    // Phase 30 — customer credit portion: record a credit_in linked to the SAME
+    // return journal (its Cr 2300 line was posted above). Explicit journalEntryId,
+    // NO glPosting → no second journal; keeps the 2300 bridge reconcilable.
+    if (creditPortion > 0) {
+      await customerCreditService.recordCreditIn({
+        models,
+        companyId: req.companyId,
+        customerId: originalInvoice.customerId,
+        branchId,
+        amount: creditPortion,
+        currency: settings.currency || "AED",
+        sourceType: "return_credit",
+        sourceId: returnInvoiceId,
+        invoiceId: originalInvoiceId,
+        description: settlementInput.description || `رصيد دائن من مرتجع الفاتورة ${originalInvoiceId}`,
+        metadata: {
+          originalInvoiceId,
+          reference: settlementInput.reference || null,
+          settlement: { cashAmount: cashRefundPortion, bankAmount: bankRefundPortion, creditAmount: creditPortion }
+        },
+        journalEntryId: journalEntry ? journalEntry.id : null,
+        createdBy: req.user ? req.user.id : "System",
+        transaction: t
+      });
     }
 
     // 11. Apply the receivable relief ONCE — customer balance + invoice
@@ -1048,6 +1182,267 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
     return res.status(201).json(idemResponseBody);
   } catch (error) {
     await t.rollback();
+    next(error);
+  }
+});
+
+// ─── Exchange Preview Endpoint (read-only target policy) ─────────────────────
+router.post("/sales/exchanges/preview", authMiddleware, requirePermission("sales.create"), async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const { originalInvoiceId } = body;
+    if (!originalInvoiceId) throw new ValidationError("رقم الفاتورة الأصلية مطلوب");
+
+    const originalInvoice = await models.Invoice.findOne({
+      where: { id: originalInvoiceId, companyId: req.companyId },
+      attributes: ["id", "companyId", "branchId", "customerId", "customerName", "remainingAmount", "postingStatus", "status", "type"],
+      include: [{ model: models.InvoiceItem, as: "items", attributes: ["id", "invoiceId", "assetId", "name", "quantity", "price", "cost", "weight", "karat"] }],
+    });
+    if (!originalInvoice) throw new ValidationError("لم يتم العثور على الفاتورة الأصلية");
+    if (originalInvoice.companyId !== req.companyId) throw new ForbiddenError("الفاتورة لا تتبع الشركة الحالية");
+    if (originalInvoice.postingStatus && originalInvoice.postingStatus !== "posted") throw new ValidationError("يمكن معاينة استبدال الفواتير المرحلة فقط");
+    if (["return", "exchange"].includes(String(originalInvoice.type || "").toLowerCase())) throw new ValidationError("لا تدعم المعاينة استبدال فواتير المرتجع أو الاستبدال");
+    if (String(originalInvoice.status || "").toLowerCase() === "cancelled") throw new ValidationError("لا يمكن معاينة استبدال فاتورة ملغاة");
+
+    const returnedItems = Array.isArray(body.returnedItems) ? body.returnedItems : [];
+    if (returnedItems.length > 1) throw new ValidationError("معاينة الاستبدال الحالية تدعم بنداً مرتجعاً واحداً فقط");
+    const returnedInput = returnedItems[0] || {};
+    const returnedInvoiceItemId = body.returnedInvoiceItemId ?? returnedInput.returnedInvoiceItemId ?? returnedInput.invoiceItemId;
+    const returnedAssetId = body.returnedAssetId ?? returnedInput.returnedAssetId ?? returnedInput.assetId;
+    if (!returnedAssetId && returnedInvoiceItemId == null) throw new ValidationError("رقم القطعة المرتجعة مطلوب للاستبدال");
+
+    let originalItem;
+    if (returnedInvoiceItemId != null) {
+      const lineId = Number(returnedInvoiceItemId);
+      if (!Number.isInteger(lineId) || lineId <= 0) throw new ValidationError("بند الفاتورة المحدد غير موجود");
+      originalItem = originalInvoice.items.find((i) => Number(i.id) === lineId);
+      if (!originalItem) throw new ValidationError("بند الفاتورة المحدد غير موجود");
+      if (returnedAssetId && originalItem.assetId !== returnedAssetId) throw new ValidationError("بند الفاتورة المحدد لا يطابق العنصر المرتجع");
+    } else {
+      originalItem = originalInvoice.items.find((i) => i.assetId === returnedAssetId);
+      if (!originalItem) throw new ValidationError("البند المرتجع ليس جزءاً من الفاتورة الأصلية المحددة");
+    }
+
+    const effectiveReturnedId = originalItem.assetId;
+    const priorCredits = await models.Invoice.findAll({
+      where: postedInvoiceWhere({ relatedInvoiceId: originalInvoiceId, type: ["return", "exchange"], companyId: req.companyId }),
+      attributes: ["id", "type", "relatedInvoiceId"],
+      include: [{ model: models.InvoiceItem, as: "items", attributes: ["assetId"] }],
+    });
+    for (const credit of priorCredits) {
+      if (credit.items.some((it) => it.assetId === effectiveReturnedId)) {
+        throw new ValidationError("تم إرجاع هذا البند مسبقاً");
+      }
+    }
+
+    const returnedAsset = await models.Asset.findOne({
+      where: { id: effectiveReturnedId, companyId: req.companyId },
+      attributes: ["id", "companyId", "name", "status", "branchId", "price", "cost"],
+    });
+    let returnQuantity = 1;
+    if (returnedAsset) {
+      if (returnedAsset.status !== "sold") throw new ValidationError(`الأصل المراد إرجاعه غير مباع حالياً، حالته: ${returnedAsset.status}`);
+    } else {
+      const returnedProduct = await models.Product.findOne({
+        where: { id: effectiveReturnedId, companyId: req.companyId },
+        attributes: ["id", "companyId", "productName", "branchId", "quantityAvailable", "salePrice", "unitCost"],
+      });
+      if (!returnedProduct) throw new ValidationError("البند المراد إرجاعه غير موجود");
+      returnQuantity = Number(originalItem.quantity) || 1;
+      if (returnQuantity <= 0) throw new ValidationError("كمية البند المراد إرجاعه غير صالحة");
+    }
+
+    const branchId = req.headers["x-branch-id"] || body.branchId || originalInvoice.branchId;
+    if (!branchId) throw new ValidationError("الفرع النشط مطلوب لمعاينة الاستبدال");
+    const branchRecord = await models.Branch.findOne({
+      where: { id: branchId, companyId: req.companyId, isActive: true },
+      attributes: ["id", "companyId", "name", "isActive"],
+    });
+    if (!branchRecord) throw new ValidationError("الفرع المحدد غير موجود أو غير نشط");
+
+    let normalizedNew;
+    if (Array.isArray(body.newItems)) {
+      if (body.newItems.length === 0) throw new ValidationError("يجب اختيار عنصر بديل واحد على الأقل للاستبدال");
+      normalizedNew = body.newItems.map((it) => ({ type: it && it.type, id: it && it.id, quantity: it && it.quantity }));
+    } else {
+      const newAssetIds = Array.isArray(body.newAssetIds) ? body.newAssetIds : [];
+      if (newAssetIds.length === 0) throw new ValidationError("يجب اختيار قطعة واحدة جديدة على الأقل للشراء");
+      normalizedNew = newAssetIds.map((id) => ({ type: "asset", id, quantity: 1 }));
+    }
+
+    const seenNewIds = new Set();
+    const newItems = [];
+    for (const it of normalizedNew) {
+      if (!it.id) throw new ValidationError("عنصر بديل بدون معرف غير صالح");
+      if (it.type !== "asset" && it.type !== "product") throw new ValidationError(`نوع العنصر البديل غير صالح: ${it.type}`);
+      const key = `${it.type}:${it.id}`;
+      if (seenNewIds.has(key)) throw new ValidationError("لا يمكن تكرار نفس العنصر في الاستبدال");
+      seenNewIds.add(key);
+
+      if (it.type === "asset") {
+        const asset = await models.Asset.findOne({
+          where: { id: it.id, companyId: req.companyId },
+          attributes: ["id", "companyId", "name", "status", "branchId", "price", "cost"],
+        });
+        if (!asset) throw new ValidationError("بعض الأصول البديلة الجديدة غير موجودة في النظام");
+        if (asset.status !== "available") throw new ValidationError(`المنتج البديل ${asset.name} (${asset.id}) غير متاح للبيع حالياً، حالته: ${asset.status}`);
+        if (asset.branchId !== branchId) throw new ValidationError(`المنتج البديل ${asset.name} (${asset.id}) تابع لفرع آخر وليس للفرع النشط`);
+        const unitPrice = Number(asset.price || 0);
+        newItems.push({ type: "asset", id: asset.id, name: asset.name, quantity: 1, unitPrice, lineValue: unitPrice });
+      } else {
+        const qty = Number(it.quantity);
+        if (!Number.isInteger(qty) || qty <= 0) throw new ValidationError("كمية المنتج البديل يجب أن تكون عدداً صحيحاً أكبر من صفر");
+        const product = await models.Product.findOne({
+          where: { id: it.id, companyId: req.companyId },
+          attributes: ["id", "companyId", "productName", "branchId", "quantityAvailable", "salePrice", "unitCost"],
+        });
+        if (!product) throw new ValidationError("بعض المنتجات البديلة الجديدة غير موجودة في النظام");
+        if (product.branchId !== branchId) throw new ValidationError(`المنتج البديل ${product.productName} (${product.id}) تابع لفرع آخر وليس للفرع النشط`);
+        if (Number(product.quantityAvailable || 0) < qty) throw new ValidationError(`الكمية المطلوبة غير متاحة للمنتج البديل ${product.productName}. المتاح: ${product.quantityAvailable}`);
+        const unitPrice = Number(product.salePrice || 0);
+        newItems.push({ type: "product", id: product.id, name: product.productName, quantity: qty, unitPrice, lineValue: unitPrice * qty });
+      }
+    }
+
+    const settings = await settingsService.getCompanySettings(req.companyId);
+    const vatRatePercent = Number(settings.vatRate ?? 0);
+    const returnedValue = salesService.roundMoney(Number(originalItem.price || 0) * returnQuantity);
+    const newSubtotal = salesService.roundMoney(newItems.reduce((sum, it) => sum + Number(it.lineValue || 0), 0));
+    const preview = exchangePolicyService.computeExchangePolicyPreview({
+      originalInvoiceId: originalInvoice.id,
+      customerId: originalInvoice.customerId,
+      currency: settings.currency || body.currency || "AED",
+      vatRate: vatRatePercent,
+      returnedValue,
+      newSubtotal,
+      outstandingAR: Number(originalInvoice.remainingAmount || 0),
+      settlement: body.settlement,
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        ...preview,
+        returnedValue: preview.returnedValue,
+        newSubtotal: preview.newSubtotal,
+        newTax: preview.newTax,
+        newGross: preview.newGross,
+        difference: preview.difference,
+        amountDueFromCustomer: preview.amountDueFromCustomer,
+        arRelief: preview.arRelief,
+        excessDueToCustomer: preview.excessDueToCustomer,
+        taxPolicy: preview.taxPolicy,
+        settlementPreview: preview.settlementPreview,
+        customerFacing: preview.customerFacing,
+        originalInvoice: {
+          id: originalInvoice.id,
+          customerId: originalInvoice.customerId,
+          customerName: originalInvoice.customerName,
+          remainingAmount: Number(originalInvoice.remainingAmount || 0),
+        },
+        returnedItem: {
+          invoiceItemId: originalItem.id,
+          assetId: effectiveReturnedId,
+          name: originalItem.name,
+          quantity: returnQuantity,
+          value: returnedValue,
+        },
+        newItems,
+      },
+      readOnly: true,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Read-only customer-facing exchange display enrichment. Target-policy status
+// requires the explicit policy marker saved in the successful idempotency
+// response; unmarked historical rows remain legacy/unknown and are never
+// recalculated under the current tax policy.
+router.get("/invoices/:id/exchange-display", authMiddleware, requirePermission("sales.view"), async (req, res, next) => {
+  try {
+    const invoice = await models.Invoice.findOne({
+      where: { id: req.params.id, companyId: req.companyId },
+      attributes: [
+        "id", "companyId", "customerId", "type", "relatedInvoiceId",
+        "subtotal", "tax", "total", "idempotencyKey",
+      ],
+      include: [{
+        model: models.InvoiceItem,
+        as: "items",
+        attributes: ["id", "invoiceId", "assetId", "name", "quantity", "price"],
+      }],
+    });
+    if (!invoice) throw new NotFoundError("Exchange invoice not found.");
+    if (invoice.type !== "exchange") throw new ValidationError("Invoice is not an exchange invoice.");
+
+    const idempotencyRequest = invoice.idempotencyKey
+      ? await models.IdempotencyRequest.findOne({
+          where: {
+            companyId: req.companyId,
+            scope: "sales.exchange",
+            key: invoice.idempotencyKey,
+            status: "succeeded",
+          },
+          attributes: ["id", "companyId", "scope", "key", "status", "responseBody"],
+        })
+      : null;
+    const savedPolicy = exchangeDisplayService.extractSavedExchangePolicy(idempotencyRequest, invoice.id);
+    const companySettings = await settingsService.getCompanySettings(req.companyId);
+    const currency = companySettings.currency || "AED";
+
+    if (!savedPolicy) {
+      const fallback = exchangeDisplayService.buildLegacyDisplay({
+        invoice,
+        currency,
+      });
+      return res.status(200).json({ success: true, data: fallback, readOnly: true });
+    }
+
+    const journalEntry = await models.JournalEntry.findOne({
+      where: { companyId: req.companyId, sourceType: "exchange", sourceId: invoice.id, status: "posted" },
+      attributes: ["id", "companyId", "sourceType", "sourceId", "status"],
+    });
+    const cashTransactions = journalEntry
+      ? await models.CashTransaction.findAll({
+          where: {
+            companyId: req.companyId,
+            journalEntryId: journalEntry.id,
+            reference: invoice.id,
+            type: "cash_out",
+            status: "posted",
+          },
+          attributes: ["id", "companyId", "type", "account", "amount", "reference", "journalEntryId", "status"],
+        })
+      : [];
+    const creditTransactions = journalEntry
+      ? await models.CustomerCreditTransaction.findAll({
+          where: {
+            companyId: req.companyId,
+            sourceType: "exchange_credit",
+            sourceId: invoice.id,
+            journalEntryId: journalEntry.id,
+            status: "active",
+          },
+          attributes: ["id", "companyId", "direction", "amount", "status", "sourceType", "sourceId", "journalEntryId"],
+        })
+      : [];
+    const settlementSummary = exchangeDisplayService.buildSettlementSummary({
+      expectedExcess: savedPolicy.excessDueToCustomer,
+      cashTransactions,
+      creditTransactions,
+      journalEntry,
+    });
+    const display = exchangeDisplayService.buildTargetPolicyDisplay({
+      invoice,
+      savedPolicy,
+      currency,
+      settlementSummary,
+    });
+
+    return res.status(200).json({ success: true, data: display, readOnly: true });
+  } catch (error) {
     next(error);
   }
 });
@@ -1245,7 +1640,7 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
     const settings = await settingsService.getCompanySettings(req.companyId, { transaction: t });
     const vatRatePercent = Number(settings.vatRate ?? 0);
 
-    // 5. Calculate values and differences
+    // 5. Calculate target-policy exchange values.
     const roundVal = (n) => Math.round((Number(n) || 0) * 100) / 100;
     // Asset: qty 1. Product full-return: original line qty. price/cost are per-unit.
     const returnedValue = roundVal(Number(originalItem.price || 0) * returnQuantity);
@@ -1253,35 +1648,49 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
     const returnedWeight = Number(originalItem.weight || 0); // stored weight is the line total
 
     // Names kept for the inline GL below; now summed over resolved asset+product lines.
-    const newAssetsValue = newResolvedItems.reduce((sum, it) => sum + it.lineValue, 0);
+    const newSubtotal = roundVal(newResolvedItems.reduce((sum, it) => sum + it.lineValue, 0));
+    const newAssetsValue = newSubtotal;
     const newAssetsCost = newResolvedItems.reduce((sum, it) => sum + it.lineCost, 0);
 
-    const diffBase = roundVal(newAssetsValue - returnedValue);
-    const diffTax = roundVal(diffBase * (vatRatePercent / 100));
-    const diffTotal = roundVal(diffBase + diffTax);
+    const outstandingBefore = roundVal(Number(originalInvoice.remainingAmount || 0));
+    const exchangePolicy = exchangePolicyService.computeExchangePolicyPreview({
+      originalInvoiceId,
+      customerId: originalInvoice.customerId,
+      currency: settings.currency || "AED",
+      vatRate: vatRatePercent,
+      returnedValue,
+      newSubtotal,
+      outstandingAR: outstandingBefore,
+      settlement: body.settlement,
+    });
+    const newTax = roundVal(exchangePolicy.newTax);
+    const newGross = roundVal(exchangePolicy.newGross);
+    const difference = roundVal(exchangePolicy.difference);
+    const amountDueFromCustomer = roundVal(exchangePolicy.amountDueFromCustomer);
+    const arRelief = roundVal(exchangePolicy.arRelief);
+    const excessDueToCustomer = roundVal(exchangePolicy.excessDueToCustomer);
+    const exchangeSubtotal = roundVal(newSubtotal - returnedValue);
 
-    // Phase 21.2 — receivable-first settlement of the exchange difference.
-    // diff < 0: relieve the outstanding receivable first, cash-refund only the excess.
-    // diff > 0: raise the receivable (credit) OR collect cash now (paid_now). The UI
+    // Phase 21.2/30.3 — receivable-first settlement of the target-policy exchange difference.
+    // Customer owed: relieve the outstanding receivable first, settle only the excess.
+    // Customer owes: raise the receivable (credit) OR collect cash now (paid_now). The UI
     // hardcodes paymentMethod:"Exchange", so an unconfirmed positive diff defaults to
     // CREDIT to avoid recording a cash_in that never actually happened.
-    const outstandingBefore = roundVal(Number(originalInvoice.remainingAmount || 0));
     const paidNowMethods = ["cash", "bank", "card", "transfer", "شبكة", "تحويل"];
     const pmLower = String(paymentMethod || "").toLowerCase();
     const settlementMode = (body.settlementMode === "paid_now" || body.settlementMode === "credit")
       ? body.settlementMode
-      : ((diffTotal > 0 && paidNowMethods.some((m) => pmLower.includes(m))) ? "paid_now" : "credit");
+      : ((amountDueFromCustomer > 0 && paidNowMethods.some((m) => pmLower.includes(m))) ? "paid_now" : "credit");
     let receivableReliefAmount = 0;   // diff < 0 → reduce AR
     let cashRefundAmount = 0;         // diff < 0 → refund the excess as cash
     let receivableIncreaseAmount = 0; // diff > 0 credit → raise AR
     let cashInAmount = 0;             // diff > 0 paid_now → collect cash now
-    if (diffTotal < 0) {
-      const creditValue = roundVal(Math.abs(diffTotal));
-      receivableReliefAmount = roundVal(Math.min(creditValue, outstandingBefore));
-      cashRefundAmount = roundVal(creditValue - receivableReliefAmount);
-    } else if (diffTotal > 0) {
-      if (settlementMode === "paid_now") cashInAmount = roundVal(diffTotal);
-      else receivableIncreaseAmount = roundVal(diffTotal);
+    if (difference < 0) {
+      receivableReliefAmount = arRelief;
+      cashRefundAmount = excessDueToCustomer;
+    } else if (amountDueFromCustomer > 0) {
+      if (settlementMode === "paid_now") cashInAmount = amountDueFromCustomer;
+      else receivableIncreaseAmount = amountDueFromCustomer;
     }
 
     // 6. Generate Exchange Invoice ID
@@ -1298,12 +1707,12 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
       customerName: originalInvoice.customerName,
       type: "exchange",
       date: nowStr.slice(0, 10),
-      subtotal: diffBase,
-      tax: diffTax,
+      subtotal: exchangeSubtotal,
+      tax: newTax,
       vatRate: vatRatePercent,
-      total: diffTotal,
+      total: difference,
       status: "paid",
-      paymentMethod: diffTotal > 0 ? paymentMethod : "Exchange",
+      paymentMethod: amountDueFromCustomer > 0 ? paymentMethod : "Exchange",
       relatedInvoiceId: originalInvoice.id,
       notes: notes || "استبدال أصول بموجب الفاتورة",
       idempotencyKey: req.headers["idempotency-key"] || body.idempotencyKey || null,
@@ -1451,14 +1860,43 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
     const isBank = payAcc.includes("card") || payAcc.includes("bank") || payAcc.includes("transfer") || payAcc.includes("شبكة") || payAcc.includes("تحويل");
     const accountCode = isBank ? "1120" : "1110";
 
+    // Phase 30.3 — operator-selectable settlement of the target-policy excess due to customer.
+    // Absent settlement preserves the legacy default (full excess refunded to
+    // cash/bank on the exchange payment-method account); customer credit is never
+    // created unless explicitly requested. A positive/zero difference has no refund
+    // excess, so any non-zero settlement is rejected by the helper.
+    const refundExcess = excessDueToCustomer;
+    const exchangeSettlement = exchangePolicy.settlementPreview && exchangePolicy.settlementPreview.provided
+      ? exchangePolicy.settlementPreview
+      : salesService.resolveExcessSettlement({
+          excessAmount: refundExcess,
+          settlement: body.settlement,
+          hasCustomer: !!originalInvoice.customerId,
+        });
+    let refundCashPortion = 0, refundBankPortion = 0, refundCreditPortion = 0;
+    if (refundExcess > 0.01) {
+      if (exchangeSettlement.provided) {
+        refundCashPortion = exchangeSettlement.cashAmount;
+        refundBankPortion = exchangeSettlement.bankAmount;
+        refundCreditPortion = exchangeSettlement.creditAmount;
+      } else if (isBank) {
+        refundBankPortion = refundExcess;
+      } else {
+        refundCashPortion = refundExcess;
+      }
+    }
+
     const lines = [];
-    // Money leg (Phase 21.2): split between Cash/Bank and Accounts Receivable 1300.
-    if (diffTotal > 0) {
+    // Money leg (Phase 21.2 + Phase 30): split between Cash 1110 / Bank 1120 /
+    // Customer Deposits 2300 (credit) and Accounts Receivable 1300. One journal.
+    if (amountDueFromCustomer > 0) {
       if (cashInAmount > 0) lines.push({ accountCode, debit: cashInAmount, credit: 0, description: "دفع فارق استبدال نقداً" });
       if (receivableIncreaseAmount > 0) lines.push({ accountCode: "1300", debit: receivableIncreaseAmount, credit: 0, description: "زيادة ذمم العميل — فارق استبدال" });
-    } else if (diffTotal < 0) {
+    } else if (excessDueToCustomer > 0 || receivableReliefAmount > 0) {
       if (receivableReliefAmount > 0) lines.push({ accountCode: "1300", debit: 0, credit: receivableReliefAmount, description: "تخفيض ذمم العميل — فارق استبدال" });
-      if (cashRefundAmount > 0) lines.push({ accountCode, debit: 0, credit: cashRefundAmount, description: "إرجاع فارق استبدال نقداً" });
+      if (refundCashPortion > 0) lines.push({ accountCode: "1110", debit: 0, credit: refundCashPortion, description: "إرجاع فارق استبدال نقداً" });
+      if (refundBankPortion > 0) lines.push({ accountCode: "1120", debit: 0, credit: refundBankPortion, description: "إرجاع فارق استبدال بنكياً" });
+      if (refundCreditPortion > 0) lines.push({ accountCode: "2300", debit: 0, credit: refundCreditPortion, description: "رصيد دائن للعميل — فارق استبدال" });
     }
 
     if (returnedValue > 0) {
@@ -1468,10 +1906,8 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
       lines.push({ accountCode: "4100", debit: 0, credit: newAssetsValue, description: "إيراد بيع أصل بديل" });
     }
 
-    if (diffTax > 0) {
-      lines.push({ accountCode: "2200", debit: 0, credit: diffTax, description: "ضريبة فارق استبدال" });
-    } else if (diffTax < 0) {
-      lines.push({ accountCode: "2200", debit: Math.abs(diffTax), credit: 0, description: "عكس ضريبة أصل قديم" });
+    if (newTax > 0) {
+      lines.push({ accountCode: "2200", debit: 0, credit: newTax, description: "ضريبة عناصر الاستبدال الجديدة" });
     }
 
     if (newAssetsCost > 0) {
@@ -1499,27 +1935,61 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
       throw new Error(`خطأ في إنشاء القيد المحاسبي للاستبدال: ${postErr.message}`);
     }
 
-    // 12. Record Treasury Cash Transaction — ONLY for real money movement:
-    // cash collected now on a positive diff (paid_now), or the cash-refund excess
-    // on a negative diff. Pure receivable (credit/relief) movements create none.
-    const exchangeCashAmount = diffTotal > 0 ? cashInAmount : cashRefundAmount;
-    if (exchangeCashAmount > 0) {
+    // 12. Record Treasury Cash Transaction logs — ONLY for real money movement:
+    // cash collected now on a positive diff (paid_now), or the cash/bank refund
+    // portions on a negative diff (one row per non-zero part). Pure receivable
+    // (credit/relief) and the customer-credit portion move no cash. No
+    // postCashEntry is called — the exchange journal above owns the GL.
+    const makeExchangeCashTx = async (amount, account, txType, label) => {
+      if (amount <= 0) return;
       await models.CashTransaction.create({
         id: `TX-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         companyId: req.companyId,
         branchId,
         branch: branchRecord.name,
-        type: diffTotal > 0 ? "cash_in" : "cash_out",
-        account: isBank ? "bank" : "cash",
-        amount: exchangeCashAmount,
+        type: txType,
+        account,
+        amount,
         category: "استبدال أصول",
-        description: `فارق استبدال أصول (نقدي) - فاتورة استبدال رقم ${exchangeInvoiceId}`,
+        description: `${label} - فاتورة استبدال رقم ${exchangeInvoiceId}`,
         reference: exchangeInvoiceId,
         date: nowStr.slice(0, 10),
         status: "posted",
         createdBy: req.user ? req.user.id : "System",
         journalEntryId: journalEntry ? journalEntry.id : null
       }, { transaction: t });
+    };
+    if (amountDueFromCustomer > 0) {
+      await makeExchangeCashTx(cashInAmount, isBank ? "bank" : "cash", "cash_in", "دفع فارق استبدال");
+    } else if (excessDueToCustomer > 0) {
+      await makeExchangeCashTx(refundCashPortion, "cash", "cash_out", "إرجاع فارق استبدال نقداً");
+      await makeExchangeCashTx(refundBankPortion, "bank", "cash_out", "إرجاع فارق استبدال بنكياً");
+    }
+
+    // Phase 30 — customer credit portion of the refund excess: record a credit_in
+    // linked to the SAME exchange journal (its Cr 2300 line was posted above).
+    // Explicit journalEntryId, NO glPosting → no second journal.
+    if (refundCreditPortion > 0) {
+      await customerCreditService.recordCreditIn({
+        models,
+        companyId: req.companyId,
+        customerId: originalInvoice.customerId,
+        branchId,
+        amount: refundCreditPortion,
+        currency: settings.currency || "AED",
+        sourceType: "exchange_credit",
+        sourceId: exchangeInvoiceId,
+        invoiceId: originalInvoice.id,
+        description: exchangeSettlement.description || `رصيد دائن من استبدال الفاتورة ${originalInvoice.id}`,
+        metadata: {
+          originalInvoiceId: originalInvoice.id,
+          reference: exchangeSettlement.reference || null,
+          settlement: { cashAmount: refundCashPortion, bankAmount: refundBankPortion, creditAmount: refundCreditPortion }
+        },
+        journalEntryId: journalEntry ? journalEntry.id : null,
+        createdBy: req.user ? req.user.id : "System",
+        transaction: t
+      });
     }
 
     // 13. Apply the receivable movement ONCE — raise AR for a credit purchase of
@@ -1543,13 +2013,24 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
     // 14. Write Audit Log
     await auditService.record(req.companyId, {
       action: "sales.exchange",
-      description: `تم إتمام عملية استبدال للفاتورة رقم ${originalInvoice.id}. فارق الاستبدال: ${diffTotal} - فاتورة جديدة ${exchangeInvoiceId}`,
+      description: `تم إتمام عملية استبدال للفاتورة رقم ${originalInvoice.id}. فارق الاستبدال: ${difference} - فاتورة جديدة ${exchangeInvoiceId}`,
       user: actor,
       userId: req.user ? req.user.id : null,
       place: branchRecord.name,
       sourceDocument: "invoice",
       severity: "info",
-      after: JSON.stringify({ exchangeInvoiceId, originalInvoiceId, diffTotal })
+      after: JSON.stringify({
+        exchangeInvoiceId,
+        originalInvoiceId,
+        difference,
+        newSubtotal,
+        newTax,
+        newGross,
+        returnedValue,
+        amountDueFromCustomer,
+        arRelief,
+        excessDueToCustomer
+      })
     }, { transaction: t });
 
     // Recalculate customer net purchases
@@ -1561,6 +2042,20 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
     const responseData = exchangeInvoice.toJSON();
     responseData.items = exchangeItems;
     responseData.journalEntry = journalEntry;
+    responseData.exchangePolicy = {
+      vatRate: exchangePolicy.vatRate,
+      returnedValue,
+      newSubtotal,
+      newTax,
+      newGross,
+      difference,
+      amountDueFromCustomer,
+      arRelief,
+      excessDueToCustomer,
+      settlementPreview: exchangePolicy.settlementPreview,
+      taxPolicy: exchangePolicy.taxPolicy,
+      readOnly: false
+    };
     const idemResponseBody = { success: true, ...responseData, data: responseData };
     await idempotencyService.succeed({ request: idemRequest, statusCode: 201, responseBody: idemResponseBody, transaction: t });
 
@@ -1570,7 +2065,7 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
     // 15. Create Notifications & SSE
     await notificationService.createNotification(req.companyId, {
       title: "عملية استبدال أصول",
-      message: `تم استبدال قطع للفاتورة ${originalInvoice.id} بفارق بقيمة ${diffTotal} ${settings.currency || "AED"}.`,
+      message: `تم استبدال قطع للفاتورة ${originalInvoice.id} بفارق بقيمة ${difference} ${settings.currency || "AED"}.`,
       type: "info",
       entityType: "Invoice",
       entityId: exchangeInvoiceId
@@ -3615,11 +4110,462 @@ setupCrud("manufacturing-orders", models.ManufacturingOrder, ["status", "type", 
 setupCrud("customer-gold-pools", models.CustomerGoldPool, ["customerName", "status"]);
 setupCrud("inventory-gold-pools", models.InventoryGoldPool, ["source", "status"]);
 setupCrud("purchase-orders", models.PurchaseOrder, ["supplierName", "status", "branch"]);
+
+// Phase 31.4-Fix — Unified Invoices Search & Print (read-only GET).
+// This route is intentionally registered before generic /invoices/:id.
+router.get("/invoices/search-print", authMiddleware, requirePermission("sales.view"), async (req, res, next) => {
+  try {
+    const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
+    const pageSize = Math.min(Math.max(Number.parseInt(req.query.pageSize, 10) || 25, 1), 100);
+    const search = String(req.query.search || "").trim();
+    const customer = String(req.query.customer || "").trim();
+    const customerId = String(req.query.customerId || "").trim();
+    const branch = String(req.query.branch || "").trim();
+    const requestedType = String(req.query.type || "all").trim();
+    const requestedStatus = String(req.query.status || "all").trim();
+    const dateFrom = String(req.query.dateFrom || "").trim();
+    const dateTo = String(req.query.dateTo || "").trim();
+    const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
+
+    if (dateFrom && !isoDatePattern.test(dateFrom)) {
+      throw new ValidationError("dateFrom must use YYYY-MM-DD format.");
+    }
+    if (dateTo && !isoDatePattern.test(dateTo)) {
+      throw new ValidationError("dateTo must use YYYY-MM-DD format.");
+    }
+    if (dateFrom && dateTo && dateFrom > dateTo) {
+      throw new ValidationError("dateFrom cannot be after dateTo.");
+    }
+    if (requestedType !== "all" && !SEARCH_PRINT_INVOICE_TYPES[requestedType]) {
+      throw new ValidationError("Unsupported invoice type for Search & Print.");
+    }
+    if (requestedStatus !== "all" && !SEARCH_PRINT_STATUSES.has(requestedStatus)) {
+      throw new ValidationError("Unsupported invoice status for Search & Print.");
+    }
+
+    const where = {
+      companyId: req.companyId,
+      type: { [Op.in]: Object.values(SEARCH_PRINT_INVOICE_TYPES) },
+    };
+    const conditions = [];
+
+    if (search) {
+      conditions.push({
+        [Op.or]: [
+          { id: { [Op.iLike]: `%${search}%` } },
+          { invoiceNumber: { [Op.iLike]: `%${search}%` } },
+        ],
+      });
+    }
+    if (customer) conditions.push({ customerName: { [Op.iLike]: `%${customer}%` } });
+    if (customerId) conditions.push({ customerId: { [Op.iLike]: `%${customerId}%` } });
+    if (branch && branch !== "all") conditions.push({ branch });
+    if (requestedType !== "all") conditions.push({ type: SEARCH_PRINT_INVOICE_TYPES[requestedType] });
+    if (requestedStatus !== "all") conditions.push(searchPrintStatusWhere(requestedStatus));
+    if (dateFrom || dateTo) {
+      const dateRange = {};
+      if (dateFrom) dateRange[Op.gte] = dateFrom;
+      // `Invoice.date` is a legacy string that may contain either YYYY-MM-DD
+      // or YYYY-MM-DD HH:mm. Use an end-of-day upper bound so both formats are
+      // included without parsing or rewriting stored values.
+      if (dateTo) dateRange[Op.lte] = `${dateTo} 23:59:59.999`;
+      conditions.push({ date: dateRange });
+    }
+    if (conditions.length) where[Op.and] = conditions;
+
+    const total = await models.Invoice.count({ where });
+    const rows = await models.Invoice.findAll({
+      where,
+      include: [{ model: models.InvoiceItem, as: "items" }],
+      order: [["createdAt", "DESC"]],
+      limit: pageSize,
+      offset: (page - 1) * pageSize,
+    });
+    const items = rows.map((row) => {
+      const invoice = row.toJSON();
+      return {
+        ...invoice,
+        type: invoice.type || "sale",
+        searchPrintStatus: resolveSearchPrintStatus(invoice),
+        employeeName: null,
+      };
+    });
+    const totalPages = Math.max(Math.ceil(total / pageSize), 1);
+
+    return res.status(200).json({
+      success: true,
+      items,
+      page,
+      pageSize,
+      total,
+      totalPages,
+      capabilities: {
+        employeeFilter: false,
+        supportedTypes: Object.keys(SEARCH_PRINT_INVOICE_TYPES),
+      },
+      data: {
+        items,
+        page,
+        pageSize,
+        total,
+        totalPages,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+// End Phase 31.4-Fix — Unified Invoices Search & Print.
+
 // Search fields must be text columns — `status` is an ENUM and ILIKE cannot be
 // applied to it (Postgres: "operator does not exist: enum_invoices_status ~~*"),
 // which silently broke invoice search. Search by id / invoiceNumber / customer.
 setupCrud("invoices", models.Invoice, ["customerName", "paymentMethod", "invoiceNumber", "id"]);
-setupCrud("reservations", models.Reservation, ["customerName", "assetName", "status"]);
+router.get("/reservations", authMiddleware, requireAnyPermission(reservationPerms.view), async (req, res, next) => {
+  try {
+    const result = await reservationService.list({ companyId: req.companyId, query: req.query, user: req.user, branchId: req.branchId });
+    return res.status(200).json({ success: true, ...result, data: result.items });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/reservations/:id", authMiddleware, requireAnyPermission(reservationPerms.view), async (req, res, next) => {
+  try {
+    const reservation = await reservationService.getById({ companyId: req.companyId, id: req.params.id, user: req.user, branchId: req.branchId });
+    return res.status(200).json({ success: true, data: reservation });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/reservations/:id/audit-timeline", authMiddleware, requireAnyPermission(reservationPerms.auditView), async (req, res, next) => {
+  try {
+    const reservation = await reservationService.getById({ companyId: req.companyId, id: req.params.id, user: req.user, branchId: req.branchId });
+    const logs = await models.AuditLog.findAll({
+      where: {
+        companyId: req.companyId,
+        sourceDocument: reservation.id,
+        action: { [Op.like]: "reservation.%" },
+      },
+      order: [["date", "ASC"], ["createdAt", "ASC"]],
+      limit: Math.min(Number(req.query.limit) || 200, 500),
+    });
+    const items = logs.map((log) => ({
+      id: log.id,
+      action: log.action,
+      description: log.description,
+      user: log.user,
+      userId: log.userId,
+      date: log.date,
+      severity: log.severity,
+      before: safeJson(log.before),
+      after: safeJson(log.after),
+    }));
+    return res.status(200).json({ success: true, data: items, items });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/reservations", authMiddleware, requireAnyPermission(reservationPerms.create), async (req, res, next) => {
+  try {
+    const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
+    const result = await reservationService.createReservation({
+      companyId: req.companyId,
+      branchId: req.branchId || req.body?.branchId || null,
+      user: req.user,
+      body: req.body || {},
+      idempotencyKey
+    });
+    emitEntityChanged(req.companyId, { entity: "Reservation", action: "create", id: result.responseBody?.data?.reservation?.id });
+    return res.status(result.statusCode).json(result.responseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/reservations/:id/payments", authMiddleware, requireAnyPermission(reservationPerms.recordPayment), async (req, res, next) => {
+  try {
+    const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
+    const result = await reservationService.addPayment({
+      companyId: req.companyId,
+      branchId: req.branchId || req.body?.branchId || null,
+      user: req.user,
+      reservationId: req.params.id,
+      body: req.body || {},
+      idempotencyKey
+    });
+    emitEntityChanged(req.companyId, { entity: "Reservation", action: "update", id: req.params.id });
+    return res.status(result.statusCode).json(result.responseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/reservations/:id/complete-sale", authMiddleware, requireAnyPermission(reservationPerms.completeSale), async (req, res, next) => {
+  try {
+    const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
+    const result = await reservationService.completeSale({
+      companyId: req.companyId,
+      branchId: req.branchId || req.body?.branchId || null,
+      user: req.user,
+      reservationId: req.params.id,
+      body: req.body || {},
+      idempotencyKey
+    });
+    emitEntityChanged(req.companyId, { entity: "Reservation", action: "complete", id: req.params.id });
+    return res.status(result.statusCode).json(result.responseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/reservations/:id/cancel", authMiddleware, requireAnyPermission(reservationPerms.cancel), async (req, res, next) => {
+  try {
+    const result = await reservationService.cancelReservation({
+      companyId: req.companyId,
+      branchId: req.branchId || req.body?.branchId || null,
+      user: req.user,
+      reservationId: req.params.id,
+      body: req.body || {}
+    });
+    emitEntityChanged(req.companyId, { entity: "Reservation", action: "cancel", id: req.params.id });
+    return res.status(result.statusCode).json(result.responseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/reservations/:id/refunds", authMiddleware, requireAnyPermission(reservationPerms.refundRequest), async (req, res, next) => {
+  try {
+    const result = await reservationService.requestRefund({
+      companyId: req.companyId,
+      branchId: req.branchId || req.body?.branchId || null,
+      user: req.user,
+      reservationId: req.params.id,
+      body: req.body || {}
+    });
+    emitEntityChanged(req.companyId, { entity: "Reservation", action: "refund-request", id: req.params.id });
+    return res.status(result.statusCode).json(result.responseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/reservation-refunds/:id/approve", authMiddleware, requireAnyPermission(reservationPerms.refundApprove), async (req, res, next) => {
+  try {
+    const result = await reservationService.approveRefund({
+      companyId: req.companyId,
+      branchId: req.branchId || req.body?.branchId || null,
+      user: req.user,
+      refundId: req.params.id,
+      body: req.body || {}
+    });
+    emitEntityChanged(req.companyId, { entity: "ReservationRefund", action: "approve", id: req.params.id });
+    return res.status(result.statusCode).json(result.responseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/reservation-refunds/:id/reject", authMiddleware, requireAnyPermission(reservationPerms.refundReject), async (req, res, next) => {
+  try {
+    const result = await reservationService.rejectRefund({
+      companyId: req.companyId,
+      branchId: req.branchId || req.body?.branchId || null,
+      user: req.user,
+      refundId: req.params.id,
+      body: req.body || {}
+    });
+    emitEntityChanged(req.companyId, { entity: "ReservationRefund", action: "reject", id: req.params.id });
+    return res.status(result.statusCode).json(result.responseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/reservation-refunds/:id/execute", authMiddleware, requireAnyPermission(reservationPerms.refundExecute), async (req, res, next) => {
+  try {
+    const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
+    const result = await reservationService.executeRefund({
+      companyId: req.companyId,
+      branchId: req.branchId || req.body?.branchId || null,
+      user: req.user,
+      refundId: req.params.id,
+      body: req.body || {},
+      idempotencyKey
+    });
+    emitEntityChanged(req.companyId, { entity: "ReservationRefund", action: "execute", id: req.params.id });
+    return res.status(result.statusCode).json(result.responseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─── Phase 32.6-Fix C — Item amendments, expiry extension, renewal ──────────
+router.post("/reservations/:id/amend-items", authMiddleware, requireAnyPermission(reservationPerms.amendItems), async (req, res, next) => {
+  try {
+    const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
+    const result = await reservationService.amendItems({
+      companyId: req.companyId,
+      branchId: req.branchId || req.body?.branchId || null,
+      user: req.user,
+      reservationId: req.params.id,
+      body: req.body || {},
+      idempotencyKey
+    });
+    emitEntityChanged(req.companyId, { entity: "Reservation", action: "amend", id: req.params.id });
+    return res.status(result.statusCode).json(result.responseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/reservations/:id/extend-expiry", authMiddleware, requireAnyPermission(reservationPerms.extendExpiry), async (req, res, next) => {
+  try {
+    const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
+    const result = await reservationService.extendExpiry({
+      companyId: req.companyId,
+      branchId: req.branchId || req.body?.branchId || null,
+      user: req.user,
+      reservationId: req.params.id,
+      body: req.body || {},
+      idempotencyKey
+    });
+    emitEntityChanged(req.companyId, { entity: "Reservation", action: "extend-expiry", id: req.params.id });
+    return res.status(result.statusCode).json(result.responseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/reservations/:id/renew", authMiddleware, requireAnyPermission(reservationPerms.renew), async (req, res, next) => {
+  try {
+    const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
+    const result = await reservationService.renewReservation({
+      companyId: req.companyId,
+      branchId: req.branchId || req.body?.branchId || null,
+      user: req.user,
+      reservationId: req.params.id,
+      body: req.body || {},
+      idempotencyKey
+    });
+    emitEntityChanged(req.companyId, { entity: "Reservation", action: "renew", id: req.params.id });
+    return res.status(result.statusCode).json(result.responseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/reservations/:id/amendments", authMiddleware, requireAnyPermission(reservationPerms.view), async (req, res, next) => {
+  try {
+    const amendments = await models.ReservationAmendment.findAll({
+      where: { reservationId: req.params.id, companyId: req.companyId },
+      include: [{ model: models.ReservationAmendmentItem, as: "items", required: false }],
+      order: [["createdAt", "DESC"]]
+    });
+    return res.status(200).json({ success: true, data: amendments });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/reservations/:id/extensions", authMiddleware, requireAnyPermission(reservationPerms.view), async (req, res, next) => {
+  try {
+    const extensions = await models.ReservationExpiryExtension.findAll({
+      where: { reservationId: req.params.id, companyId: req.companyId },
+      order: [["extendedAt", "DESC"]]
+    });
+    return res.status(200).json({ success: true, data: extensions });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/reservations/:id/renewal", authMiddleware, requireAnyPermission(reservationPerms.view), async (req, res, next) => {
+  try {
+    const renewals = await models.ReservationRenewal.findAll({
+      where: { companyId: req.companyId, [Op.or]: [{ sourceReservationId: req.params.id }, { successorReservationId: req.params.id }] },
+      include: [{ model: models.ReservationPaymentTransfer, as: "transfers", required: false }],
+      order: [["requestedAt", "DESC"]]
+    });
+    return res.status(200).json({ success: true, data: renewals });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/reservation-renewal-refunds/:id/approve", authMiddleware, requireAnyPermission(reservationPerms.refundApprove), async (req, res, next) => {
+  try {
+    const result = await reservationService.approveRenewalExcessRefund({
+      companyId: req.companyId,
+      branchId: req.branchId || req.body?.branchId || null,
+      user: req.user,
+      refundId: req.params.id,
+      body: req.body || {}
+    });
+    emitEntityChanged(req.companyId, { entity: "ReservationRefund", action: "renewal-excess-approve", id: req.params.id });
+    return res.status(result.statusCode).json(result.responseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/reservation-renewal-refunds/:id/execute", authMiddleware, requireAnyPermission(reservationPerms.refundExecute), async (req, res, next) => {
+  try {
+    const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
+    const result = await reservationService.executeRenewalExcessRefund({
+      companyId: req.companyId,
+      branchId: req.branchId || req.body?.branchId || null,
+      user: req.user,
+      refundId: req.params.id,
+      body: req.body || {},
+      idempotencyKey
+    });
+    emitEntityChanged(req.companyId, { entity: "ReservationRefund", action: "renewal-excess-execute", id: req.params.id });
+    return res.status(result.statusCode).json(result.responseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch("/reservations/:id", authMiddleware, guardFor("reservations", "update"), async (req, res, next) => {
+  const allowed = new Set(["notes"]);
+  const body = req.body || {};
+  const keys = Object.keys(body);
+  if (keys.some((key) => !allowed.has(key))) {
+    return next(new ForbiddenError("Reservation financial, item, status, asset, and invoice fields are immutable through generic update"));
+  }
+  try {
+    const reservation = await models.Reservation.findOne({ where: { id: req.params.id, companyId: req.companyId } });
+    if (!reservation) throw new NotFoundError("Reservation not found");
+    const before = { notes: reservation.notes };
+    await reservation.update({ notes: body.notes ?? null, updatedBy: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System" });
+    await auditService.record(req.companyId, {
+      action: "reservation.notes_updated",
+      description: `Reservation ${reservation.id} notes updated`,
+      user: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
+      userId: req.user ? req.user.id : null,
+      place: req.branchId || reservation.branchId || "Reservation",
+      sourceDocument: reservation.id,
+      severity: "info",
+      before: JSON.stringify(before),
+      after: JSON.stringify({ notes: reservation.notes })
+    });
+    emitEntityChanged(req.companyId, { entity: "Reservation", action: "update", id: reservation.id });
+    return res.status(200).json({ success: true, data: reservation });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put("/reservations/:id", authMiddleware, guardFor("reservations", "update"), (req, res, next) => {
+  next(new ForbiddenError("Reservation full replacement is disabled; use dedicated reservation workflows"));
+});
+router.delete("/reservations/:id", authMiddleware, guardFor("reservations", "delete"), (req, res, next) => {
+  next(new ForbiddenError("Reservation deletion is disabled; cancellation/refund workflows are deferred"));
+});
 setupCrud("approval-requests", models.ApprovalRequest, ["description", "status", "requestedBy"]);
 
 // ─── Manual Balanced Journal Draft (Phase 8D3) ──────────────────────────────
@@ -4244,7 +5190,15 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
           const assetId = item.quantity === 1 && item.assetId
             ? item.assetId
             : `AST-PUR-${Date.now()}-${itemIndex + 1}-${qtyIndex + 1}-${Math.random().toString(36).slice(2, 6)}`;
-          const barcode = item.barcode || String(Date.now() + itemIndex + qtyIndex).slice(-13).padStart(13, "6");
+          const barcodeIdentity = await barcodeIdentityService.generateBarcodeForAsset({
+            companyId: req.companyId,
+            assetType: item.type,
+            inventoryCode: item.inventoryCode,
+            itemCode: item.itemCode,
+            karat: item.karat,
+            inventorySubtype: item.inventorySubtype,
+            transaction: t,
+          });
           const asset = await models.Asset.create({
             id: assetId,
             companyId: req.companyId,
@@ -4263,7 +5217,10 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
             branchId: branch.id,
             location: item.location,
             status: "available",
-            barcode,
+            ...barcodeIdentity,
+            inventorySubtype: item.inventorySubtype || null,
+            metadataSchemaVersion: item.metadataSchemaVersion || 1,
+            metadata: item.metadata || {},
             source: "supplier_purchase",
             notes: [item.notes, body.notes, `Supplier: ${supplier.name}`, `Purchase: ${purchaseOrderId}`, drcNote].filter(Boolean).join(" | "),
             // Phase 15E snapshot + Phase 15F governed override (legacy Asset.cost
@@ -4667,6 +5624,224 @@ router.post("/purchase-orders/:id/pay", authMiddleware, requirePermission("treas
 
 // ─── Company Settings ───────────────────────────────────────────────────────
 
+// ─── Phase 32.1-Fix — Editable Barcode Taxonomy Settings ───────────────────
+
+const barcodeSettingsReadGuard = requireAnyPermission(["settings.view", "inventory.view"]);
+const barcodeSettingsWriteGuard = requireAnyPermission(["settings.update", "inventory.manage", "inventory.adjust"]);
+const BARCODE_CODE_MUTABLE_WHEN_USED = new Set([
+  "displayName", "description", "sortOrder", "isActive", "isClientApproved", "isProvisional",
+]);
+const BARCODE_ASSET_TYPES = new Set(["gold-piece", "gold-weight", "diamond", "gemstone", "pearl", "watch"]);
+
+function actorName(req) {
+  return req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
+}
+
+function normalizeAllowedInventoryCodes(value) {
+  if (!Array.isArray(value)) throw new ValidationError("allowedInventoryCodes must be an array.");
+  return [...new Set(value.map((code) => barcodeIdentityService.validateInventoryCode(code)))];
+}
+
+async function assertInventoryCodesExist(companyId, codes, transaction) {
+  if (!codes.length) return;
+  const count = await models.BarcodeInventoryCode.count({ where: { companyId, code: { [Op.in]: codes } }, transaction });
+  if (count !== codes.length) throw new ValidationError("One or more allowed inventory codes do not exist for this company.");
+}
+
+async function assertItemCodeExists(companyId, code, transaction) {
+  if (!code) return;
+  const count = await models.BarcodeItemCode.count({ where: { companyId, code }, transaction });
+  if (!count) throw new ValidationError(`Default item code ${code} does not exist for this company.`);
+}
+
+async function auditBarcodeSetting(req, action, record, before, transaction) {
+  await auditService.record(req.companyId, {
+    action,
+    description: `${record.constructor.name} ${record.code} ${before ? "updated" : "created"}`,
+    user: actorName(req),
+    userId: req.user?.id,
+    place: req.branchId || "System Settings",
+    sourceDocument: record.id,
+    severity: "info",
+    before: before ? JSON.stringify(before) : null,
+    after: JSON.stringify(record.toJSON()),
+  }, { transaction });
+}
+
+router.get("/barcode-settings", authMiddleware, barcodeSettingsReadGuard, async (req, res, next) => {
+  try {
+    const settings = await barcodeIdentityService.getEffectiveBarcodeSettings(req.companyId);
+    const usage = await barcodeIdentityService.getCodeUsageSummary(req.companyId);
+    return res.status(200).json({
+      success: true,
+      data: {
+        inventoryCodes: settings.inventoryCodes,
+        itemCodes: settings.itemCodes,
+        usage,
+        source: settings.source,
+        policy: { format: "INVENTORY_CODE+ITEM_CODE+KT+SERIAL", serialLength: 6, separators: false },
+      },
+    });
+  } catch (error) { next(error); }
+});
+
+router.get("/barcode-settings/usage/:code", authMiddleware, barcodeSettingsReadGuard, async (req, res, next) => {
+  try {
+    const requestedType = req.query.type;
+    const types = requestedType === "inventory" || requestedType === "item" ? [requestedType] : ["inventory", "item"];
+    const usage = {};
+    for (const type of types) {
+      usage[type] = await barcodeIdentityService.isCodeUsed({ companyId: req.companyId, type, code: req.params.code });
+    }
+    return res.status(200).json({ success: true, data: usage });
+  } catch (error) { next(error); }
+});
+
+router.post("/barcode-settings/inventory-codes", authMiddleware, barcodeSettingsWriteGuard, async (req, res, next) => {
+  const t = await models.sequelize.transaction();
+  try {
+    const body = req.body || {};
+    const code = barcodeIdentityService.validateInventoryCode(body.code);
+    const displayName = String(body.displayName || "").trim();
+    if (!displayName) throw new ValidationError("displayName is required.");
+    if (!BARCODE_ASSET_TYPES.has(body.assetType)) throw new ValidationError("assetType is not a supported Asset type.");
+    const duplicate = await models.BarcodeInventoryCode.findOne({ where: { companyId: req.companyId, code }, transaction: t });
+    if (duplicate) throw new ConflictError(`Inventory code ${code} already exists.`);
+    const defaultKaratCode = body.defaultKaratCode === null || body.defaultKaratCode === "" || body.defaultKaratCode === undefined
+      ? null
+      : barcodeIdentityService.normalizeKaratCode(null, body.defaultKaratCode);
+    const defaultItemCode = body.defaultItemCode ? barcodeIdentityService.validateItemCode(body.defaultItemCode) : null;
+    await assertItemCodeExists(req.companyId, defaultItemCode, t);
+    const row = await models.BarcodeInventoryCode.create({
+      id: `BCI-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      companyId: req.companyId,
+      code,
+      displayName,
+      assetType: body.assetType,
+      description: body.description || null,
+      isActive: body.isActive !== false,
+      isClientApproved: body.isClientApproved === true,
+      isProvisional: body.isProvisional === true,
+      requiresKarat: body.requiresKarat !== false,
+      defaultKaratCode,
+      defaultItemCode,
+      sortOrder: Number(body.sortOrder) || 0,
+      createdBy: req.user?.id,
+      updatedBy: req.user?.id,
+    }, { transaction: t });
+    await auditBarcodeSetting(req, "barcode.inventory_code.create", row, null, t);
+    await t.commit();
+    emitEntityChanged(req.companyId, { entity: "BarcodeSettings", action: "create", id: row.id });
+    return res.status(201).json({ success: true, data: row });
+  } catch (error) { await t.rollback(); next(error); }
+});
+
+router.patch("/barcode-settings/inventory-codes/:id", authMiddleware, barcodeSettingsWriteGuard, async (req, res, next) => {
+  const t = await models.sequelize.transaction();
+  try {
+    const row = await models.BarcodeInventoryCode.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t, lock: t.LOCK.UPDATE });
+    if (!row) throw new NotFoundError("Inventory barcode code not found.");
+    const before = row.toJSON();
+    const usage = await barcodeIdentityService.isCodeUsed({ companyId: req.companyId, type: "inventory", code: row.code, transaction: t });
+    if (usage.used) {
+      const forbidden = Object.keys(req.body || {}).filter((key) => !BARCODE_CODE_MUTABLE_WHEN_USED.has(key));
+      if (forbidden.length) throw new ConflictError("Used codes are locked to protect historical barcodes and printed tags.");
+    }
+    const updates = {};
+    for (const key of BARCODE_CODE_MUTABLE_WHEN_USED) if (req.body[key] !== undefined) updates[key] = req.body[key];
+    if (updates.displayName !== undefined) {
+      updates.displayName = String(updates.displayName).trim();
+      if (!updates.displayName) throw new ValidationError("displayName is required.");
+    }
+    if (!usage.used) {
+      if (req.body.code !== undefined) updates.code = barcodeIdentityService.validateInventoryCode(req.body.code);
+      if (req.body.assetType !== undefined) {
+        if (!BARCODE_ASSET_TYPES.has(req.body.assetType)) throw new ValidationError("assetType is not a supported Asset type.");
+        updates.assetType = req.body.assetType;
+      }
+      if (req.body.requiresKarat !== undefined) updates.requiresKarat = !!req.body.requiresKarat;
+      if (req.body.defaultKaratCode !== undefined) updates.defaultKaratCode = req.body.defaultKaratCode ? barcodeIdentityService.normalizeKaratCode(null, req.body.defaultKaratCode) : null;
+      if (req.body.defaultItemCode !== undefined) {
+        updates.defaultItemCode = req.body.defaultItemCode ? barcodeIdentityService.validateItemCode(req.body.defaultItemCode) : null;
+        await assertItemCodeExists(req.companyId, updates.defaultItemCode, t);
+      }
+    }
+    updates.updatedBy = req.user?.id;
+    await row.update(updates, { transaction: t });
+    await auditBarcodeSetting(req, "barcode.inventory_code.update", row, before, t);
+    await t.commit();
+    emitEntityChanged(req.companyId, { entity: "BarcodeSettings", action: "update", id: row.id });
+    return res.status(200).json({ success: true, data: row, usage });
+  } catch (error) { await t.rollback(); next(error); }
+});
+
+router.post("/barcode-settings/item-codes", authMiddleware, barcodeSettingsWriteGuard, async (req, res, next) => {
+  const t = await models.sequelize.transaction();
+  try {
+    const body = req.body || {};
+    const code = barcodeIdentityService.validateItemCode(body.code);
+    const displayName = String(body.displayName || "").trim();
+    if (!displayName) throw new ValidationError("displayName is required.");
+    const duplicate = await models.BarcodeItemCode.findOne({ where: { companyId: req.companyId, code }, transaction: t });
+    if (duplicate) throw new ConflictError(`Item code ${code} already exists.`);
+    const allowedInventoryCodes = normalizeAllowedInventoryCodes(body.allowedInventoryCodes || []);
+    await assertInventoryCodesExist(req.companyId, allowedInventoryCodes, t);
+    const row = await models.BarcodeItemCode.create({
+      id: `BCM-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      companyId: req.companyId,
+      code,
+      displayName,
+      description: body.description || null,
+      isActive: body.isActive !== false,
+      isClientApproved: body.isClientApproved === true,
+      isProvisional: body.isProvisional === true,
+      allowedInventoryCodes,
+      sortOrder: Number(body.sortOrder) || 0,
+      createdBy: req.user?.id,
+      updatedBy: req.user?.id,
+    }, { transaction: t });
+    await auditBarcodeSetting(req, "barcode.item_code.create", row, null, t);
+    await t.commit();
+    emitEntityChanged(req.companyId, { entity: "BarcodeSettings", action: "create", id: row.id });
+    return res.status(201).json({ success: true, data: row });
+  } catch (error) { await t.rollback(); next(error); }
+});
+
+router.patch("/barcode-settings/item-codes/:id", authMiddleware, barcodeSettingsWriteGuard, async (req, res, next) => {
+  const t = await models.sequelize.transaction();
+  try {
+    const row = await models.BarcodeItemCode.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t, lock: t.LOCK.UPDATE });
+    if (!row) throw new NotFoundError("Item barcode code not found.");
+    const before = row.toJSON();
+    const usage = await barcodeIdentityService.isCodeUsed({ companyId: req.companyId, type: "item", code: row.code, transaction: t });
+    if (usage.used) {
+      const forbidden = Object.keys(req.body || {}).filter((key) => !BARCODE_CODE_MUTABLE_WHEN_USED.has(key));
+      if (forbidden.length) throw new ConflictError("Used codes are locked to protect historical barcodes and printed tags.");
+    }
+    const updates = {};
+    for (const key of BARCODE_CODE_MUTABLE_WHEN_USED) if (req.body[key] !== undefined) updates[key] = req.body[key];
+    if (updates.displayName !== undefined) {
+      updates.displayName = String(updates.displayName).trim();
+      if (!updates.displayName) throw new ValidationError("displayName is required.");
+    }
+    if (!usage.used) {
+      if (req.body.code !== undefined) updates.code = barcodeIdentityService.validateItemCode(req.body.code);
+      if (req.body.allowedInventoryCodes !== undefined) {
+        updates.allowedInventoryCodes = normalizeAllowedInventoryCodes(req.body.allowedInventoryCodes);
+        await assertInventoryCodesExist(req.companyId, updates.allowedInventoryCodes, t);
+      }
+    }
+    updates.updatedBy = req.user?.id;
+    await row.update(updates, { transaction: t });
+    await auditBarcodeSetting(req, "barcode.item_code.update", row, before, t);
+    await t.commit();
+    emitEntityChanged(req.companyId, { entity: "BarcodeSettings", action: "update", id: row.id });
+    return res.status(200).json({ success: true, data: row, usage });
+  } catch (error) { await t.rollback(); next(error); }
+});
+
+// ─── End Phase 32.1-Fix — Editable Barcode Taxonomy Settings ────────────────
+
 router.get("/settings", authMiddleware, requirePermission("settings.view"), async (req, res, next) => {
   try {
     const normalized = await settingsService.getCompanySettings(req.companyId);
@@ -4694,7 +5869,8 @@ router.get("/settings", authMiddleware, requirePermission("settings.view"), asyn
         nonRecoverableVatCapitalization: normalized.nonRecoverableVatCapitalization,
         lowStockThreshold: normalized.lowStockThreshold,
         decimalPrecision: normalized.decimalPrecision,
-        installment: normalized.installment
+        installment: normalized.installment,
+        reservationExpiryWarningHours: normalized.reservationExpiryWarningHours
       }
     });
   } catch (error) {
@@ -4702,9 +5878,80 @@ router.get("/settings", authMiddleware, requirePermission("settings.view"), asyn
   }
 });
 
-router.patch("/settings", authMiddleware, requirePermission("settings.update"), async (req, res, next) => {
+router.get(
+  "/settings/reservation-advances-account",
+  authMiddleware,
+  requireAnyPermission(["settings.update", "reservations.configure_account"]),
+  async (req, res, next) => {
+    try {
+      const [setting, childAccounts, accounts] = await Promise.all([
+        models.Setting.findOne({ where: { companyId: req.companyId, key: "reservationAdvancesAccountId" } }),
+        models.Account.findAll({ where: { companyId: req.companyId, parentId: { [Op.ne]: null } }, attributes: ["parentId"] }),
+        models.Account.findAll({
+          where: { companyId: req.companyId, type: "liability", nature: "credit", isActive: true },
+          attributes: ["id", "code", "name", "nameAr"],
+          order: [["code", "ASC"]]
+        })
+      ]);
+      const parentAccountIds = new Set(childAccounts.map((account) => account.parentId).filter(Boolean));
+      return res.status(200).json({
+        success: true,
+        data: {
+          reservationAdvancesAccountId: setting ? String(setting.value || "") : "",
+          accounts: accounts.filter((account) => !parentAccountIds.has(account.id))
+        }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+const authorizeSettingsUpdate = async (req, _res, next) => {
+  try {
+    const canUpdateAllSettings = await permissionService.userHasPermission(req.user, "settings.update");
+    if (canUpdateAllSettings) return next();
+
+    const canConfigureReservationAccount = await permissionService.userHasPermission(req.user, "reservations.configure_account");
+    const submittedKeys = Object.keys(req.body || {});
+    const isReservationAccountOnly = submittedKeys.length === 1 && submittedKeys[0] === "reservationAdvancesAccountId";
+
+    if (canConfigureReservationAccount && isReservationAccountOnly) return next();
+    return next(new ForbiddenError("Reservation account permission may update only reservationAdvancesAccountId."));
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const validateReservationAdvancesAccountSetting = async (body, companyId) => {
+  if (!Object.prototype.hasOwnProperty.call(body, "reservationAdvancesAccountId")) return;
+
+  const submitted = body.reservationAdvancesAccountId;
+  if (submitted === null || (typeof submitted === "string" && submitted.trim() === "")) {
+    body.reservationAdvancesAccountId = "";
+    return;
+  }
+
+  const invalid = () => new ValidationError(
+    "The selected reservation advances account is invalid or unavailable.",
+    { reservationAdvancesAccountId: ["INVALID_RESERVATION_ADVANCES_ACCOUNT"] }
+  );
+  if (typeof submitted !== "string") throw invalid();
+
+  const accountId = submitted.trim();
+  const account = await models.Account.findOne({ where: { id: accountId } });
+  if (!account || account.companyId !== companyId || !account.isActive) throw invalid();
+
+  const childCount = await models.Account.count({ where: { companyId, parentId: account.id } });
+  if (childCount > 0 || account.type !== "liability" || account.nature !== "credit") throw invalid();
+
+  body.reservationAdvancesAccountId = account.id;
+};
+
+router.patch("/settings", authMiddleware, authorizeSettingsUpdate, async (req, res, next) => {
   try {
     const body = req.body || {};
+    await validateReservationAdvancesAccountSetting(body, req.companyId);
 
     // Phase 12E: validate the purchase-VAT / RCM foundation keys when present.
     // Scoped to these keys only — no general settings refactor. These are a
@@ -4741,6 +5988,13 @@ router.patch("/settings", authMiddleware, requirePermission("settings.update"), 
       return reject("goldCostOverridePermission must be a non-empty string");
     }
 
+    if (body.reservationExpiryWarningHours !== undefined) {
+      const n = Number(body.reservationExpiryWarningHours);
+      if (body.reservationExpiryWarningHours === "" || body.reservationExpiryWarningHours === null || !Number.isInteger(n) || n <= 0 || n > 8760) {
+        return reject("reservationExpiryWarningHours must be a positive integer not exceeding 8760");
+      }
+    }
+
     const companyUpdates = {};
     for (const key of ["businessName", "logo", "currency", "branchName", "taxNumber", "phone", "email", "website", "country", "city", "region", "address1", "address2", "postalCode", "commercialRegister"]) {
       if (body[key] !== undefined) companyUpdates[key] = body[key];
@@ -4753,7 +6007,7 @@ router.patch("/settings", authMiddleware, requirePermission("settings.update"), 
       await models.Company.update(companyUpdates, { where: { id: req.companyId } });
     }
 
-    const settingKeys = ["language", "theme", "vatRate", "goldKaratDefaults", "goldPricingMode", "accountingByKarat", "invoicePrefix", "invoiceNumbering", "dateFormat", "decimalPrecision", "print", "notifications", "lowStockThreshold", "receipt", "allowZeroDownPayment", "paymentMethods", "installmentEnabled", "installmentDefaultFrequency", "installmentMaxCount", "installmentMinDownPaymentPercent", "barcode", "vatEnabled", "purchaseVatRate", "purchaseTaxIncludedDefault", "purchaseVatRecoverableDefault", "inputVatAccountCode", "rcmOutputAccountCode", "goldCostSource", "goldCostWeightBasis", "allowGoldCostOverride", "goldCostOverridePermission", "nonRecoverableVatCapitalization"];
+    const settingKeys = ["language", "theme", "vatRate", "goldKaratDefaults", "goldPricingMode", "accountingByKarat", "invoicePrefix", "invoiceNumbering", "dateFormat", "decimalPrecision", "print", "notifications", "lowStockThreshold", "receipt", "allowZeroDownPayment", "paymentMethods", "installmentEnabled", "installmentDefaultFrequency", "installmentMaxCount", "installmentMinDownPaymentPercent", "barcode", "reservationAdvancesAccountId", "vatEnabled", "purchaseVatRate", "purchaseTaxIncludedDefault", "purchaseVatRecoverableDefault", "inputVatAccountCode", "rcmOutputAccountCode", "goldCostSource", "goldCostWeightBasis", "allowGoldCostOverride", "goldCostOverridePermission", "nonRecoverableVatCapitalization", "reservationExpiryWarningHours"];
     for (const key of settingKeys) {
       if (body[key] === undefined) continue;
       const [row, created] = await models.Setting.findOrCreate({
@@ -5076,7 +6330,7 @@ router.get("/customers/:id/statement", authMiddleware, async (req, res, next) =>
 // opening/closing are computed from a full document scan, never from a page.
 // Kept as a NEW route so the legacy GET /customers/:id/statement is untouched.
 // ─────────────────────────────────────────────────────────────────────────────
-router.get("/customers/:id/statement-v2", authMiddleware, requirePermission("customers.view"), async (req, res, next) => {
+router.get("/customers/:id/statement-v2", authMiddleware, requireAnyPermission(reservationPerms.statementView), async (req, res, next) => {
   try {
     // 1. Customer must exist within the tenant. Never modified.
     const customer = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId } });
@@ -5146,6 +6400,161 @@ router.get("/customers/:id/statement-v2", authMiddleware, requirePermission("cus
         sortType: "2_payment",
       });
     }
+
+    const reservations = await models.Reservation.findAll({
+      where: { companyId: req.companyId, customerId: customer.id },
+      raw: true
+    });
+    const reservationPayments = await models.ReservationPayment.findAll({
+      where: { companyId: req.companyId, customerId: customer.id },
+      attributes: ["id", "reservationId", "amount", "paymentMethod", "receiptNumber", "status", "receivedAt", "createdAt"],
+      raw: true,
+    });
+    const reservationRefunds = await models.ReservationRefund.findAll({
+      where: { companyId: req.companyId, customerId: customer.id },
+      attributes: ["id", "reservationId", "amount", "status", "refundType", "requestedRefundMethod", "executedAt", "createdAt"],
+      raw: true,
+    });
+    const renewals = await models.ReservationRenewal.findAll({
+      where: { companyId: req.companyId, customerId: customer.id, status: "activated" },
+      raw: true
+    });
+
+    const reservationAdvanceRows = [
+      // 1. Created
+      ...reservations.map((r) => ({
+        id: `RES-CRE-${r.id}`,
+        type: "reservation_created",
+        sourceId: r.id,
+        reservationId: r.id,
+        sourceNumber: r.id,
+        date: String(r.createdAt || "").slice(0, 10),
+        description: `إنشاء حجز ${r.id} بمبلغ إجمالي ${round4(r.agreedTotal)}`,
+        debit: 0,
+        credit: 0,
+        status: r.status,
+        paymentMethod: null,
+      })),
+
+      // 2. Payments (normal)
+      ...reservationPayments.filter((p) => p.paymentMethod !== "reservation_transfer" && p.status === "posted").map((p) => ({
+        id: `RSP-${p.id}`,
+        type: "reservation_payment",
+        sourceId: p.id,
+        reservationId: p.reservationId,
+        sourceNumber: p.receiptNumber || p.id,
+        date: String(p.receivedAt || p.createdAt || "").slice(0, 10),
+        description: `دفعة حجز ${p.reservationId} (${p.paymentMethod})`,
+        debit: 0,
+        credit: round4(p.amount),
+        status: p.status,
+        paymentMethod: p.paymentMethod,
+      })),
+
+      // 3. Renewal Transfer In
+      ...reservationPayments.filter((p) => p.paymentMethod === "reservation_transfer" && p.status === "posted").map((p) => ({
+        id: `RSP-XIN-${p.id}`,
+        type: "reservation_renewal_transfer_in",
+        sourceId: p.id,
+        reservationId: p.reservationId,
+        sourceNumber: p.receiptNumber || p.id,
+        date: String(p.receivedAt || p.createdAt || "").slice(0, 10),
+        description: `تحويل دفعات تجديد حجز وارد إلى ${p.reservationId}`,
+        debit: 0,
+        credit: round4(p.amount),
+        status: p.status,
+        paymentMethod: p.paymentMethod,
+      })),
+
+      // 4. Renewal Transfer Out
+      ...renewals.map((ren) => ({
+        id: `RRN-OUT-${ren.id}`,
+        type: "reservation_renewal_transfer_out",
+        sourceId: ren.id,
+        reservationId: ren.sourceReservationId,
+        sourceNumber: ren.id,
+        date: String(ren.activatedAt || ren.updatedAt || "").slice(0, 10),
+        description: `تحويل دفعات تجديد حجز صادر من ${ren.sourceReservationId} إلى ${ren.successorReservationId}`,
+        debit: round4(ren.transferAmount),
+        credit: 0,
+        status: ren.status,
+        paymentMethod: null,
+      })),
+
+      // 5. Completion Application
+      ...reservations.filter((r) => r.status === "completed" || r.finalInvoiceId).map((r) => ({
+        id: `RES-COMP-${r.id}`,
+        type: "reservation_completion_application",
+        sourceId: r.finalInvoiceId || r.id,
+        reservationId: r.id,
+        sourceNumber: r.finalInvoiceId || r.id,
+        date: String(r.completedAt || r.updatedAt || "").slice(0, 10),
+        description: `تطبيق دفعات حجز مكتمل ${r.id} على الفاتورة ${r.finalInvoiceId || ""}`,
+        debit: round4(r.paidTotal),
+        credit: 0,
+        status: r.status,
+        paymentMethod: null,
+      })),
+
+      // 6. Normal Expiry / Cancellation Refund
+      ...reservationRefunds.filter((r) => r.refundType !== "renewal_excess" && r.status === "executed").map((r) => ({
+        id: `RRF-${r.id}`,
+        type: "reservation_refund",
+        sourceId: r.id,
+        reservationId: r.reservationId,
+        sourceNumber: r.id,
+        date: String(r.executedAt || r.createdAt || "").slice(0, 10),
+        description: `استرداد حجز ملغى ${r.reservationId}`,
+        debit: round4(r.amount),
+        credit: 0,
+        status: r.status,
+        paymentMethod: r.requestedRefundMethod,
+      })),
+
+      // 7. Renewal Excess Refund
+      ...reservationRefunds.filter((r) => r.refundType === "renewal_excess" && r.status === "executed").map((r) => ({
+        id: `RRF-XS-${r.id}`,
+        type: "reservation_renewal_excess_refund",
+        sourceId: r.id,
+        reservationId: r.reservationId,
+        sourceNumber: r.id,
+        date: String(r.executedAt || r.createdAt || "").slice(0, 10),
+        description: `استرداد فائض تجديد حجز ${r.reservationId}`,
+        debit: round4(r.amount),
+        credit: 0,
+        status: r.status,
+        paymentMethod: r.requestedRefundMethod,
+      })),
+
+      // 8. Final Status
+      ...reservations.filter((r) => ["completed", "cancelled", "renewed", "expired"].includes(r.status)).map((r) => {
+        const dateStr = r.completedAt || r.cancelledAt || r.renewedAt || r.expiredAt || r.updatedAt;
+        let desc = `الحالة النهائية للحجز ${r.id}: `;
+        if (r.status === "completed") desc += `مكتمل (فاتورة ${r.finalInvoiceId || ""})`;
+        else if (r.status === "cancelled") desc += `ملغى`;
+        else if (r.status === "renewed") desc += `مجدد إلى ${r.successorReservationId || ""}`;
+        else if (r.status === "expired") desc += `منتهي الصلاحية`;
+        return {
+          id: `RES-STAT-${r.id}-${r.status}`,
+          type: "reservation_final_status",
+          sourceId: r.id,
+          reservationId: r.id,
+          sourceNumber: r.id,
+          date: String(dateStr || "").slice(0, 10),
+          description: desc,
+          debit: 0,
+          credit: 0,
+          status: r.status,
+          paymentMethod: null,
+        };
+      })
+    ].filter((row) => (!from || row.date >= from) && (!to || row.date <= to));
+    const reservationAdvanceTotals = reservationAdvanceRows.reduce((acc, row) => {
+      acc.received = round4(acc.received + row.credit);
+      acc.refunded = round4(acc.refunded + row.debit);
+      acc.net = round4(acc.received - acc.refunded);
+      return acc;
+    }, { received: 0, refunded: 0, net: 0 });
 
     // 7. Deterministic order so the running balance is stable.
     rowsAll.sort((a, b) => {
@@ -5220,7 +6629,14 @@ router.get("/customers/:id/statement-v2", authMiddleware, requirePermission("cus
         total,
         totalPages,
         items,
-        meta: { source: "source_documents", ledgerBased: false, readOnly: true },
+        reservationAdvances: {
+          sectionName: "دفعات الحجوزات",
+          arIntegrated: false,
+          totals: reservationAdvanceTotals,
+          items: reservationAdvanceRows,
+          note: "Reservation advances are shown separately from Accounts Receivable until final sale completion.",
+        },
+        meta: { source: "source_documents", ledgerBased: false, readOnly: true, reservationAdvancesSection: true },
       },
     });
   } catch (error) {
@@ -5229,12 +6645,11 @@ router.get("/customers/:id/statement-v2", authMiddleware, requirePermission("cus
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CUSTOMER CREDIT LEDGER (رصيد العميل الدائن) — Phase 23-Fix. READ-ONLY.
+// CUSTOMER CREDIT LEDGER (رصيد العميل الدائن).
 // Returns the customer's available credit (SUM active credit_in − credit_out)
-// plus recent/paged ledger rows from customer_credit_transactions. This is
-// infrastructure only: NO current flow creates credit yet, so a customer with no
-// credit movements returns availableCredit = 0. Never mutates Customer.balance,
-// Invoice.remainingAmount, or the GL. No POST/apply/refund endpoint exists.
+// plus recent/paged ledger rows from customer_credit_transactions. Manual
+// deposits can create credit through POST /customers/:id/credit/deposit. This
+// still never mutates Customer.balance or Invoice.remainingAmount.
 // ─────────────────────────────────────────────────────────────────────────────
 router.get("/customers/:id/credit", authMiddleware, requirePermission("customers.view"), async (req, res, next) => {
   try {
@@ -5271,6 +6686,1026 @@ router.get("/customers/:id/credit", authMiddleware, requirePermission("customers
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CUSTOMER CREDIT / 2300 RECONCILIATION (تسوية) — Phase 30.9-Fix. READ-ONLY.
+// Exposes the Phase 30.8 diagnostic against real data: recomputes statement-v2's
+// document-based closing balance, reads the AR mirror (Customer.balance) and the
+// customer-credit ledger (2300 cash-credit portion only), and categorizes the
+// divergence. It NEVER writes and NEVER changes statement-v2 or any balance.
+// Uncertain settlement (best_effort/unavailable) and legacy/unknown policy are
+// flagged non-authoritative and are never auto-corrected.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get("/customers/:id/credit/reconciliation", authMiddleware, requirePermission("customers.view"), async (req, res, next) => {
+  try {
+    const customer = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId } });
+    if (!customer) throw new NotFoundError("Customer not found.");
+
+    // Source documents (READ-ONLY) — same sources statement-v2 uses, plus the
+    // settlement/credit records statement-v2 ignores (for diagnosis only).
+    const invoices = await models.Invoice.findAll({
+      where: postedInvoiceWhere({ customerId: customer.id, companyId: req.companyId }),
+      attributes: ["id", "invoiceNumber", "type", "total", "date", "idempotencyKey"],
+      raw: true,
+    });
+    const invoiceIds = invoices.map((i) => i.id);
+    const payments = invoiceIds.length
+      ? await models.Payment.findAll({
+          where: { companyId: req.companyId, invoiceId: { [Op.in]: invoiceIds } },
+          attributes: ["id", "invoiceId", "amount", "date"],
+          raw: true,
+        })
+      : [];
+    const creditTransactions = await models.CustomerCreditTransaction.findAll({
+      where: { companyId: req.companyId, customerId: customer.id },
+      attributes: ["id", "direction", "amount", "status", "sourceType", "sourceId", "journalEntryId", "invoiceId"],
+      raw: true,
+    });
+
+    const companySettings = await settingsService.getCompanySettings(req.companyId);
+    const currency = companySettings.currency || "AED";
+
+    // Per-exchange settlement meta (READ-ONLY; mirrors the exchange-display gather).
+    const exchangeMeta = {};
+    for (const inv of invoices) {
+      if (inv.type !== "exchange") continue;
+      const idempotencyRequest = inv.idempotencyKey
+        ? await models.IdempotencyRequest.findOne({
+            where: { companyId: req.companyId, scope: "sales.exchange", key: inv.idempotencyKey, status: "succeeded" },
+            attributes: ["id", "companyId", "scope", "key", "status", "responseBody"],
+          })
+        : null;
+      const savedPolicy = exchangeDisplayService.extractSavedExchangePolicy(idempotencyRequest, inv.id);
+      if (!savedPolicy) {
+        // No trusted saved policy → historical/unknown; never auto-corrected.
+        exchangeMeta[inv.id] = { policyStatus: "legacy_or_unknown", settlementSource: "unavailable" };
+        continue;
+      }
+      const journalEntry = await models.JournalEntry.findOne({
+        where: { companyId: req.companyId, sourceType: "exchange", sourceId: inv.id, status: "posted" },
+        attributes: ["id"],
+      });
+      const cashOut = journalEntry
+        ? await models.CashTransaction.findAll({
+            where: { companyId: req.companyId, journalEntryId: journalEntry.id, reference: inv.id, type: "cash_out", status: "posted" },
+            attributes: ["id", "amount"],
+          })
+        : [];
+      const cashIn = journalEntry
+        ? await models.CashTransaction.findAll({
+            where: { companyId: req.companyId, journalEntryId: journalEntry.id, reference: inv.id, type: "cash_in", status: "posted" },
+            attributes: ["id", "amount"],
+          })
+        : [];
+      const creditTx = journalEntry
+        ? await models.CustomerCreditTransaction.findAll({
+            where: { companyId: req.companyId, sourceType: "exchange_credit", sourceId: inv.id, journalEntryId: journalEntry.id, status: "active" },
+            attributes: ["id", "direction", "amount"],
+          })
+        : [];
+      const settlementSummary = exchangeDisplayService.buildSettlementSummary({
+        expectedExcess: savedPolicy.excessDueToCustomer,
+        cashTransactions: cashOut,
+        creditTransactions: creditTx,
+        journalEntry,
+      });
+      const amountDue = Number(savedPolicy.amountDueFromCustomer || 0);
+      exchangeMeta[inv.id] = {
+        policyStatus: "target_policy",
+        settlementSource: settlementSummary.source,
+        // paid_now only when a real cash_in for this exchange exists; else on-account.
+        settlementMode: amountDue > 0 ? (cashIn.length > 0 ? "paid_now" : "credit") : undefined,
+        amountDueFromCustomer: amountDue,
+        excessDueToCustomer: Number(savedPolicy.excessDueToCustomer || 0),
+        creditAmount: Number(settlementSummary.creditAmount || 0),
+      };
+    }
+
+    // Per-return meta: the cash-refunded excess = cash_out referencing the return
+    // (Phase 21.2 refunds only the portion beyond the outstanding AR relief).
+    const returnMeta = {};
+    for (const inv of invoices) {
+      if (inv.type !== "return") continue;
+      const refunds = await models.CashTransaction.findAll({
+        where: { companyId: req.companyId, reference: inv.id, type: "cash_out", status: "posted" },
+        attributes: ["amount"],
+      });
+      const cashRefundExcess = refunds.reduce((s, r) => s + Number(r.amount || 0), 0);
+      if (cashRefundExcess > 0) returnMeta[inv.id] = { cashRefundExcess };
+    }
+
+    const report = statementReconciliationService.reconcileCustomer({
+      customerId: customer.id,
+      invoices,
+      payments,
+      creditTransactions,
+      customerBalance: Number(customer.balance || 0),
+      exchangeMeta,
+      returnMeta,
+    });
+    report.currency = currency;
+
+    return res.status(200).json({ success: true, data: report });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SOURCE-AWARE CUSTOMER STATEMENT V3 — Phase 30.11-Fix. READ-ONLY.
+// Exposes the opt-in source-aware customer statement model (dual-ledger).
+// Never mutates and never changes statement-v2 or any balances.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get("/customers/:id/statement-v3", authMiddleware, requirePermission("customers.view"), async (req, res, next) => {
+  try {
+    const customer = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId } });
+    if (!customer) throw new NotFoundError("Customer not found.");
+
+    const from = req.query.from ? String(req.query.from) : null;
+    const to = req.query.to ? String(req.query.to) : null;
+    if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
+    if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
+    if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
+
+    const invoices = await models.Invoice.findAll({
+      where: postedInvoiceWhere({ customerId: customer.id, companyId: req.companyId }),
+      attributes: ["id", "invoiceNumber", "type", "total", "date", "createdAt", "idempotencyKey"],
+      raw: true,
+    });
+    const invoiceIds = invoices.map((i) => i.id);
+    const payments = invoiceIds.length
+      ? await models.Payment.findAll({
+          where: { companyId: req.companyId, invoiceId: { [Op.in]: invoiceIds } },
+          attributes: ["id", "invoiceId", "amount", "reference", "date", "createdAt"],
+          raw: true,
+        })
+      : [];
+    const creditTransactions = await models.CustomerCreditTransaction.findAll({
+      where: { companyId: req.companyId, customerId: customer.id },
+      attributes: ["id", "direction", "amount", "status", "sourceType", "sourceId", "journalEntryId", "invoiceId", "createdAt", "description"],
+      raw: true,
+    });
+    const cashTransactions = invoiceIds.length
+      ? await models.CashTransaction.findAll({
+          where: { companyId: req.companyId, status: "posted", reference: { [Op.in]: invoiceIds } },
+          attributes: ["id", "amount", "type", "reference", "date", "createdAt"],
+          raw: true,
+        })
+      : [];
+
+    const companySettings = await settingsService.getCompanySettings(req.companyId);
+    const currency = companySettings.currency || "AED";
+
+    // Gather exchange metadata (identical to reconciliation endpoint)
+    const exchangeMeta = {};
+    for (const inv of invoices) {
+      if (inv.type !== "exchange") continue;
+      const idempotencyRequest = inv.idempotencyKey
+        ? await models.IdempotencyRequest.findOne({
+            where: { companyId: req.companyId, scope: "sales.exchange", key: inv.idempotencyKey, status: "succeeded" },
+            attributes: ["id", "companyId", "scope", "key", "status", "responseBody"],
+          })
+        : null;
+      const savedPolicy = exchangeDisplayService.extractSavedExchangePolicy(idempotencyRequest, inv.id);
+      if (!savedPolicy) {
+        exchangeMeta[inv.id] = { policyStatus: "legacy_or_unknown", settlementSource: "unavailable" };
+        continue;
+      }
+      const journalEntry = await models.JournalEntry.findOne({
+        where: { companyId: req.companyId, sourceType: "exchange", sourceId: inv.id, status: "posted" },
+        attributes: ["id"],
+      });
+      const cashOut = journalEntry
+        ? cashTransactions.filter(tx => tx.reference === inv.id && tx.type === "cash_out")
+        : [];
+      const cashIn = journalEntry
+        ? cashTransactions.filter(tx => tx.reference === inv.id && tx.type === "cash_in")
+        : [];
+      const creditTx = journalEntry
+        ? creditTransactions.filter(tx => tx.sourceId === inv.id && tx.sourceType === "exchange_credit" && tx.status === "active")
+        : [];
+      const settlementSummary = exchangeDisplayService.buildSettlementSummary({
+        expectedExcess: savedPolicy.excessDueToCustomer,
+        cashTransactions: cashOut,
+        creditTransactions: creditTx,
+        journalEntry,
+      });
+      const amountDue = Number(savedPolicy.amountDueFromCustomer || 0);
+      exchangeMeta[inv.id] = {
+        policyStatus: "target_policy",
+        settlementSource: settlementSummary.source,
+        settlementMode: amountDue > 0 ? (cashIn.length > 0 ? "paid_now" : "credit") : undefined,
+        amountDueFromCustomer: amountDue,
+        excessDueToCustomer: Number(savedPolicy.excessDueToCustomer || 0),
+        creditAmount: Number(settlementSummary.creditAmount || 0),
+      };
+    }
+
+    // Gather return metadata
+    const returnMeta = {};
+    for (const inv of invoices) {
+      if (inv.type !== "return") continue;
+      const refunds = cashTransactions.filter(tx => tx.reference === inv.id && tx.type === "cash_out");
+      const cashRefundExcess = refunds.reduce((s, r) => s + Number(r.amount || 0), 0);
+      if (cashRefundExcess > 0) returnMeta[inv.id] = { cashRefundExcess };
+    }
+
+    // Calculate legacyStatementV2ClosingBalance
+    let legacyClosing = 0;
+    for (const inv of invoices) {
+      const amt = round4(inv.total);
+      if (from && inv.date < from) {
+        if (inv.type === "return") legacyClosing -= amt;
+        else legacyClosing += amt;
+        continue;
+      }
+      if (to && inv.date > to) continue;
+      if (inv.type === "return") legacyClosing -= amt;
+      else legacyClosing += amt;
+    }
+    for (const p of payments) {
+      const amt = round4(p.amount);
+      if (from && p.date < from) {
+        legacyClosing -= amt;
+        continue;
+      }
+      if (to && p.date > to) continue;
+      legacyClosing -= amt;
+    }
+    legacyClosing = round4(legacyClosing);
+
+    const report = sourceAwareStatementService.buildSourceAwareStatement({
+      customerId: customer.id,
+      customerName: customer.name,
+      currency,
+      from,
+      to,
+      invoices,
+      payments,
+      cashTransactions,
+      creditTransactions,
+      customerBalance: Number(customer.balance || 0),
+      exchangeMeta,
+      returnMeta,
+      legacyStatementV2ClosingBalance: legacyClosing,
+    });
+
+    return res.status(200).json({ success: true, data: report });
+  } catch (error) {
+    next(error);
+  }
+});
+
+function normalizeCustomerDepositPayload(req, defaultCurrency = "AED") {
+  const body = req.body || {};
+  const amount = Math.round(Number(body.amount) * 10000) / 10000;
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new ValidationError("مبلغ الإيداع يجب أن يكون أكبر من صفر");
+  }
+
+  const paymentMethod = String(body.paymentMethod || "cash").trim().toLowerCase();
+  if (!["cash", "bank"].includes(paymentMethod)) {
+    throw new ValidationError("طريقة الدفع يجب أن تكون cash أو bank");
+  }
+
+  const accountCode = String(body.accountCode || (paymentMethod === "bank" ? "1120" : "1110")).trim();
+  if (!["1110", "1120"].includes(accountCode)) {
+    throw new ValidationError("حساب الإيداع يجب أن يكون 1110 للنقد أو 1120 للبنك");
+  }
+  if (paymentMethod === "cash" && accountCode !== "1110") {
+    throw new ValidationError("الإيداع النقدي يجب أن يستخدم الحساب 1110");
+  }
+  if (paymentMethod === "bank" && accountCode !== "1120") {
+    throw new ValidationError("الإيداع البنكي يجب أن يستخدم الحساب 1120");
+  }
+
+  const currency = String(body.currency || defaultCurrency || "AED").trim().toUpperCase().slice(0, 8) || "AED";
+  const date = body.date ? String(body.date).trim() : new Date().toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(new Date(date).getTime())) {
+    throw new ValidationError("تاريخ الإيداع يجب أن يكون بصيغة YYYY-MM-DD");
+  }
+
+  const description = String(body.description || "Customer deposit").trim().slice(0, 255);
+  const reference = body.reference == null ? null : String(body.reference).trim().slice(0, 120) || null;
+  const branchCandidate = body.branchId || req.headers["x-branch-id"] || req.branchId;
+  const branchId = typeof branchCandidate === "string" && branchCandidate.startsWith("BR-") ? branchCandidate : null;
+
+  return {
+    amount,
+    currency,
+    paymentMethod,
+    accountCode,
+    branchId,
+    date,
+    description,
+    reference,
+  };
+}
+
+function normalizeCustomerRefundPayload(req, defaultCurrency = "AED") {
+  const body = req.body || {};
+  const amount = Math.round(Number(body.amount) * 10000) / 10000;
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new ValidationError("مبلغ رد الرصيد يجب أن يكون أكبر من صفر");
+  }
+
+  const paymentMethod = String(body.paymentMethod || "cash").trim().toLowerCase();
+  if (!["cash", "bank"].includes(paymentMethod)) {
+    throw new ValidationError("طريقة رد الرصيد يجب أن تكون cash أو bank");
+  }
+
+  const accountCode = String(body.accountCode || (paymentMethod === "bank" ? "1120" : "1110")).trim();
+  if (!["1110", "1120"].includes(accountCode)) {
+    throw new ValidationError("حساب رد الرصيد يجب أن يكون 1110 للنقد أو 1120 للبنك");
+  }
+  if (paymentMethod === "cash" && accountCode !== "1110") {
+    throw new ValidationError("رد الرصيد النقدي يجب أن يستخدم الحساب 1110");
+  }
+  if (paymentMethod === "bank" && accountCode !== "1120") {
+    throw new ValidationError("رد الرصيد البنكي يجب أن يستخدم الحساب 1120");
+  }
+
+  const currency = String(body.currency || defaultCurrency || "AED").trim().toUpperCase().slice(0, 8) || "AED";
+  const date = body.date ? String(body.date).trim() : new Date().toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(new Date(date).getTime())) {
+    throw new ValidationError("تاريخ رد الرصيد يجب أن يكون بصيغة YYYY-MM-DD");
+  }
+
+  const description = String(body.description || "Customer credit refund").trim().slice(0, 255);
+  const reference = body.reference == null ? null : String(body.reference).trim().slice(0, 120) || null;
+  const branchCandidate = body.branchId || req.headers["x-branch-id"] || req.branchId;
+  const branchId = typeof branchCandidate === "string" && branchCandidate.startsWith("BR-") ? branchCandidate : null;
+
+  return {
+    amount,
+    currency,
+    paymentMethod,
+    accountCode,
+    branchId,
+    date,
+    description,
+    reference,
+  };
+}
+
+function normalizeCustomerCreditApplyPayload(req, defaultCurrency = "AED") {
+  const body = req.body || {};
+  const amount = Math.round(Number(body.amount) * 10000) / 10000;
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new ValidationError("مبلغ تطبيق الرصيد يجب أن يكون أكبر من صفر");
+  }
+
+  const currency = String(body.currency || defaultCurrency || "AED").trim().toUpperCase().slice(0, 8) || "AED";
+  const date = body.date ? String(body.date).trim() : new Date().toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(new Date(date).getTime())) {
+    throw new ValidationError("تاريخ تطبيق الرصيد يجب أن يكون بصيغة YYYY-MM-DD");
+  }
+
+  const description = String(body.description || "Apply customer credit to invoice").trim().slice(0, 255);
+  const reference = body.reference == null ? null : String(body.reference).trim().slice(0, 120) || null;
+
+  return {
+    amount,
+    currency,
+    date,
+    description,
+    reference,
+  };
+}
+
+router.post("/customers/:id/credit/deposit", authMiddleware, requirePermission("treasury.update"), async (req, res, next) => {
+  try {
+    const settings = await settingsService.getCompanySettings(req.companyId);
+    const payload = normalizeCustomerDepositPayload(req, settings.currency || "AED");
+    const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
+    if (!idempotencyKey || !String(idempotencyKey).trim()) {
+      return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لإيداع رصيد دائن للعميل" });
+    }
+
+    const idemScope = "customer.credit_deposit";
+    const idemRequestHash = idempotencyService.hashRequest(idemScope, {
+      customerId: req.params.id,
+      companyId: req.companyId,
+      ...payload,
+    }, req.params);
+
+    const actorName = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
+    const actorId = req.user ? req.user.id : "System";
+    let idemResponseBody = null;
+
+    try {
+      await models.sequelize.transaction(async (t) => {
+        const idemClaim = await idempotencyService.claim({
+          models,
+          companyId: req.companyId,
+          scope: idemScope,
+          key: idempotencyKey,
+          requestHash: idemRequestHash,
+          transaction: t,
+        });
+        if (!idemClaim.claimed) {
+          const dup = new Error("__IDEM_DUPLICATE__");
+          dup.__idemDuplicate = true;
+          throw dup;
+        }
+        const idemRequest = idemClaim.request;
+
+        const customer = await models.Customer.findOne({
+          where: { id: req.params.id, companyId: req.companyId },
+          transaction: t,
+          lock: { level: t.LOCK.UPDATE, of: models.Customer },
+        });
+        if (!customer) throw new NotFoundError("Customer not found.");
+        if (customer.status && customer.status !== "active") {
+          throw new ValidationError("لا يمكن تسجيل إيداع لعميل غير نشط");
+        }
+
+        let branch = null;
+        if (payload.branchId) {
+          branch = await models.Branch.findOne({
+            where: { id: payload.branchId, companyId: req.companyId, isActive: true },
+            transaction: t,
+          });
+          if (!branch) throw new ValidationError("الفرع المحدد غير موجود أو غير نشط");
+        }
+
+        const cashTransaction = await models.CashTransaction.create({
+          id: `CT-CDEP-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          companyId: req.companyId,
+          type: "cash_in",
+          account: payload.paymentMethod,
+          amount: payload.amount,
+          category: "customer_credit_deposit",
+          counterAccountCode: "2300",
+          description: payload.description,
+          reference: payload.reference || customer.id,
+          branch: branch ? branch.name : (payload.branchId || "Main Branch"),
+          branchId: payload.branchId,
+          date: payload.date,
+          createdBy: actorId,
+          status: "posted",
+          idempotencyKey: idempotencyKey || null,
+        }, { transaction: t });
+
+        const creditRow = await customerCreditService.recordCreditIn({
+          models,
+          companyId: req.companyId,
+          customerId: customer.id,
+          branchId: payload.branchId,
+          amount: payload.amount,
+          currency: payload.currency,
+          sourceType: "manual_deposit",
+          sourceId: cashTransaction.id,
+          cashTransactionId: cashTransaction.id,
+          description: payload.description,
+          createdBy: actorId,
+          metadata: {
+            reference: payload.reference,
+            paymentMethod: payload.paymentMethod,
+            accountCode: payload.accountCode,
+          },
+          transaction: t,
+          glPosting: {
+            enabled: true,
+            debitAccountCode: payload.accountCode,
+            creditAccountCode: "2300",
+            description: payload.description,
+            date: payload.date,
+            postedBy: actorName,
+          },
+        });
+
+        await cashTransaction.update({ journalEntryId: creditRow.journalEntryId }, { transaction: t });
+
+        const summary = await customerCreditService.getCustomerCreditSummary({
+          models,
+          companyId: req.companyId,
+          customerId: customer.id,
+          transaction: t,
+        });
+        const journalEntry = creditRow.journalEntryId
+          ? await models.JournalEntry.findOne({
+              where: { id: creditRow.journalEntryId, companyId: req.companyId },
+              transaction: t,
+            })
+          : null;
+
+        await auditService.record(req.companyId, {
+          action: "customer_credit_deposit_created",
+          description: `Customer credit deposit ${payload.amount} ${payload.currency} for ${customer.name}`,
+          user: actorName,
+          userId: req.user ? req.user.id : null,
+          place: branch ? branch.name : payload.branchId || null,
+          branch: branch ? branch.name : payload.branchId || null,
+          sourceDocument: cashTransaction.id,
+          severity: "info",
+          after: JSON.stringify({
+            customerId: customer.id,
+            amount: payload.amount,
+            cashTransactionId: cashTransaction.id,
+            customerCreditTransactionId: creditRow.id,
+            journalEntryId: creditRow.journalEntryId,
+          }),
+        }, { transaction: t });
+
+        const cashOut = cashTransaction.toJSON();
+        cashOut.journalEntryId = creditRow.journalEntryId;
+        idemResponseBody = {
+          success: true,
+          data: {
+            customerCreditTransaction: creditRow.toJSON ? creditRow.toJSON() : creditRow,
+            cashTransaction: cashOut,
+            journalEntry: journalEntry ? journalEntry.toJSON() : (creditRow.journalEntryId ? { id: creditRow.journalEntryId } : null),
+            availableCredit: summary.availableCredit,
+            ledgerBased: true,
+            source: "customer_credit_deposit",
+            readOnly: false,
+          },
+        };
+        await idempotencyService.succeed({ request: idemRequest, statusCode: 201, responseBody: idemResponseBody, transaction: t });
+      });
+    } catch (txErr) {
+      if (txErr && txErr.__idemDuplicate) {
+        const prior = await idempotencyService.resolveExisting({
+          models,
+          companyId: req.companyId,
+          scope: idemScope,
+          key: idempotencyKey,
+          requestHash: idemRequestHash,
+        });
+        if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+        return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+      }
+      throw txErr;
+    }
+
+    emitEntityChanged(req.companyId, {
+      entity: "CustomerCreditTransaction",
+      action: "deposit",
+      id: idemResponseBody?.data?.customerCreditTransaction?.id,
+      branchId: payload.branchId,
+      related: { customerId: req.params.id },
+    });
+    emitEntityChanged(req.companyId, {
+      entity: "CashTransaction",
+      action: "customer-credit-deposit",
+      id: idemResponseBody?.data?.cashTransaction?.id,
+      branchId: payload.branchId,
+      related: { customerId: req.params.id },
+    });
+
+    return res.status(201).json(idemResponseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/customers/:id/credit/refund", authMiddleware, requirePermission("treasury.update"), async (req, res, next) => {
+  try {
+    const settings = await settingsService.getCompanySettings(req.companyId);
+    const payload = normalizeCustomerRefundPayload(req, settings.currency || "AED");
+    const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
+    if (!idempotencyKey || !String(idempotencyKey).trim()) {
+      return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لرد الرصيد الدائن للعميل" });
+    }
+
+    const idemScope = "customer.credit_refund";
+    const idemRequestHash = idempotencyService.hashRequest(idemScope, {
+      customerId: req.params.id,
+      companyId: req.companyId,
+      ...payload,
+    }, req.params);
+
+    const actorName = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
+    const actorId = req.user ? req.user.id : "System";
+    let idemResponseBody = null;
+
+    try {
+      await models.sequelize.transaction(async (t) => {
+        const idemClaim = await idempotencyService.claim({
+          models,
+          companyId: req.companyId,
+          scope: idemScope,
+          key: idempotencyKey,
+          requestHash: idemRequestHash,
+          transaction: t,
+        });
+        if (!idemClaim.claimed) {
+          const dup = new Error("__IDEM_DUPLICATE__");
+          dup.__idemDuplicate = true;
+          throw dup;
+        }
+        const idemRequest = idemClaim.request;
+
+        const customer = await models.Customer.findOne({
+          where: { id: req.params.id, companyId: req.companyId },
+          transaction: t,
+          lock: { level: t.LOCK.UPDATE, of: models.Customer },
+        });
+        if (!customer) throw new NotFoundError("Customer not found.");
+        if (customer.status && customer.status !== "active") {
+          throw new ValidationError("لا يمكن رد رصيد لعميل غير نشط");
+        }
+
+        let branch = null;
+        if (payload.branchId) {
+          branch = await models.Branch.findOne({
+            where: { id: payload.branchId, companyId: req.companyId, isActive: true },
+            transaction: t,
+          });
+          if (!branch) throw new ValidationError("الفرع المحدد غير موجود أو غير نشط");
+        }
+
+        const beforeSummary = await customerCreditService.getCustomerCreditSummary({
+          models,
+          companyId: req.companyId,
+          customerId: customer.id,
+          transaction: t,
+        });
+        const availableBefore = Math.round(Number(beforeSummary.availableCredit || 0) * 10000) / 10000;
+        if (payload.amount > availableBefore + 0.0001) {
+          throw new ValidationError(`الرصيد الدائن المتاح غير كافٍ. المتاح ${availableBefore} والمطلوب ${payload.amount}`);
+        }
+
+        const cashTransaction = await models.CashTransaction.create({
+          id: `CT-CREF-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          companyId: req.companyId,
+          type: "cash_out",
+          account: payload.paymentMethod,
+          amount: payload.amount,
+          category: "customer_credit_refund",
+          counterAccountCode: "2300",
+          description: payload.description,
+          reference: payload.reference || customer.id,
+          branch: branch ? branch.name : (payload.branchId || "Main Branch"),
+          branchId: payload.branchId,
+          date: payload.date,
+          createdBy: actorId,
+          status: "posted",
+          idempotencyKey: idempotencyKey || null,
+        }, { transaction: t });
+
+        const creditRow = await customerCreditService.recordCreditOut({
+          models,
+          companyId: req.companyId,
+          customerId: customer.id,
+          branchId: payload.branchId,
+          amount: payload.amount,
+          currency: payload.currency,
+          sourceType: "credit_refund",
+          sourceId: cashTransaction.id,
+          cashTransactionId: cashTransaction.id,
+          description: payload.description,
+          createdBy: actorId,
+          metadata: {
+            reference: payload.reference,
+            paymentMethod: payload.paymentMethod,
+            accountCode: payload.accountCode,
+          },
+          transaction: t,
+          glPosting: {
+            enabled: true,
+            debitAccountCode: "2300",
+            creditAccountCode: payload.accountCode,
+            description: payload.description,
+            date: payload.date,
+            postedBy: actorName,
+          },
+        });
+
+        await cashTransaction.update({ journalEntryId: creditRow.journalEntryId }, { transaction: t });
+
+        const summary = await customerCreditService.getCustomerCreditSummary({
+          models,
+          companyId: req.companyId,
+          customerId: customer.id,
+          transaction: t,
+        });
+        const journalEntry = creditRow.journalEntryId
+          ? await models.JournalEntry.findOne({
+              where: { id: creditRow.journalEntryId, companyId: req.companyId },
+              transaction: t,
+            })
+          : null;
+
+        await auditService.record(req.companyId, {
+          action: "customer_credit_refund_created",
+          description: `Customer credit refund ${payload.amount} ${payload.currency} for ${customer.name}`,
+          user: actorName,
+          userId: req.user ? req.user.id : null,
+          place: branch ? branch.name : payload.branchId || null,
+          branch: branch ? branch.name : payload.branchId || null,
+          sourceDocument: cashTransaction.id,
+          severity: "info",
+          after: JSON.stringify({
+            customerId: customer.id,
+            amount: payload.amount,
+            cashTransactionId: cashTransaction.id,
+            customerCreditTransactionId: creditRow.id,
+            journalEntryId: creditRow.journalEntryId,
+            availableCreditBefore: availableBefore,
+            availableCreditAfter: summary.availableCredit,
+          }),
+        }, { transaction: t });
+
+        const cashOut = cashTransaction.toJSON();
+        cashOut.journalEntryId = creditRow.journalEntryId;
+        idemResponseBody = {
+          success: true,
+          data: {
+            customerCreditTransaction: creditRow.toJSON ? creditRow.toJSON() : creditRow,
+            cashTransaction: cashOut,
+            journalEntry: journalEntry ? journalEntry.toJSON() : (creditRow.journalEntryId ? { id: creditRow.journalEntryId } : null),
+            availableCredit: summary.availableCredit,
+            ledgerBased: true,
+            source: "customer_credit_refund",
+            readOnly: false,
+          },
+        };
+        await idempotencyService.succeed({ request: idemRequest, statusCode: 201, responseBody: idemResponseBody, transaction: t });
+      });
+    } catch (txErr) {
+      if (txErr && txErr.__idemDuplicate) {
+        const prior = await idempotencyService.resolveExisting({
+          models,
+          companyId: req.companyId,
+          scope: idemScope,
+          key: idempotencyKey,
+          requestHash: idemRequestHash,
+        });
+        if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+        return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+      }
+      throw txErr;
+    }
+
+    emitEntityChanged(req.companyId, {
+      entity: "CustomerCreditTransaction",
+      action: "refund",
+      id: idemResponseBody?.data?.customerCreditTransaction?.id,
+      branchId: payload.branchId,
+      related: { customerId: req.params.id },
+    });
+    emitEntityChanged(req.companyId, {
+      entity: "CashTransaction",
+      action: "customer-credit-refund",
+      id: idemResponseBody?.data?.cashTransaction?.id,
+      branchId: payload.branchId,
+      related: { customerId: req.params.id },
+    });
+
+    return res.status(201).json(idemResponseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/invoices/:id/apply-customer-credit", authMiddleware, requirePermission("sales.create"), async (req, res, next) => {
+  try {
+    const settings = await settingsService.getCompanySettings(req.companyId);
+    const payload = normalizeCustomerCreditApplyPayload(req, settings.currency || "AED");
+    const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
+    if (!idempotencyKey || !String(idempotencyKey).trim()) {
+      return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لتطبيق الرصيد الدائن على الفاتورة" });
+    }
+
+    const preflightInvoice = await models.Invoice.findOne({
+      where: { id: req.params.id, companyId: req.companyId },
+      attributes: ["id", "customerId"],
+    });
+    if (!preflightInvoice) throw new NotFoundError("الفاتورة غير موجودة");
+    if (!preflightInvoice.customerId) throw new ValidationError("الفاتورة غير مرتبطة بعميل");
+
+    const idemScope = "customer.credit_apply";
+    const idemRequestHash = idempotencyService.hashRequest(idemScope, {
+      companyId: req.companyId,
+      customerId: preflightInvoice.customerId,
+      invoiceId: req.params.id,
+      ...payload,
+    }, req.params);
+
+    const actorName = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
+    const actorId = req.user ? req.user.id : "System";
+    let idemResponseBody = null;
+
+    try {
+      await models.sequelize.transaction(async (t) => {
+        const idemClaim = await idempotencyService.claim({
+          models,
+          companyId: req.companyId,
+          scope: idemScope,
+          key: idempotencyKey,
+          requestHash: idemRequestHash,
+          transaction: t,
+        });
+        if (!idemClaim.claimed) {
+          const dup = new Error("__IDEM_DUPLICATE__");
+          dup.__idemDuplicate = true;
+          throw dup;
+        }
+        const idemRequest = idemClaim.request;
+
+        const invoice = await models.Invoice.findOne({
+          where: { id: req.params.id, companyId: req.companyId },
+          transaction: t,
+          lock: { level: t.LOCK.UPDATE, of: models.Invoice },
+        });
+        if (!invoice) throw new NotFoundError("الفاتورة غير موجودة");
+        if (!invoice.customerId) throw new ValidationError("الفاتورة غير مرتبطة بعميل");
+        if (invoice.customerId !== preflightInvoice.customerId) {
+          throw new ConflictError("تغير عميل الفاتورة أثناء معالجة الطلب، استخدم مفتاح منع تكرار جديد");
+        }
+        if (invoice.postingStatus !== "posted" || invoice.status === "cancelled") {
+          throw new ValidationError("لا يمكن تطبيق الرصيد إلا على فاتورة مرحلة ونشطة");
+        }
+        if (invoice.type === "return" || invoice.type === "exchange") {
+          throw new ValidationError("تطبيق الرصيد غير مدعوم على فواتير المرتجعات أو الاستبدال في هذه المرحلة");
+        }
+
+        const remainingBefore = round4(Number(invoice.remainingAmount || 0));
+        if (remainingBefore <= 0.0001) {
+          throw new ValidationError("الفاتورة مسددة بالكامل بالفعل");
+        }
+        if (payload.amount > remainingBefore + 0.0001) {
+          throw new ValidationError(`مبلغ تطبيق الرصيد (${payload.amount}) يتجاوز المتبقي على الفاتورة (${remainingBefore})`);
+        }
+
+        const customer = await models.Customer.findOne({
+          where: { id: invoice.customerId, companyId: req.companyId },
+          transaction: t,
+          lock: { level: t.LOCK.UPDATE, of: models.Customer },
+        });
+        if (!customer) throw new NotFoundError("العميل غير موجود");
+        if (customer.status && customer.status !== "active") {
+          throw new ValidationError("لا يمكن تطبيق الرصيد على عميل غير نشط");
+        }
+
+        const beforeSummary = await customerCreditService.getCustomerCreditSummary({
+          models,
+          companyId: req.companyId,
+          customerId: customer.id,
+          transaction: t,
+        });
+        const availableBefore = round4(Number(beforeSummary.availableCredit || 0));
+        if (payload.amount > availableBefore + 0.0001) {
+          throw new ValidationError(`الرصيد الدائن المتاح غير كافٍ. المتاح ${availableBefore} والمطلوب ${payload.amount}`);
+        }
+
+        const creditRow = await customerCreditService.recordCreditOut({
+          models,
+          companyId: req.companyId,
+          customerId: customer.id,
+          branchId: invoice.branchId || null,
+          amount: payload.amount,
+          currency: payload.currency,
+          sourceType: "credit_application",
+          sourceId: invoice.id,
+          invoiceId: invoice.id,
+          description: payload.description,
+          createdBy: actorId,
+          metadata: {
+            reference: payload.reference,
+            paymentMethod: "customer_credit",
+          },
+          transaction: t,
+          glPosting: {
+            enabled: true,
+            debitAccountCode: "2300",
+            creditAccountCode: "1300",
+            description: payload.description,
+            date: payload.date,
+            postedBy: actorName,
+          },
+        });
+
+        const payment = await models.Payment.create({
+          id: `PAY-CAPP-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          companyId: req.companyId,
+          branchId: invoice.branchId || null,
+          invoiceId: invoice.id,
+          paymentMethod: "customer_credit",
+          amount: payload.amount,
+          reference: payload.reference || creditRow.id,
+          date: payload.date,
+          notes: `${payload.description} | creditTransactionId=${creditRow.id} | journalEntryId=${creditRow.journalEntryId || ""}`,
+        }, { transaction: t });
+
+        const newRemainingAmount = Math.max(0, round4(remainingBefore - payload.amount));
+        const invoiceTotal = round4(Number(invoice.total || 0));
+        const currentPaid = round4(Number(invoice.paidAmount || 0));
+        const newPaidAmount = invoiceTotal > 0
+          ? Math.min(invoiceTotal, round4(currentPaid + payload.amount))
+          : round4(currentPaid + payload.amount);
+        const newStatus = newRemainingAmount <= 0.0001 ? "paid" : "partial";
+
+        await invoice.update({
+          paidAmount: newPaidAmount,
+          remainingAmount: newRemainingAmount,
+          status: newStatus,
+        }, { transaction: t });
+
+        await customer.update({
+          balance: Math.max(0, round4(Number(customer.balance || 0) - payload.amount)),
+        }, { transaction: t });
+
+        const summary = await customerCreditService.getCustomerCreditSummary({
+          models,
+          companyId: req.companyId,
+          customerId: customer.id,
+          transaction: t,
+        });
+        const journalEntry = creditRow.journalEntryId
+          ? await models.JournalEntry.findOne({
+              where: { id: creditRow.journalEntryId, companyId: req.companyId },
+              transaction: t,
+            })
+          : null;
+
+        await auditService.record(req.companyId, {
+          action: "customer_credit_applied_to_invoice",
+          description: `Applied customer credit ${payload.amount} ${payload.currency} to invoice ${invoice.invoiceNumber || invoice.id}`,
+          user: actorName,
+          userId: req.user ? req.user.id : null,
+          place: invoice.branch || invoice.branchId || null,
+          branch: invoice.branch || invoice.branchId || null,
+          sourceDocument: invoice.id,
+          severity: "info",
+          after: JSON.stringify({
+            customerId: customer.id,
+            invoiceId: invoice.id,
+            amount: payload.amount,
+            paymentId: payment.id,
+            customerCreditTransactionId: creditRow.id,
+            journalEntryId: creditRow.journalEntryId,
+            availableCreditBefore: availableBefore,
+            availableCreditAfter: summary.availableCredit,
+            remainingBefore,
+            remainingAfter: newRemainingAmount,
+          }),
+        }, { transaction: t });
+
+        const invoiceOut = invoice.toJSON();
+        invoiceOut.paidAmount = newPaidAmount;
+        invoiceOut.remainingAmount = newRemainingAmount;
+        invoiceOut.status = newStatus;
+
+        idemResponseBody = {
+          success: true,
+          data: {
+            customerCreditTransaction: creditRow.toJSON ? creditRow.toJSON() : creditRow,
+            payment: payment.toJSON ? payment.toJSON() : payment,
+            invoice: invoiceOut,
+            journalEntry: journalEntry ? journalEntry.toJSON() : (creditRow.journalEntryId ? { id: creditRow.journalEntryId } : null),
+            availableCredit: summary.availableCredit,
+            ledgerBased: true,
+            source: "customer_credit_apply",
+            readOnly: false,
+          },
+        };
+        await idempotencyService.succeed({ request: idemRequest, statusCode: 201, responseBody: idemResponseBody, transaction: t });
+      });
+    } catch (txErr) {
+      if (txErr && txErr.__idemDuplicate) {
+        const prior = await idempotencyService.resolveExisting({
+          models,
+          companyId: req.companyId,
+          scope: idemScope,
+          key: idempotencyKey,
+          requestHash: idemRequestHash,
+        });
+        if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+        return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+      }
+      throw txErr;
+    }
+
+    emitEntityChanged(req.companyId, {
+      entity: "CustomerCreditTransaction",
+      action: "apply",
+      id: idemResponseBody?.data?.customerCreditTransaction?.id,
+      branchId: idemResponseBody?.data?.invoice?.branchId || null,
+      related: { customerId: idemResponseBody?.data?.invoice?.customerId, invoiceId: req.params.id },
+    });
+    emitEntityChanged(req.companyId, {
+      entity: "Payment",
+      action: "customer-credit-apply",
+      id: idemResponseBody?.data?.payment?.id,
+      branchId: idemResponseBody?.data?.invoice?.branchId || null,
+      related: { customerId: idemResponseBody?.data?.invoice?.customerId, invoiceId: req.params.id },
+    });
+    emitEntityChanged(req.companyId, {
+      entity: "Invoice",
+      action: "customer-credit-apply",
+      id: req.params.id,
+      branchId: idemResponseBody?.data?.invoice?.branchId || null,
+      related: { customerId: idemResponseBody?.data?.invoice?.customerId },
+    });
+
+    return res.status(201).json(idemResponseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GL ACCOUNT STATEMENT (كشف حساب) — Phase 9B. READ-ONLY.
 // Builds a per-GL-account ledger from POSTED journal lines only. It never reads
 // Account.balance to derive opening/closing (those are computed from the lines
@@ -5287,6 +7722,11 @@ router.get("/customers/:id/credit", authMiddleware, requirePermission("customers
 // ─────────────────────────────────────────────────────────────────────────────
 const round4 = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
 const isValidYmd = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(new Date(s).getTime());
+const safeJson = (value) => {
+  if (!value) return null;
+  if (typeof value !== "string") return value;
+  try { return JSON.parse(value); } catch { return value; }
+};
 const ledgerMeta = {
   ledgerBased: true,
   source: "journal_lines",
@@ -5481,6 +7921,852 @@ router.get("/accounts/:id/statement", authMiddleware, requirePermission("account
 // a reference, plus a `difference` against the ledger-derived calculated balance.
 // No rows are created, updated, or deleted.
 // ─────────────────────────────────────────────────────────────────────────────
+function reservationReportFilters(req) {
+  const from = req.query.from ? String(req.query.from) : null;
+  const to = req.query.to ? String(req.query.to) : null;
+  const branchId = req.query.branchId ? String(req.query.branchId) : null;
+  const status = req.query.status ? String(req.query.status) : null;
+  if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
+  if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
+  if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
+  const where = { companyId: req.companyId };
+  if (branchId) where.branchId = branchId;
+  if (status) where.status = status;
+  if (from || to) {
+    where.createdAt = {};
+    if (from) where.createdAt[Op.gte] = new Date(`${from}T00:00:00.000Z`);
+    if (to) where.createdAt[Op.lte] = new Date(`${to}T23:59:59.999Z`);
+  }
+  return { where, filters: { from, to, branchId, status } };
+}
+
+async function secureReservationReportFilters(req) {
+  const from = req.query.from ? String(req.query.from) : null;
+  const to = req.query.to ? String(req.query.to) : null;
+  const branchId = req.query.branchId ? String(req.query.branchId) : null;
+  const status = req.query.status ? String(req.query.status) : null;
+  const customerId = req.query.customerId ? String(req.query.customerId) : null;
+  const salesperson = req.query.salesperson ? String(req.query.salesperson) : null;
+
+  if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
+  if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
+  if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
+
+  const baseWhere = await reservationService._internal.reservationVisibilityWhere(req.companyId, req.user, branchId);
+  const where = { ...baseWhere };
+
+  if (baseWhere.id === "__NO_VISIBLE_RESERVATION_SCOPE__") {
+    // Force empty result set
+    where.id = "__FORCE_EMPTY_SET__";
+  }
+
+  if (branchId) where.branchId = branchId;
+  if (status) where.status = status;
+  if (customerId) where.customerId = customerId;
+  if (salesperson) where.createdBy = salesperson;
+
+  if (from || to) {
+    where.createdAt = {};
+    if (from) where.createdAt[Op.gte] = new Date(`${from}T00:00:00.000Z`);
+    if (to) where.createdAt[Op.lte] = new Date(`${to}T23:59:59.999Z`);
+  }
+  return { where, filters: { from, to, branchId, status, customerId, salesperson } };
+}
+
+router.get("/reports/reservations/summary", authMiddleware, requireAnyPermission(reservationPerms.reportsView), async (req, res, next) => {
+  try {
+    const isExport = req.query.export === "true";
+    if (isExport) {
+      const hasExport = await permissionService.userHasAnyPermission(req.user, reservationPerms.reportsExport);
+      if (!hasExport) throw new ForbiddenError("Insufficient permissions to export reports.");
+    }
+    const { where, filters } = await secureReservationReportFilters(req);
+    const reservations = await models.Reservation.findAll({ where, raw: true });
+    const totals = reservations.reduce((acc, row) => {
+      acc.count += 1;
+      acc.agreedTotal = round4(acc.agreedTotal + Number(row.agreedTotal || 0));
+      acc.paidTotal = round4(acc.paidTotal + Number(row.paidTotal || 0));
+      acc.remainingTotal = round4(acc.remainingTotal + Number(row.remainingTotal || 0));
+      acc.excessTotal = round4(acc.excessTotal + Number(row.excessTotal || 0));
+      acc.byStatus[row.status] = (acc.byStatus[row.status] || 0) + 1;
+      return acc;
+    }, { count: 0, agreedTotal: 0, paidTotal: 0, remainingTotal: 0, excessTotal: 0, byStatus: {} });
+    return res.status(200).json({ success: true, data: { filters, totals, items: reservations }, items: reservations });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/reports/reservations/payments", authMiddleware, requireAnyPermission(reservationPerms.reportsView), async (req, res, next) => {
+  try {
+    const isExport = req.query.export === "true";
+    if (isExport) {
+      const hasExport = await permissionService.userHasAnyPermission(req.user, reservationPerms.reportsExport);
+      if (!hasExport) throw new ForbiddenError("Insufficient permissions to export reports.");
+    }
+    const from = req.query.from ? String(req.query.from) : null;
+    const to = req.query.to ? String(req.query.to) : null;
+    if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
+    if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
+    if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
+
+    const baseWhere = await reservationService._internal.reservationVisibilityWhere(req.companyId, req.user, req.query.branchId);
+    if (baseWhere.id === "__NO_VISIBLE_RESERVATION_SCOPE__") {
+      return res.status(200).json({ success: true, data: { filters: { from, to, branchId: req.query.branchId || null }, totals: { count: 0, amount: 0, byMethod: {} }, items: [] }, items: [] });
+    }
+
+    const where = { companyId: req.companyId };
+    if (baseWhere.branchId) {
+      where.branchId = baseWhere.branchId;
+    } else if (req.query.branchId) {
+      where.branchId = String(req.query.branchId);
+    }
+
+    if (from || to) {
+      where.receivedAt = {};
+      if (from) where.receivedAt[Op.gte] = new Date(`${from}T00:00:00.000Z`);
+      if (to) where.receivedAt[Op.lte] = new Date(`${to}T23:59:59.999Z`);
+    }
+    const payments = await models.ReservationPayment.findAll({ where, order: [["receivedAt", "ASC"]], raw: true });
+    const totals = payments.reduce((acc, row) => {
+      acc.count += 1;
+      acc.amount = round4(acc.amount + Number(row.amount || 0));
+      acc.byMethod[row.paymentMethod] = round4((acc.byMethod[row.paymentMethod] || 0) + Number(row.amount || 0));
+      return acc;
+    }, { count: 0, amount: 0, byMethod: {} });
+    return res.status(200).json({ success: true, data: { filters: { from, to, branchId: req.query.branchId || null }, totals, items: payments }, items: payments });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/reports/reservations/unsettled-advances", authMiddleware, requireAnyPermission(reservationPerms.reportsView), async (req, res, next) => {
+  try {
+    const isExport = req.query.export === "true";
+    if (isExport) {
+      const hasExport = await permissionService.userHasAnyPermission(req.user, reservationPerms.reportsExport);
+      if (!hasExport) throw new ForbiddenError("Insufficient permissions to export reports.");
+    }
+
+    const { where, filters } = await secureReservationReportFilters(req);
+    where.status = { [Op.in]: ["active", "partially_paid", "fully_paid"] };
+    where.paidTotal = { [Op.gt]: 0 };
+
+    const limit = isExport ? 100000 : (req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50);
+    const page = isExport ? 1 : (req.query.page ? Math.max(1, Number(req.query.page)) : 1);
+    const offset = (page - 1) * limit;
+
+    const { count, rows } = await models.Reservation.findAndCountAll({
+      where,
+      limit,
+      offset,
+      order: [["createdAt", "DESC"]],
+      raw: true
+    });
+
+    const totals = rows.reduce((acc, row) => {
+      acc.count += 1;
+      acc.agreedTotal = round4(acc.agreedTotal + Number(row.agreedTotal || 0));
+      acc.paidTotal = round4(acc.paidTotal + Number(row.paidTotal || 0));
+      acc.remainingTotal = round4(acc.remainingTotal + Number(row.remainingTotal || 0));
+      return acc;
+    }, { count: 0, agreedTotal: 0, paidTotal: 0, remainingTotal: 0 });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        filters,
+        pagination: { total: count, page, limit, pages: Math.ceil(count / limit) },
+        totals,
+        items: rows
+      },
+      items: rows
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/reports/reservations/completions", authMiddleware, requireAnyPermission(reservationPerms.reportsView), async (req, res, next) => {
+  try {
+    const isExport = req.query.export === "true";
+    if (isExport) {
+      const hasExport = await permissionService.userHasAnyPermission(req.user, reservationPerms.reportsExport);
+      if (!hasExport) throw new ForbiddenError("Insufficient permissions to export reports.");
+    }
+
+    const { where, filters } = await secureReservationReportFilters(req);
+    where.status = "completed";
+
+    if (req.query.from || req.query.to) {
+      delete where.createdAt;
+      where.completedAt = {};
+      if (req.query.from) where.completedAt[Op.gte] = new Date(`${req.query.from}T00:00:00.000Z`);
+      if (req.query.to) where.completedAt[Op.lte] = new Date(`${req.query.to}T23:59:59.999Z`);
+    }
+
+    const limit = isExport ? 100000 : (req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50);
+    const page = isExport ? 1 : (req.query.page ? Math.max(1, Number(req.query.page)) : 1);
+    const offset = (page - 1) * limit;
+
+    const { count, rows } = await models.Reservation.findAndCountAll({
+      where,
+      limit,
+      offset,
+      order: [["completedAt", "DESC"]],
+      raw: true
+    });
+
+    const totals = rows.reduce((acc, row) => {
+      acc.count += 1;
+      acc.agreedTotal = round4(acc.agreedTotal + Number(row.agreedTotal || 0));
+      acc.paidTotal = round4(acc.paidTotal + Number(row.paidTotal || 0));
+      return acc;
+    }, { count: 0, agreedTotal: 0, paidTotal: 0 });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        filters,
+        pagination: { total: count, page, limit, pages: Math.ceil(count / limit) },
+        totals,
+        items: rows
+      },
+      items: rows
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/reports/reservations/cancellations-refunds", authMiddleware, requireAnyPermission(reservationPerms.reportsView), async (req, res, next) => {
+  try {
+    const isExport = req.query.export === "true";
+    if (isExport) {
+      const hasExport = await permissionService.userHasAnyPermission(req.user, reservationPerms.reportsExport);
+      if (!hasExport) throw new ForbiddenError("Insufficient permissions to export reports.");
+    }
+
+    const { where, filters } = await secureReservationReportFilters(req);
+    where.status = { [Op.in]: ["cancelled", "cancelled_refund_pending", "refunded"] };
+
+    if (req.query.from || req.query.to) {
+      delete where.createdAt;
+      where.cancelledAt = {};
+      if (req.query.from) where.cancelledAt[Op.gte] = new Date(`${req.query.from}T00:00:00.000Z`);
+      if (req.query.to) where.cancelledAt[Op.lte] = new Date(`${req.query.to}T23:59:59.999Z`);
+    }
+
+    const limit = isExport ? 100000 : (req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50);
+    const page = isExport ? 1 : (req.query.page ? Math.max(1, Number(req.query.page)) : 1);
+    const offset = (page - 1) * limit;
+
+    const { count, rows } = await models.Reservation.findAndCountAll({
+      where,
+      limit,
+      offset,
+      order: [["cancelledAt", "DESC"]],
+      raw: true
+    });
+
+    const totals = rows.reduce((acc, row) => {
+      acc.count += 1;
+      acc.agreedTotal = round4(acc.agreedTotal + Number(row.agreedTotal || 0));
+      acc.paidTotal = round4(acc.paidTotal + Number(row.paidTotal || 0));
+      if (row.status === "cancelled_refund_pending") acc.refundPendingCount += 1;
+      if (row.status === "refunded") acc.refundedCount += 1;
+      return acc;
+    }, { count: 0, agreedTotal: 0, paidTotal: 0, refundPendingCount: 0, refundedCount: 0 });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        filters,
+        pagination: { total: count, page, limit, pages: Math.ceil(count / limit) },
+        totals,
+        items: rows
+      },
+      items: rows
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/reports/reservations/expiry", authMiddleware, requireAnyPermission(reservationPerms.reportsView), async (req, res, next) => {
+  try {
+    const isExport = req.query.export === "true";
+    if (isExport) {
+      const hasExport = await permissionService.userHasAnyPermission(req.user, reservationPerms.reportsExport);
+      if (!hasExport) throw new ForbiddenError("Insufficient permissions to export reports.");
+    }
+
+    const { where, filters } = await secureReservationReportFilters(req);
+    where.status = { [Op.in]: ["expired", "cancelled", "cancelled_refund_pending"] };
+    where.expiredBySystem = true;
+
+    if (req.query.from || req.query.to) {
+      delete where.createdAt;
+      where.expiredAt = {};
+      if (req.query.from) where.expiredAt[Op.gte] = new Date(`${req.query.from}T00:00:00.000Z`);
+      if (req.query.to) where.expiredAt[Op.lte] = new Date(`${req.query.to}T23:59:59.999Z`);
+    }
+
+    const limit = isExport ? 100000 : (req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50);
+    const page = isExport ? 1 : (req.query.page ? Math.max(1, Number(req.query.page)) : 1);
+    const offset = (page - 1) * limit;
+
+    const { count, rows } = await models.Reservation.findAndCountAll({
+      where,
+      limit,
+      offset,
+      order: [["expiredAt", "DESC"]],
+      raw: true
+    });
+
+    const totals = rows.reduce((acc, row) => {
+      acc.count += 1;
+      acc.agreedTotal = round4(acc.agreedTotal + Number(row.agreedTotal || 0));
+      acc.paidTotal = round4(acc.paidTotal + Number(row.paidTotal || 0));
+      return acc;
+    }, { count: 0, agreedTotal: 0, paidTotal: 0 });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        filters,
+        pagination: { total: count, page, limit, pages: Math.ceil(count / limit) },
+        totals,
+        items: rows
+      },
+      items: rows
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/reports/reservations/amendments", authMiddleware, requireAnyPermission(reservationPerms.reportsView), async (req, res, next) => {
+  try {
+    const isExport = req.query.export === "true";
+    if (isExport) {
+      const hasExport = await permissionService.userHasAnyPermission(req.user, reservationPerms.reportsExport);
+      if (!hasExport) throw new ForbiddenError("Insufficient permissions to export reports.");
+    }
+
+    const from = req.query.from ? String(req.query.from) : null;
+    const to = req.query.to ? String(req.query.to) : null;
+    const branchId = req.query.branchId ? String(req.query.branchId) : null;
+    if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
+    if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
+
+    const baseWhere = await reservationService._internal.reservationVisibilityWhere(req.companyId, req.user, branchId);
+
+    const limit = isExport ? 100000 : (req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50);
+    const page = isExport ? 1 : (req.query.page ? Math.max(1, Number(req.query.page)) : 1);
+    const offset = (page - 1) * limit;
+
+    if (baseWhere.id === "__NO_VISIBLE_RESERVATION_SCOPE__") {
+      return res.status(200).json({ success: true, data: { filters: { from, to, branchId }, pagination: { total: 0, page, limit, pages: 0 }, totals: {}, items: [] }, items: [] });
+    }
+
+    const where = { companyId: req.companyId };
+    if (baseWhere.branchId) {
+      where.branchId = baseWhere.branchId;
+    } else if (branchId) {
+      where.branchId = branchId;
+    }
+
+    if (from || to) {
+      where.createdAt = {};
+      if (from) where.createdAt[Op.gte] = new Date(`${from}T00:00:00.000Z`);
+      if (to) where.createdAt[Op.lte] = new Date(`${to}T23:59:59.999Z`);
+    }
+
+    const { count, rows } = await models.ReservationAmendment.findAndCountAll({
+      where,
+      limit,
+      offset,
+      order: [["createdAt", "DESC"]],
+      raw: true
+    });
+
+    const totals = rows.reduce((acc, row) => {
+      acc.count += 1;
+      acc.totalBefore = round4(acc.totalBefore + Number(row.beforeTotal || 0));
+      acc.totalAfter = round4(acc.totalAfter + Number(row.afterTotal || 0));
+      return acc;
+    }, { count: 0, totalBefore: 0, totalAfter: 0 });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        filters: { from, to, branchId },
+        pagination: { total: count, page, limit, pages: Math.ceil(count / limit) },
+        totals,
+        items: rows
+      },
+      items: rows
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/reports/reservations/renewals", authMiddleware, requireAnyPermission(reservationPerms.reportsView), async (req, res, next) => {
+  try {
+    const isExport = req.query.export === "true";
+    if (isExport) {
+      const hasExport = await permissionService.userHasAnyPermission(req.user, reservationPerms.reportsExport);
+      if (!hasExport) throw new ForbiddenError("Insufficient permissions to export reports.");
+    }
+
+    const from = req.query.from ? String(req.query.from) : null;
+    const to = req.query.to ? String(req.query.to) : null;
+    const branchId = req.query.branchId ? String(req.query.branchId) : null;
+    if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
+    if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
+
+    const baseWhere = await reservationService._internal.reservationVisibilityWhere(req.companyId, req.user, branchId);
+
+    const limit = isExport ? 100000 : (req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50);
+    const page = isExport ? 1 : (req.query.page ? Math.max(1, Number(req.query.page)) : 1);
+    const offset = (page - 1) * limit;
+
+    if (baseWhere.id === "__NO_VISIBLE_RESERVATION_SCOPE__") {
+      return res.status(200).json({ success: true, data: { filters: { from, to, branchId }, pagination: { total: 0, page, limit, pages: 0 }, totals: {}, items: [] }, items: [] });
+    }
+
+    const where = { companyId: req.companyId };
+    if (baseWhere.branchId) {
+      where.branchId = baseWhere.branchId;
+    } else if (branchId) {
+      where.branchId = branchId;
+    }
+
+    if (from || to) {
+      where.requestedAt = {};
+      if (from) where.requestedAt[Op.gte] = new Date(`${from}T00:00:00.000Z`);
+      if (to) where.requestedAt[Op.lte] = new Date(`${to}T23:59:59.999Z`);
+    }
+
+    const { count, rows } = await models.ReservationRenewal.findAndCountAll({
+      where,
+      limit,
+      offset,
+      order: [["requestedAt", "DESC"]],
+      raw: true
+    });
+
+    const totals = rows.reduce((acc, row) => {
+      acc.count += 1;
+      acc.sourceTransferableBalance = round4(acc.sourceTransferableBalance + Number(row.sourceTransferableBalance || 0));
+      acc.successorTotal = round4(acc.successorTotal + Number(row.successorTotal || 0));
+      acc.transferAmount = round4(acc.transferAmount + Number(row.transferAmount || 0));
+      acc.excessRefundAmount = round4(acc.excessRefundAmount + Number(row.excessRefundAmount || 0));
+      return acc;
+    }, { count: 0, sourceTransferableBalance: 0, successorTotal: 0, transferAmount: 0, excessRefundAmount: 0 });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        filters: { from, to, branchId },
+        pagination: { total: count, page, limit, pages: Math.ceil(count / limit) },
+        totals,
+        items: rows
+      },
+      items: rows
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/reports/reservations/reconciliation", authMiddleware, requireAnyPermission(reservationPerms.reportsView), async (req, res, next) => {
+  try {
+    const isExport = req.query.export === "true";
+    if (isExport) {
+      const hasExport = await permissionService.userHasAnyPermission(req.user, reservationPerms.reportsExport);
+      if (!hasExport) throw new ForbiddenError("Insufficient permissions to export reports.");
+    }
+
+    const { where, filters } = await secureReservationReportFilters(req);
+
+    // Dynamic validation of configured advances account
+    const advancesSetting = await models.Setting.findOne({ where: { companyId: req.companyId, key: "reservationAdvancesAccountId" } });
+    const advancesAccountId = advancesSetting?.value;
+    if (!advancesAccountId) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          filters,
+          totals: { reconciledCount: 0, mismatchCount: 0, unsupportedCount: 0, netDifference: 0 },
+          glReconciliation: {
+            configured: false,
+            reconciliationStatus: "configuration_missing",
+            configurationIssue: "missing_setting",
+            note: "Reservation advances account not configured."
+          },
+          items: []
+        },
+        items: []
+      });
+    }
+
+    // Load account without filtering by company/active/type to detect exact validation issues
+    const advancesAccount = await models.Account.findOne({ where: { id: advancesAccountId } });
+    if (!advancesAccount) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          filters,
+          totals: { reconciledCount: 0, mismatchCount: 0, unsupportedCount: 0, netDifference: 0 },
+          glReconciliation: {
+            configured: false,
+            reconciliationStatus: "configuration_missing",
+            configurationIssue: "account_not_found",
+            note: "Configured advances account not found."
+          },
+          items: []
+        },
+        items: []
+      });
+    }
+
+    if (advancesAccount.companyId !== req.companyId) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          filters,
+          totals: { reconciledCount: 0, mismatchCount: 0, unsupportedCount: 0, netDifference: 0 },
+          glReconciliation: {
+            configured: false,
+            reconciliationStatus: "configuration_missing",
+            configurationIssue: "wrong_company",
+            note: "Configured advances account belongs to another company."
+          },
+          items: []
+        },
+        items: []
+      });
+    }
+
+    if (!advancesAccount.isActive) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          filters,
+          totals: { reconciledCount: 0, mismatchCount: 0, unsupportedCount: 0, netDifference: 0 },
+          glReconciliation: {
+            configured: false,
+            reconciliationStatus: "configuration_missing",
+            configurationIssue: "inactive_account",
+            note: "Configured advances account is inactive."
+          },
+          items: []
+        },
+        items: []
+      });
+    }
+
+    // Check if it is a posting account (i.e. leaf node with no sub-accounts)
+    const childCount = await models.Account.count({ where: { parentId: advancesAccountId } });
+    if (childCount > 0) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          filters,
+          totals: { reconciledCount: 0, mismatchCount: 0, unsupportedCount: 0, netDifference: 0 },
+          glReconciliation: {
+            configured: false,
+            reconciliationStatus: "configuration_missing",
+            configurationIssue: "invalid_posting_account",
+            note: "Configured advances account is a summary account, not a posting account."
+          },
+          items: []
+        },
+        items: []
+      });
+    }
+
+    if (advancesAccount.type !== "liability") {
+      return res.status(200).json({
+        success: true,
+        data: {
+          filters,
+          totals: { reconciledCount: 0, mismatchCount: 0, unsupportedCount: 0, netDifference: 0 },
+          glReconciliation: {
+            configured: false,
+            reconciliationStatus: "configuration_missing",
+            configurationIssue: "invalid_account_type",
+            note: "Configured advances account type is not liability."
+          },
+          items: []
+        },
+        items: []
+      });
+    }
+
+    if (advancesAccount.nature !== "credit") {
+      return res.status(200).json({
+        success: true,
+        data: {
+          filters,
+          totals: { reconciledCount: 0, mismatchCount: 0, unsupportedCount: 0, netDifference: 0 },
+          glReconciliation: {
+            configured: false,
+            reconciliationStatus: "configuration_missing",
+            configurationIssue: "invalid_account_nature",
+            note: "Configured advances account nature is not credit."
+          },
+          items: []
+        },
+        items: []
+      });
+    }
+
+    // Fetch reservations
+    const reservations = await models.Reservation.findAll({ where, order: [["createdAt", "DESC"]], raw: true });
+    const ids = reservations.map((r) => r.id);
+
+    // Fetch related records
+    const [payments, refunds, transfers] = await Promise.all([
+      models.ReservationPayment.findAll({ where: { companyId: req.companyId }, raw: true }),
+      models.ReservationRefund.findAll({ where: { companyId: req.companyId }, raw: true }),
+      models.ReservationPaymentTransfer.findAll({ where: { companyId: req.companyId }, raw: true }),
+    ]);
+
+    const paymentsById = new Map(payments.map((p) => [p.id, p]));
+    const refundsById = new Map(refunds.map((r) => [r.id, r]));
+
+    // Maps to store computed subledger values per reservation
+    const paymentsReceivedMap = new Map();
+    const transfersInMap = new Map();
+    const refundsExecutedMap = new Map();
+    const completionAppliedMap = new Map();
+    const transfersOutMap = new Map();
+    const excessRefundsMap = new Map();
+
+    // Map payments
+    for (const p of payments) {
+      if (p.status !== "posted") continue;
+      const amt = Number(p.amount || 0);
+      if (p.paymentMethod === "reservation_transfer") {
+        transfersInMap.set(p.reservationId, round4((transfersInMap.get(p.reservationId) || 0) + amt));
+      } else {
+        paymentsReceivedMap.set(p.reservationId, round4((paymentsReceivedMap.get(p.reservationId) || 0) + amt));
+      }
+    }
+
+    // Map refunds
+    for (const r of refunds) {
+      if (r.status !== "executed") continue;
+      const amt = Number(r.amount || 0);
+      if (r.refundType === "renewal_excess") {
+        excessRefundsMap.set(r.reservationId, round4((excessRefundsMap.get(r.reservationId) || 0) + amt));
+      } else {
+        refundsExecutedMap.set(r.reservationId, round4((refundsExecutedMap.get(r.reservationId) || 0) + amt));
+      }
+    }
+
+    // Map transfers out from renewals
+    const renewals = await models.ReservationRenewal.findAll({ where: { companyId: req.companyId, status: "activated" }, raw: true });
+    for (const ren of renewals) {
+      const amt = Number(ren.transferAmount || 0);
+      transfersOutMap.set(ren.sourceReservationId, round4((transfersOutMap.get(ren.sourceReservationId) || 0) + amt));
+    }
+
+    // Map completion applied
+    for (const r of reservations) {
+      if (r.status === "completed") {
+        completionAppliedMap.set(r.id, Number(r.paidTotal || 0));
+      }
+    }
+
+    // Fetch posted journal lines for advances account
+    const journalLines = await models.JournalLine.findAll({
+      include: [{
+        model: models.JournalEntry,
+        as: "journalEntry",
+        where: { companyId: req.companyId, status: "posted" }
+      }],
+      where: { accountId: advancesAccount.id },
+      raw: true,
+      nest: true
+    });
+
+    // Map GL balances to reservations
+    const glDebitMap = new Map();
+    const glCreditMap = new Map();
+    const unattributableLines = [];
+
+    for (const line of journalLines) {
+      const entry = line.journalEntry;
+      const debit = Number(line.debit || 0);
+      const credit = Number(line.credit || 0);
+
+      let targetResId = null;
+      if (entry.sourceType === "reservation_payment") {
+        const p = paymentsById.get(entry.sourceId);
+        if (p) targetResId = p.reservationId;
+      } else if (entry.sourceType === "reservation_refund") {
+        const rf = refundsById.get(entry.sourceId);
+        if (rf) targetResId = rf.reservationId;
+      } else if (entry.sourceType === "reservation_settlement") {
+        targetResId = entry.sourceId;
+      }
+
+      if (targetResId) {
+        glDebitMap.set(targetResId, round4((glDebitMap.get(targetResId) || 0) + debit));
+        glCreditMap.set(targetResId, round4((glCreditMap.get(targetResId) || 0) + credit));
+      } else {
+        unattributableLines.push({
+          journalLineId: line.id,
+          journalEntryId: entry.id,
+          description: line.description || entry.description,
+          debit,
+          credit,
+          sourceType: entry.sourceType,
+          sourceId: entry.sourceId,
+          date: entry.date
+        });
+      }
+    }
+
+    // Detailed per-reservation item building
+    const detailItems = [];
+    let reconciledCount = 0;
+    let mismatchCount = 0;
+    let unsupportedCount = 0;
+    let subledgerSum = 0;
+    let glSum = 0;
+
+    for (const r of reservations) {
+      const pmReceived = paymentsReceivedMap.get(r.id) || 0;
+      const tfIn = transfersInMap.get(r.id) || 0;
+      const rfExecuted = refundsExecutedMap.get(r.id) || 0;
+      const compApplied = completionAppliedMap.get(r.id) || 0;
+      const tfOut = transfersOutMap.get(r.id) || 0;
+      const exRefund = excessRefundsMap.get(r.id) || 0;
+
+      // Expected Liability = paymentsReceived + transfersIn - refundsExecuted - completionApplied - transfersOut - excessRefunds
+      const expectedLiability = round4(pmReceived + tfIn - rfExecuted - compApplied - tfOut - exRefund);
+
+      // GL balance = Credit - Debit
+      const glDebit = glDebitMap.get(r.id) || 0;
+      const glCredit = glCreditMap.get(r.id) || 0;
+      const glLiability = round4(glCredit - glDebit);
+
+      const difference = round4(expectedLiability - glLiability);
+      const isReconciled = Math.abs(difference) < 0.01;
+
+      if (isReconciled) reconciledCount++;
+      else mismatchCount++;
+
+      subledgerSum = round4(subledgerSum + expectedLiability);
+      glSum = round4(glSum + glLiability);
+
+      detailItems.push({
+        reservationId: r.id,
+        reservationNumber: r.id,
+        companyId: r.companyId,
+        customerId: r.customerId,
+        customerName: r.customerName,
+        branchId: r.branchId,
+        status: r.status,
+        expectedLiabilityBalance: expectedLiability,
+        operationalAdvanceBalance: expectedLiability,
+        glLiabilityBalance: glLiability,
+        difference,
+        reconciliationStatus: isReconciled ? "reconciled" : "mismatch",
+        investigationFlag: !isReconciled,
+        details: {
+          paymentsReceived: pmReceived,
+          transfersIn: tfIn,
+          refundsExecuted: rfExecuted,
+          completionApplied: compApplied,
+          transfersOut: tfOut,
+          excessRefunds: exRefund
+        }
+      });
+    }
+
+    // Append unattributable lines as unsupported_legacy rows
+    for (const line of unattributableLines) {
+      unsupportedCount++;
+      const glLiability = round4(line.credit - line.debit);
+      const difference = round4(0 - glLiability);
+
+      glSum = round4(glSum + glLiability);
+
+      detailItems.push({
+        reservationId: null,
+        reservationNumber: null,
+        customerId: null,
+        customerName: null,
+        branchId: null,
+        status: "unsupported_legacy",
+        expectedLiabilityBalance: 0,
+        glLiabilityBalance: glLiability,
+        difference,
+        reconciliationStatus: "unsupported_legacy",
+        investigationFlag: true,
+        details: {
+          journalLineId: line.journalLineId,
+          journalEntryId: line.journalEntryId,
+          description: line.description,
+          sourceType: line.sourceType,
+          sourceId: line.sourceId,
+          date: line.date
+        }
+      });
+    }
+
+    // Pagination for items
+    const limit = isExport ? 100000 : (req.query.limit ? Math.min(100, Math.max(1, Number(req.query.limit))) : 50);
+    const page = isExport ? 1 : (req.query.page ? Math.max(1, Number(req.query.page)) : 1);
+    const offset = (page - 1) * limit;
+
+    const paginatedItems = detailItems.slice(offset, offset + limit);
+
+    const totals = {
+      reconciledCount,
+      mismatchCount,
+      unsupportedCount,
+      subledgerSum,
+      glSum,
+      netDifference: round4(subledgerSum - glSum)
+    };
+
+    const reconciled = Math.abs(totals.netDifference) < 0.01;
+    const glReconciliation = {
+      configured: true,
+      advancesAccountId: advancesAccount.id,
+      advancesAccountCode: advancesAccount.code,
+      advancesAccountName: advancesAccount.name,
+      glBalance: glSum,
+      subledgerBalance: subledgerSum,
+      difference: totals.netDifference,
+      reconciled,
+      reconciliationStatus: reconciled ? "reconciled" : "mismatch"
+    };
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        filters,
+        pagination: { total: detailItems.length, page, limit, pages: Math.ceil(detailItems.length / limit) },
+        totals,
+        glReconciliation,
+        items: paginatedItems
+      },
+      items: paginatedItems
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get("/reports/trial-balance", authMiddleware, requirePermission("accounting.view"), async (req, res, next) => {
   try {
     // 1. Validate query. `asOf` optional date, `includeZero` optional bool.
@@ -7048,7 +10334,9 @@ router.post("/sales/invoices/draft", authMiddleware, requirePermission("sales.cr
       if (inv.type === "return") {
         journalEntry = await postingService.postReturnEntry(inv, items, actor);
       } else if (inv.type === "deposit") {
-        journalEntry = await postingService.postDepositEntry(inv, actor);
+        journalEntry = await postingService.postDepositEntry(inv, actor, {
+          receivedAmount: Number(inv.deposit),
+        });
       } else {
         journalEntry = await postingService.postInvoiceEntry(inv, safeItems, actor);
       }
@@ -7604,7 +10892,10 @@ router.post("/sales/invoices/:id/post", authMiddleware, requirePermission("sales
     let journalEntry;
     try {
       if (type === "deposit") {
-        journalEntry = await postingService.postDepositEntry(invPlain, actor, { transaction: t });
+        journalEntry = await postingService.postDepositEntry(invPlain, actor, {
+          transaction: t,
+          receivedAmount: paidAmount,
+        });
       } else {
         journalEntry = await postingService.postInvoiceEntry(invPlain, safeDraftItems, actor, { transaction: t });
       }

@@ -23,6 +23,16 @@ const PurchaseOrderItem = require("./purchaseOrderItem.model");
 const Invoice = require("./invoice.model");
 const InvoiceItem = require("./invoiceItem.model");
 const Reservation = require("./reservation.model");
+const ReservationItem = require("./reservationItem.model");
+const ReservationPayment = require("./reservationPayment.model");
+const ReservationPaymentApplication = require("./reservationPaymentApplication.model");
+const ReservationRefund = require("./reservationRefund.model");
+const ReservationRefundAllocation = require("./reservationRefundAllocation.model");
+const ReservationAmendment = require("./reservationAmendment.model");
+const ReservationAmendmentItem = require("./reservationAmendmentItem.model");
+const ReservationExpiryExtension = require("./reservationExpiryExtension.model");
+const ReservationRenewal = require("./reservationRenewal.model");
+const ReservationPaymentTransfer = require("./reservationPaymentTransfer.model");
 const Transfer = require("./transfer.model");
 const ManufacturingOrder = require("./manufacturingOrder.model");
 const CustomerGoldPool = require("./customerGoldPool.model");
@@ -50,6 +60,9 @@ const Product = require("./product.model");
 const StockMovement = require("./stockMovement.model");
 const IdempotencyRequest = require("./idempotencyRequest.model");
 const CustomerCreditTransaction = require("./customerCreditTransaction.model");
+const BarcodeInventoryCode = require("./barcodeInventoryCode.model");
+const BarcodeItemCode = require("./barcodeItemCode.model");
+const BarcodeSequence = require("./barcodeSequence.model");
 
 // Define Associations
 
@@ -76,6 +89,8 @@ StockMovement.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
 Product.hasMany(StockMovement, { foreignKey: "productId", as: "movements" });
 StockMovement.belongsTo(Product, { foreignKey: "productId", as: "product" });
+Asset.hasMany(StockMovement, { foreignKey: "assetId", as: "stockMovements" });
+StockMovement.belongsTo(Asset, { foreignKey: "assetId", as: "asset" });
 
 Branch.hasMany(Asset, { foreignKey: "branchId", as: "assets" });
 Asset.belongsTo(Branch, { foreignKey: "branchId", as: "branchDetail" });
@@ -89,6 +104,13 @@ Employee.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
 Company.hasMany(Asset, { foreignKey: "companyId", as: "assets" });
 Asset.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+
+Company.hasMany(BarcodeInventoryCode, { foreignKey: "companyId", as: "barcodeInventoryCodes" });
+BarcodeInventoryCode.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Company.hasMany(BarcodeItemCode, { foreignKey: "companyId", as: "barcodeItemCodes" });
+BarcodeItemCode.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Company.hasMany(BarcodeSequence, { foreignKey: "companyId", as: "barcodeSequences" });
+BarcodeSequence.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
 Company.hasMany(Customer, { foreignKey: "companyId", as: "customers" });
 Customer.belongsTo(Company, { foreignKey: "companyId", as: "company" });
@@ -104,6 +126,16 @@ Invoice.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
 Company.hasMany(Reservation, { foreignKey: "companyId", as: "reservations" });
 Reservation.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Company.hasMany(ReservationItem, { foreignKey: "companyId", as: "reservationItems" });
+ReservationItem.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Company.hasMany(ReservationPayment, { foreignKey: "companyId", as: "reservationPayments" });
+ReservationPayment.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Company.hasMany(ReservationPaymentApplication, { foreignKey: "companyId", as: "reservationPaymentApplications" });
+ReservationPaymentApplication.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Company.hasMany(ReservationRefund, { foreignKey: "companyId", as: "reservationRefunds" });
+ReservationRefund.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Company.hasMany(ReservationRefundAllocation, { foreignKey: "companyId", as: "reservationRefundAllocations" });
+ReservationRefundAllocation.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
 Company.hasMany(Transfer, { foreignKey: "companyId", as: "transfers" });
 Transfer.belongsTo(Company, { foreignKey: "companyId", as: "company" });
@@ -213,6 +245,60 @@ Invoice.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
 
 Customer.hasMany(Reservation, { foreignKey: "customerId", as: "reservations" });
 Reservation.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
+Reservation.hasMany(ReservationItem, { foreignKey: "reservationId", as: "items" });
+ReservationItem.belongsTo(Reservation, { foreignKey: "reservationId", as: "reservation" });
+Reservation.hasMany(ReservationPayment, { foreignKey: "reservationId", as: "payments" });
+ReservationPayment.belongsTo(Reservation, { foreignKey: "reservationId", as: "reservation" });
+Reservation.hasMany(ReservationPaymentApplication, { foreignKey: "reservationId", as: "paymentApplications" });
+ReservationPaymentApplication.belongsTo(Reservation, { foreignKey: "reservationId", as: "reservation" });
+Reservation.hasMany(ReservationRefund, { foreignKey: "reservationId", as: "refunds" });
+ReservationRefund.belongsTo(Reservation, { foreignKey: "reservationId", as: "reservation" });
+Customer.hasMany(ReservationPayment, { foreignKey: "customerId", as: "reservationPayments" });
+ReservationPayment.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
+Customer.hasMany(ReservationRefund, { foreignKey: "customerId", as: "reservationRefunds" });
+ReservationRefund.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
+Asset.hasMany(ReservationItem, { foreignKey: "assetId", as: "reservationItems" });
+ReservationItem.belongsTo(Asset, { foreignKey: "assetId", as: "asset" });
+ReservationPayment.belongsTo(JournalEntry, { foreignKey: "journalEntryId", as: "journalEntry" });
+JournalEntry.hasOne(ReservationPayment, { foreignKey: "journalEntryId", as: "reservationPayment" });
+ReservationPayment.hasOne(ReservationPaymentApplication, { foreignKey: "reservationPaymentId", as: "application" });
+ReservationPaymentApplication.belongsTo(ReservationPayment, { foreignKey: "reservationPaymentId", as: "reservationPayment" });
+Invoice.hasOne(Reservation, { foreignKey: "finalInvoiceId", as: "completedReservation" });
+Reservation.belongsTo(Invoice, { foreignKey: "finalInvoiceId", as: "finalInvoice" });
+ReservationRefund.hasMany(ReservationRefundAllocation, { foreignKey: "reservationRefundId", as: "allocations" });
+ReservationRefundAllocation.belongsTo(ReservationRefund, { foreignKey: "reservationRefundId", as: "refund" });
+ReservationPayment.hasMany(ReservationRefundAllocation, { foreignKey: "reservationPaymentId", as: "refundAllocations" });
+ReservationRefundAllocation.belongsTo(ReservationPayment, { foreignKey: "reservationPaymentId", as: "reservationPayment" });
+ReservationRefund.belongsTo(JournalEntry, { foreignKey: "journalEntryId", as: "journalEntry" });
+JournalEntry.hasOne(ReservationRefund, { foreignKey: "journalEntryId", as: "reservationRefund" });
+
+// Phase 32.6-Fix C — amendments, expiry extensions, renewals, payment transfers.
+Company.hasMany(ReservationAmendment, { foreignKey: "companyId", as: "reservationAmendments" });
+ReservationAmendment.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Reservation.hasMany(ReservationAmendment, { foreignKey: "reservationId", as: "amendments" });
+ReservationAmendment.belongsTo(Reservation, { foreignKey: "reservationId", as: "reservation" });
+ReservationAmendment.hasMany(ReservationAmendmentItem, { foreignKey: "amendmentId", as: "items" });
+ReservationAmendmentItem.belongsTo(ReservationAmendment, { foreignKey: "amendmentId", as: "amendment" });
+Reservation.hasMany(ReservationAmendmentItem, { foreignKey: "reservationId", as: "amendmentItems" });
+ReservationAmendmentItem.belongsTo(Reservation, { foreignKey: "reservationId", as: "reservation" });
+
+Company.hasMany(ReservationExpiryExtension, { foreignKey: "companyId", as: "reservationExpiryExtensions" });
+ReservationExpiryExtension.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Reservation.hasMany(ReservationExpiryExtension, { foreignKey: "reservationId", as: "expiryExtensions" });
+ReservationExpiryExtension.belongsTo(Reservation, { foreignKey: "reservationId", as: "reservation" });
+
+Company.hasMany(ReservationRenewal, { foreignKey: "companyId", as: "reservationRenewals" });
+ReservationRenewal.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Reservation.hasMany(ReservationRenewal, { foreignKey: "sourceReservationId", as: "renewalsAsSource" });
+ReservationRenewal.belongsTo(Reservation, { foreignKey: "sourceReservationId", as: "sourceReservation" });
+ReservationRenewal.belongsTo(Reservation, { foreignKey: "successorReservationId", as: "successorReservation" });
+
+Company.hasMany(ReservationPaymentTransfer, { foreignKey: "companyId", as: "reservationPaymentTransfers" });
+ReservationPaymentTransfer.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+ReservationRenewal.hasMany(ReservationPaymentTransfer, { foreignKey: "renewalId", as: "transfers" });
+ReservationPaymentTransfer.belongsTo(ReservationRenewal, { foreignKey: "renewalId", as: "renewal" });
+ReservationPayment.hasMany(ReservationPaymentTransfer, { foreignKey: "sourcePaymentId", as: "transfersOut" });
+ReservationPaymentTransfer.belongsTo(ReservationPayment, { foreignKey: "sourcePaymentId", as: "sourcePayment" });
 
 Customer.hasMany(CustomerGoldPool, { foreignKey: "customerId", as: "customerGoldPools" });
 CustomerGoldPool.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
@@ -279,6 +365,16 @@ module.exports = {
   Invoice,
   InvoiceItem,
   Reservation,
+  ReservationItem,
+  ReservationPayment,
+  ReservationPaymentApplication,
+  ReservationRefund,
+  ReservationRefundAllocation,
+  ReservationAmendment,
+  ReservationAmendmentItem,
+  ReservationExpiryExtension,
+  ReservationRenewal,
+  ReservationPaymentTransfer,
   Transfer,
   ManufacturingOrder,
   CustomerGoldPool,
@@ -305,5 +401,8 @@ module.exports = {
   Product,
   StockMovement,
   IdempotencyRequest,
-  CustomerCreditTransaction
+  CustomerCreditTransaction,
+  BarcodeInventoryCode,
+  BarcodeItemCode,
+  BarcodeSequence
 };

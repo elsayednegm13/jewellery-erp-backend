@@ -8,6 +8,13 @@ const PERMISSIONS = [
   "suppliers.view", "suppliers.create", "suppliers.update", "suppliers.delete", "suppliers.export",
   "accounting.view", "accounting.post", "accounting.export", "treasury.view", "treasury.update",
   "reports.view", "reports.export", "settings.view", "settings.update",
+  "reservations.view", "reservations.view_all", "reservations.view_branch", "reservations.view_own",
+  "reservations.create", "reservations.record_payment", "reservations.view_payments", "reservations.view_receipts",
+  "reservations.complete_sale", "reservations.cancel", "reservations.amend_items", "reservations.reprice_items",
+  "reservations.extend_expiry", "reservations.renew", "reservations.view_renewal_transfers",
+  "reservations.refund_request", "reservations.refund_approve", "reservations.refund_reject", "reservations.refund_execute",
+  "reservations.refund_method_override", "reservations.audit_view", "reservations.reports_view", "reservations.reports_export",
+  "reservations.statement_view", "reservations.configure_account",
   "users.view", "users.create", "users.update", "users.delete", "users.manage",
   "roles.view", "roles.manage", "permissions.manage",
   "notifications.view", "notifications.manage", "approvals.view", "approvals.manage",
@@ -21,11 +28,18 @@ const ROLE_DEFS = {
   accountant: [
     "dashboard.view", "sales.view", "customers.view", "suppliers.view", "accounting.view", "accounting.post",
     "treasury.view", "treasury.update", "reports.view", "reports.export", "settings.view",
-    "notifications.view", "audit.view"
+    "notifications.view", "audit.view", "reservations.view", "reservations.view_all", "reservations.view_payments",
+    "reservations.view_receipts", "reservations.refund_approve", "reservations.refund_reject",
+    "reservations.refund_execute", "reservations.audit_view", "reservations.reports_view", "reservations.reports_export",
+    "reservations.statement_view", "reservations.configure_account"
   ],
   sales: [
     "dashboard.view", "sales.view", "sales.create", "sales.print", "customers.view", "customers.create",
-    "customers.update", "inventory.view", "notifications.view"
+    "customers.update", "inventory.view", "notifications.view", "reservations.view", "reservations.view_branch",
+    "reservations.create", "reservations.record_payment", "reservations.view_payments", "reservations.view_receipts",
+    "reservations.complete_sale", "reservations.cancel", "reservations.amend_items", "reservations.reprice_items",
+    "reservations.extend_expiry", "reservations.renew", "reservations.view_renewal_transfers",
+    "reservations.refund_request", "reservations.audit_view", "reservations.statement_view"
   ]
 };
 

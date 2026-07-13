@@ -412,20 +412,34 @@ class PostingService {
     const subtotal = round(invoice.subtotal != null ? invoice.subtotal : total - tax);
     const cost = round(items.reduce((s, it) => s + (Number(it.cost) || 0) * (Number(it.quantity) || 1), 0));
 
-    // Phase 21.2: the return money leg splits between customer receivable relief
-    // (Cr AR 1300) and an actual cash/bank refund (Cr Cash 1110 / Bank 1120).
-    // Callers pass { receivableReliefAmount, cashRefundAmount, cashAccountCode };
-    // when omitted (legacy callers) this falls back to the previous behaviour —
-    // a full cash refund on 1110 — so the entry still balances to `total`.
+    // Phase 21.2 + Phase 30: the return money leg splits between customer
+    // receivable relief (Cr AR 1300) and the excess owed back to the customer.
+    // The excess is settled across a cash refund (Cr 1110), a bank refund
+    // (Cr 1120), and/or customer store credit (Cr 2300) per the operator's
+    // settlement choice. Callers pass { receivableReliefAmount, cashRefundAmount,
+    // bankRefundAmount, customerCreditAmount, cashAccountCode, bankAccountCode }.
+    // When cashRefundAmount is omitted (legacy callers) this falls back to the
+    // previous behaviour — a full cash refund on `cashAccountCode` (default 1110)
+    // — so the entry still balances to `total`. The 2300 line keeps a single
+    // return journal as the GL owner (no separate credit journal).
     const cashAccountCode = opts.cashAccountCode || "1110";
+    const bankAccountCode = opts.bankAccountCode || "1120";
     const receivableRelief = round(opts.receivableReliefAmount != null ? opts.receivableReliefAmount : 0);
     const cashRefund = round(opts.cashRefundAmount != null ? opts.cashRefundAmount : total - receivableRelief);
+    const bankRefund = round(opts.bankRefundAmount != null ? opts.bankRefundAmount : 0);
+    const customerCredit = round(opts.customerCreditAmount != null ? opts.customerCreditAmount : 0);
     const moneyLegLines = [];
     if (receivableRelief > 0) {
       moneyLegLines.push({ accountCode: "1300", debit: 0, credit: receivableRelief, description: `تخفيض ذمم العميل — مرتجع فاتورة ${invoice.id}` });
     }
     if (cashRefund > 0) {
       moneyLegLines.push({ accountCode: cashAccountCode, debit: 0, credit: cashRefund, description: `مرتجع نقدي — فاتورة ${invoice.id}` });
+    }
+    if (bankRefund > 0) {
+      moneyLegLines.push({ accountCode: bankAccountCode, debit: 0, credit: bankRefund, description: `مرتجع بنكي — فاتورة ${invoice.id}` });
+    }
+    if (customerCredit > 0) {
+      moneyLegLines.push({ accountCode: "2300", debit: 0, credit: customerCredit, description: `رصيد دائن للعميل — مرتجع فاتورة ${invoice.id}` });
     }
 
     const byKarat = await this.resolveAccountingByKarat(companyId, opts);
@@ -518,7 +532,14 @@ class PostingService {
    */
   async postDepositEntry(invoice, postedBy = "System", opts = {}) {
     const companyId = invoice.companyId;
-    const amount = round(invoice.deposit || invoice.total);
+    const receivedAmount = opts.receivedAmount !== undefined && opts.receivedAmount !== null
+      ? opts.receivedAmount
+      : invoice.deposit !== undefined && invoice.deposit !== null
+        ? invoice.deposit
+        : invoice.paidAmount !== undefined && invoice.paidAmount !== null
+          ? invoice.paidAmount
+          : 0;
+    const amount = round(receivedAmount);
     const method = String(invoice.paymentMethod || "").toLowerCase();
     const cashCode = method.includes("card") || method.includes("bank") || method.includes("شبك") || method.includes("تحويل") ? "1120" : "1110";
     return this.postEntry(
@@ -535,6 +556,107 @@ class PostingService {
       [
         { accountCode: cashCode, debit: amount, credit: 0, description: "عربون مستلم" },
         { accountCode: "2300", debit: 0, credit: amount, description: "التزام عربون عميل" },
+      ]
+    );
+  }
+
+  /**
+   * Reservation advance payment:
+   *   Dr  selected Cash/Bank account
+   *   Cr  configured Customer Reservation Advances account
+   *
+   * The credit account is supplied by validated company accounting settings.
+   * There is intentionally no fallback to 2300 and no sales/VAT/AR/COGS line.
+   */
+  async postReservationPaymentEntry(payment, postedBy = "System", opts = {}) {
+    const companyId = payment.companyId;
+    const amount = round(payment.amount);
+    const debitAccountCode = opts.treasuryAccountCode || payment.treasuryAccountCode;
+    const creditAccountCode = opts.advancesAccountCode || payment.advancesAccountCode;
+
+    if (!debitAccountCode) throw new Error("Reservation payment treasury account is required");
+    if (!creditAccountCode) throw new Error("Reservation advances account is not configured");
+
+    return this.postEntry(
+      companyId,
+      {
+        description: `دفعة حجز — ${payment.reservationId} / ${payment.receiptNumber}`,
+        date: payment.receivedAt ? new Date(payment.receivedAt).toISOString().slice(0, 10) : undefined,
+        sourceType: "reservation_payment",
+        sourceId: payment.id,
+        postedBy,
+        transaction: opts.transaction,
+        branchId: payment.branchId || opts.branchId
+      },
+      [
+        { accountCode: debitAccountCode, debit: amount, credit: 0, description: `قبض دفعة حجز ${payment.receiptNumber}` },
+        { accountCode: creditAccountCode, debit: 0, credit: amount, description: `التزام دفعات حجوزات ${payment.reservationId}` },
+      ]
+    );
+  }
+
+  /**
+   * Reservation final-sale settlement:
+   *   Dr  configured Customer Reservation Advances account
+   *   Cr  Accounts Receivable / Customer Control
+   *
+   * The sales invoice itself is posted separately through postInvoiceEntry so
+   * revenue, VAT, COGS, and inventory stay on the established invoice path.
+   */
+  async postReservationAdvanceSettlementEntry(reservation, amount, postedBy = "System", opts = {}) {
+    const companyId = reservation.companyId;
+    const amt = round(amount);
+    const advancesAccountCode = opts.advancesAccountCode;
+    if (!advancesAccountCode) throw new Error("Reservation advances account is not configured");
+
+    return this.postEntry(
+      companyId,
+      {
+        description: `تسوية دفعات حجز — ${reservation.id} / ${opts.invoiceId || reservation.finalInvoiceId || ""}`,
+        date: opts.date ? String(opts.date).slice(0, 10) : undefined,
+        sourceType: "reservation_settlement",
+        sourceId: reservation.id,
+        postedBy,
+        transaction: opts.transaction,
+        branchId: reservation.branchId || opts.branchId
+      },
+      [
+        { accountCode: advancesAccountCode, debit: amt, credit: 0, description: `تسوية التزام دفعات حجز ${reservation.id}` },
+        { accountCode: "1300", debit: 0, credit: amt, description: `تسوية ذمم فاتورة حجز ${opts.invoiceId || reservation.finalInvoiceId || ""}` },
+      ]
+    );
+  }
+
+  /**
+   * Reservation refund execution before final sale:
+   *   Dr  configured Customer Reservation Advances account
+   *   Cr  selected Cash/Bank account
+   *
+   * No revenue, VAT, COGS, inventory, or AR line is posted here because no final
+   * sales invoice exists for a cancelled reservation refund.
+   */
+  async postReservationRefundEntry(refund, postedBy = "System", opts = {}) {
+    const companyId = refund.companyId;
+    const amt = round(refund.amount);
+    const advancesAccountCode = opts.advancesAccountCode;
+    const treasuryAccountCode = opts.treasuryAccountCode || refund.treasuryAccountCode;
+    if (!advancesAccountCode) throw new Error("Reservation advances account is not configured");
+    if (!treasuryAccountCode) throw new Error("Reservation refund treasury account is required");
+
+    return this.postEntry(
+      companyId,
+      {
+        description: `استرداد دفعات حجز — ${refund.reservationId}`,
+        date: refund.executedAt ? new Date(refund.executedAt).toISOString().slice(0, 10) : undefined,
+        sourceType: "reservation_refund",
+        sourceId: refund.id,
+        postedBy,
+        transaction: opts.transaction,
+        branchId: refund.branchId || opts.branchId
+      },
+      [
+        { accountCode: advancesAccountCode, debit: amt, credit: 0, description: `إقفال التزام دفعات حجز ${refund.reservationId}` },
+        { accountCode: treasuryAccountCode, debit: 0, credit: amt, description: `صرف استرداد حجز ${refund.reservationId}` },
       ]
     );
   }

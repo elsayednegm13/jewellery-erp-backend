@@ -40,6 +40,7 @@ const DEFAULTS = {
   dateFormat: "YYYY-MM-DD",
   lowStockThreshold: 1,
   accountingByKarat: false, // P5.1 foundation flag — split posting not enabled yet
+  reservationExpiryWarningHours: 72, // hours - default warning threshold before reservation expires
   installment: {
     enabled: true,
     allowZeroDownPayment: false,
@@ -147,6 +148,7 @@ async function getCompanySettings(companyId, options = {}) {
     invoiceNumbering: pick("invoiceNumbering", String, DEFAULTS.invoiceNumbering),
     dateFormat: pick("dateFormat", String, DEFAULTS.dateFormat),
     lowStockThreshold: pick("lowStockThreshold", (v) => toNumber(v, DEFAULTS.lowStockThreshold), DEFAULTS.lowStockThreshold),
+    reservationExpiryWarningHours: pick("reservationExpiryWarningHours", (v) => toNumber(v, DEFAULTS.reservationExpiryWarningHours), DEFAULTS.reservationExpiryWarningHours),
     // P5.1 foundation flag (default false). No posting reads it yet.
     accountingByKarat: toBool(raw.accountingByKarat, DEFAULTS.accountingByKarat),
     receipt: parseMaybeJson(raw.receipt) || null,

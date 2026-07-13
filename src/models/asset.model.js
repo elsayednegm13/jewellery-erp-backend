@@ -78,6 +78,51 @@ const Asset = sequelize.define("Asset", {
     type: DataTypes.STRING,
     allowNull: false
   },
+  inventoryCode: {
+    type: DataTypes.STRING(6),
+    allowNull: true,
+    field: "inventory_code"
+  },
+  itemCode: {
+    type: DataTypes.STRING(6),
+    allowNull: true,
+    field: "item_code"
+  },
+  karatCode: {
+    type: DataTypes.STRING(2),
+    allowNull: true,
+    field: "karat_code"
+  },
+  barcodeSerial: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    field: "barcode_serial"
+  },
+  barcodeGeneratedAt: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    field: "barcode_generated_at"
+  },
+  barcodeRevision: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    defaultValue: 1,
+    field: "barcode_revision"
+  },
+  inventorySubtype: {
+    type: DataTypes.STRING(60),
+    allowNull: true,
+    field: "inventory_subtype"
+  },
+  metadataSchemaVersion: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    field: "metadata_schema_version"
+  },
+  metadata: {
+    type: DataTypes.JSONB,
+    allowNull: true
+  },
   rfid: {
     type: DataTypes.STRING
   },
