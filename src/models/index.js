@@ -37,6 +37,10 @@ const Transfer = require("./transfer.model");
 const ManufacturingOrder = require("./manufacturingOrder.model");
 const CustomerGoldPool = require("./customerGoldPool.model");
 const InventoryGoldPool = require("./inventoryGoldPool.model");
+const CustomerGoldPurchaseDocument = require("./customerGoldPurchaseDocument.model");
+const CustomerGoldPurchaseItem = require("./customerGoldPurchaseItem.model");
+const InvestmentGoldPurchaseDocument = require("./investmentGoldPurchaseDocument.model");
+const InvestmentGoldPurchaseItem = require("./investmentGoldPurchaseItem.model");
 const Account = require("./account.model");
 const JournalEntry = require("./journalEntry.model");
 const JournalLine = require("./journalLine.model");
@@ -303,6 +307,25 @@ ReservationPaymentTransfer.belongsTo(ReservationPayment, { foreignKey: "sourcePa
 Customer.hasMany(CustomerGoldPool, { foreignKey: "customerId", as: "customerGoldPools" });
 CustomerGoldPool.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
 
+// Phase 33B — additive, non-posting Gold Purchase draft aggregates.
+Company.hasMany(CustomerGoldPurchaseDocument, { foreignKey: "companyId", as: "customerGoldPurchaseDocuments" });
+CustomerGoldPurchaseDocument.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(CustomerGoldPurchaseDocument, { foreignKey: "branchId", as: "customerGoldPurchaseDocuments" });
+CustomerGoldPurchaseDocument.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+Customer.hasMany(CustomerGoldPurchaseDocument, { foreignKey: "customerId", as: "goldPurchaseDocuments" });
+CustomerGoldPurchaseDocument.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
+CustomerGoldPurchaseDocument.hasMany(CustomerGoldPurchaseItem, { foreignKey: "documentId", as: "items" });
+CustomerGoldPurchaseItem.belongsTo(CustomerGoldPurchaseDocument, { foreignKey: "documentId", as: "document" });
+
+Company.hasMany(InvestmentGoldPurchaseDocument, { foreignKey: "companyId", as: "investmentGoldPurchaseDocuments" });
+InvestmentGoldPurchaseDocument.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(InvestmentGoldPurchaseDocument, { foreignKey: "branchId", as: "investmentGoldPurchaseDocuments" });
+InvestmentGoldPurchaseDocument.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+Supplier.hasMany(InvestmentGoldPurchaseDocument, { foreignKey: "supplierId", as: "investmentGoldPurchaseDocuments" });
+InvestmentGoldPurchaseDocument.belongsTo(Supplier, { foreignKey: "supplierId", as: "supplier" });
+InvestmentGoldPurchaseDocument.hasMany(InvestmentGoldPurchaseItem, { foreignKey: "documentId", as: "items" });
+InvestmentGoldPurchaseItem.belongsTo(InvestmentGoldPurchaseDocument, { foreignKey: "documentId", as: "document" });
+
 Customer.hasMany(CustomerAttachment, { foreignKey: "customerId", as: "attachments" });
 CustomerAttachment.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
 Company.hasMany(CustomerAttachment, { foreignKey: "companyId", as: "customerAttachments" });
@@ -379,6 +402,10 @@ module.exports = {
   ManufacturingOrder,
   CustomerGoldPool,
   InventoryGoldPool,
+  CustomerGoldPurchaseDocument,
+  CustomerGoldPurchaseItem,
+  InvestmentGoldPurchaseDocument,
+  InvestmentGoldPurchaseItem,
   Account,
   JournalEntry,
   JournalLine,

@@ -3,6 +3,7 @@ const authRoutes = require("./auth.routes");
 const goldRoutes = require("./gold.routes");
 const eventsRoutes = require("./events.routes");
 const erpRoutes = require("./erp.routes");
+const goldPurchaseRoutes = require("./gold-purchase.routes");
 const uploadMiddleware = require("../middleware/upload.middleware");
 const uploadController = require("../controllers/upload.controller");
 const sequelize = require("../config/database");
@@ -17,6 +18,7 @@ const router = express.Router();
 router.use("/auth", authRoutes);
 router.use("/gold", goldRoutes);
 router.use("/events", eventsRoutes);
+router.use("/gold-purchases", goldPurchaseRoutes);
 
 // 2. Attachment Upload Endpoint
 router.post("/attachments/upload", uploadMiddleware.single("file"), uploadController.upload);
