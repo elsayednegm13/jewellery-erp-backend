@@ -211,6 +211,61 @@ function guardFor(resourceName, action) {
   return candidates.length === 1 ? requirePermission(candidates[0]) : requireAnyPermission(candidates);
 }
 
+const employeeViewPermissions = [
+  "payroll.view",
+  "employees.credentials.manage",
+  "employees.permissions.manage",
+  "employees.branches.manage",
+  "employees.verification.view",
+];
+
+const employeeCoreManagePermissions = [
+  "payroll.manage",
+  "employees.credentials.manage",
+];
+
+function parsePositiveInt(value, fallback, max = 100) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return Math.min(parsed, max);
+}
+
+function boolQuery(value) {
+  if (value === true || value === "true" || value === "1") return true;
+  if (value === false || value === "false" || value === "0") return false;
+  return null;
+}
+
+function employeeCredentialState(credential) {
+  if (!credential) return "not_configured";
+  if (!credential.active) return "inactive";
+  if (credential.lockedUntil && new Date(credential.lockedUntil) > new Date()) return "locked";
+  if (credential.resetRequired) return "reset_required";
+  return "active";
+}
+
+function maskEmployeeSessionDevice(value) {
+  const text = String(value || "");
+  if (!text) return null;
+  const suffix = text.slice(-6);
+  return `device-••••${suffix}`;
+}
+
+function employeeSessionState(row) {
+  const now = new Date();
+  if (row.lockedAt) return "locked";
+  if (row.revokedAt) return "revoked";
+  if (row.absoluteExpiresAt && new Date(row.absoluteExpiresAt) <= now) return "absolute_expired";
+  if (row.idleExpiresAt && new Date(row.idleExpiresAt) <= now) return "idle_expired";
+  const level = Number(row.verificationLevel || 1);
+  if (level >= 2) {
+    const level2At = row.level2VerifiedAt ? new Date(row.level2VerifiedAt) : null;
+    if (!level2At || now.getTime() - level2At.getTime() > 5 * 60 * 1000) return "level_2_expired";
+    return "active_level_2";
+  }
+  return "active_level_1";
+}
+
 /**
  * Utility to define standard CRUD routes for any Sequelize model
  */
@@ -3978,7 +4033,177 @@ router.delete("/suppliers/:id", authMiddleware, requirePermission("suppliers.del
 // Phase 34.2 — Employee Code is backend-authoritative. These routes intentionally
 // shadow the generic Employee create/update handlers while leaving list/get and
 // activation behavior on the existing generic CRUD surface.
-router.post("/employees", authMiddleware, async (req, res, next) => {
+router.get("/employees", authMiddleware, requireAnyPermission(employeeViewPermissions), async (req, res, next) => {
+  try {
+    const page = parsePositiveInt(req.query.page, 1, 100000);
+    const pageSize = parsePositiveInt(req.query.pageSize || req.query.limit, 25, 100);
+    const offset = (page - 1) * pageSize;
+    const search = String(req.query.search || "").trim();
+    let parsedFilters = {};
+    if (req.query.filters) {
+      try {
+        parsedFilters = typeof req.query.filters === "string" ? JSON.parse(req.query.filters) : req.query.filters;
+      } catch (_) {
+        parsedFilters = {};
+      }
+    }
+    const queryValue = (key) => req.query[key] !== undefined ? req.query[key] : parsedFilters[key];
+    const where = { companyId: req.companyId };
+
+    if (queryValue("status") && queryValue("status") !== "all") where.status = String(queryValue("status"));
+    if (queryValue("role") && queryValue("role") !== "all") where.role = String(queryValue("role"));
+    if (queryValue("primaryBranchId") && queryValue("primaryBranchId") !== "all") where.branchId = String(queryValue("primaryBranchId"));
+    if (search) {
+      const normalizedSearch = employeeAuthorizationService.normalizeEmployeeCode(search);
+      where[Op.or] = [
+        { employeeCodeNormalized: { [Op.iLike]: `%${normalizedSearch}%` } },
+        { name: { [Op.iLike]: `%${search}%` } },
+        { phone: { [Op.iLike]: `%${search}%` } },
+        { email: { [Op.iLike]: `%${search}%` } },
+      ];
+    }
+
+    const idFilters = [];
+    if (queryValue("branchAccessId") && queryValue("branchAccessId") !== "all") {
+      const rows = await models.EmployeeBranchAccess.findAll({
+        where: { companyId: req.companyId, branchId: String(queryValue("branchAccessId")), active: true },
+        attributes: ["employeeId"],
+        raw: true,
+      });
+      idFilters.push(new Set(rows.map((row) => row.employeeId)));
+    }
+    if (queryValue("roleId") && queryValue("roleId") !== "all") {
+      const rows = await models.EmployeeRoleAssignment.findAll({
+        where: { companyId: req.companyId, roleId: String(queryValue("roleId")), active: true },
+        attributes: ["employeeId"],
+        raw: true,
+      });
+      idFilters.push(new Set(rows.map((row) => row.employeeId)));
+    }
+    if (queryValue("credentialState") && queryValue("credentialState") !== "all") {
+      const credentials = await models.EmployeeCredential.findAll({
+        where: { companyId: req.companyId },
+        attributes: ["employeeId", "active", "resetRequired", "lockedUntil"],
+        raw: true,
+      });
+      const wanted = String(queryValue("credentialState"));
+      idFilters.push(new Set(credentials.filter((row) => employeeCredentialState(row) === wanted).map((row) => row.employeeId)));
+      if (wanted === "not_configured") {
+        const withCredential = new Set(credentials.map((row) => row.employeeId));
+        const allIds = await models.Employee.findAll({ where: { companyId: req.companyId }, attributes: ["id"], raw: true });
+        idFilters[idFilters.length - 1] = new Set(allIds.filter((row) => !withCredential.has(row.id)).map((row) => row.id));
+      }
+    }
+    const lockedFilter = boolQuery(queryValue("locked"));
+    if (lockedFilter !== null) {
+      const credentials = await models.EmployeeCredential.findAll({
+        where: { companyId: req.companyId },
+        attributes: ["employeeId", "lockedUntil"],
+        raw: true,
+      });
+      const now = new Date();
+      idFilters.push(new Set(credentials.filter((row) => Boolean(row.lockedUntil && new Date(row.lockedUntil) > now) === lockedFilter).map((row) => row.employeeId)));
+    }
+    const activeSessionFilter = boolQuery(queryValue("activeOperatorSession"));
+    if (activeSessionFilter !== null) {
+      const sessions = await models.EmployeeOperationalSession.findAll({
+        where: {
+          companyId: req.companyId,
+          revokedAt: null,
+          lockedAt: null,
+          idleExpiresAt: { [Op.gt]: new Date() },
+          absoluteExpiresAt: { [Op.gt]: new Date() },
+        },
+        attributes: ["employeeId"],
+        raw: true,
+      });
+      const withActive = new Set(sessions.map((row) => row.employeeId));
+      const allIds = await models.Employee.findAll({ where: { companyId: req.companyId }, attributes: ["id"], raw: true });
+      idFilters.push(new Set(allIds.filter((row) => withActive.has(row.id) === activeSessionFilter).map((row) => row.id)));
+    }
+    if (idFilters.length) {
+      const intersection = idFilters.reduce((acc, set) => new Set([...acc].filter((id) => set.has(id))));
+      where.id = intersection.size ? { [Op.in]: [...intersection] } : { [Op.in]: ["__NO_MATCH__"] };
+    }
+
+    const { count, rows } = await models.Employee.findAndCountAll({
+      where,
+      order: [["createdAt", "DESC"], ["id", "ASC"]],
+      limit: pageSize,
+      offset,
+      raw: true,
+    });
+    const employeeIds = rows.map((row) => row.id);
+
+    const [credentials, branchCounts, roleCounts, activeSessionCounts, lastAttempts, statusRows] = await Promise.all([
+      employeeIds.length ? models.EmployeeCredential.findAll({ where: { companyId: req.companyId, employeeId: employeeIds }, raw: true }) : [],
+      employeeIds.length ? models.EmployeeBranchAccess.findAll({ where: { companyId: req.companyId, employeeId: employeeIds, active: true }, attributes: ["employeeId", [models.sequelize.fn("COUNT", models.sequelize.col("id")), "count"]], group: ["employeeId"], raw: true }) : [],
+      employeeIds.length ? models.EmployeeRoleAssignment.findAll({ where: { companyId: req.companyId, employeeId: employeeIds, active: true }, attributes: ["employeeId", [models.sequelize.fn("COUNT", models.sequelize.col("id")), "count"]], group: ["employeeId"], raw: true }) : [],
+      employeeIds.length ? models.EmployeeOperationalSession.findAll({ where: { companyId: req.companyId, employeeId: employeeIds, revokedAt: null, lockedAt: null, idleExpiresAt: { [Op.gt]: new Date() }, absoluteExpiresAt: { [Op.gt]: new Date() } }, attributes: ["employeeId", [models.sequelize.fn("COUNT", models.sequelize.col("id")), "count"]], group: ["employeeId"], raw: true }) : [],
+      employeeIds.length ? models.EmployeeVerificationAttempt.findAll({ where: { companyId: req.companyId, employeeId: employeeIds, result: "success" }, attributes: ["employeeId", [models.sequelize.fn("MAX", models.sequelize.col("created_at")), "lastVerifiedAt"]], group: ["employeeId"], raw: true }) : [],
+      models.Employee.findAll({ where: { companyId: req.companyId }, attributes: ["status", [models.sequelize.fn("COUNT", models.sequelize.col("id")), "count"]], group: ["status"], raw: true }),
+    ]);
+
+    const byEmployee = (records, valueKey = "count") => Object.fromEntries(records.map((row) => [row.employeeId, Number(row[valueKey] || 0)]));
+    const credentialByEmployee = Object.fromEntries(credentials.map((row) => [row.employeeId, row]));
+    const lastVerifiedByEmployee = Object.fromEntries(lastAttempts.map((row) => [row.employeeId, row.lastVerifiedAt]));
+    const branchCountByEmployee = byEmployee(branchCounts);
+    const roleCountByEmployee = byEmployee(roleCounts);
+    const activeSessionCountByEmployee = byEmployee(activeSessionCounts);
+    const canSeeCredentialDetails = await permissionService.userHasPermission(req.user, "employees.credentials.manage");
+
+    const items = rows.map((employee) => {
+      const credential = credentialByEmployee[employee.id];
+      const summary = {
+        credentialState: employeeCredentialState(credential),
+        branchAccessCount: branchCountByEmployee[employee.id] || 0,
+        roleTemplateCount: roleCountByEmployee[employee.id] || 0,
+        activeOperatorSessionCount: activeSessionCountByEmployee[employee.id] || 0,
+        lastVerifiedAt: lastVerifiedByEmployee[employee.id] || null,
+        primaryBranch: employee.branchId ? { id: employee.branchId, name: employee.branch } : null,
+      };
+      if (canSeeCredentialDetails && credential?.lockedUntil) summary.lockedUntil = credential.lockedUntil;
+      return { ...employee, authorizationSummary: summary };
+    });
+
+    const statusCounts = Object.fromEntries(statusRows.map((row) => [row.status, Number(row.count || 0)]));
+    const totalPages = Math.ceil(count / pageSize);
+    return res.status(200).json({
+      success: true,
+      items,
+      page,
+      pageSize,
+      total: count,
+      totalPages,
+      data: {
+        items,
+        page,
+        pageSize,
+        total: count,
+        totalPages,
+        stats: {
+          totalEmployees: Object.values(statusCounts).reduce((sum, value) => sum + value, 0),
+          statusCounts,
+          pageActiveOperatorSessions: items.reduce((sum, item) => sum + Number(item.authorizationSummary.activeOperatorSessionCount || 0), 0),
+        },
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/employees/:id", authMiddleware, requireAnyPermission(employeeViewPermissions), async (req, res, next) => {
+  try {
+    const employee = await models.Employee.findOne({ where: { id: req.params.id, companyId: req.companyId } });
+    if (!employee) throw new NotFoundError("Employee not found.");
+    return res.status(200).json({ success: true, data: employee });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/employees", authMiddleware, requireAnyPermission(employeeCoreManagePermissions), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const body = req.body || {};
@@ -4095,8 +4320,30 @@ async function updateEmployeeAuthoritative(req, res, next) {
   }
 }
 
-router.put("/employees/:id", authMiddleware, updateEmployeeAuthoritative);
-router.patch("/employees/:id", authMiddleware, updateEmployeeAuthoritative);
+router.put("/employees/:id", authMiddleware, requireAnyPermission(employeeCoreManagePermissions), updateEmployeeAuthoritative);
+router.patch("/employees/:id", authMiddleware, requireAnyPermission(employeeCoreManagePermissions), updateEmployeeAuthoritative);
+router.post("/employees/:id/deactivate", authMiddleware, requireAnyPermission(employeeCoreManagePermissions), async (req, res, next) => {
+  try {
+    const employee = await models.Employee.findOne({ where: { id: req.params.id, companyId: req.companyId } });
+    if (!employee) throw new NotFoundError("Employee not found.");
+    await employee.update({ status: "inactive", deactivateReason: req.body?.reason || employee.deactivateReason || "" });
+    emitEntityChanged(req.companyId, { entity: "Employee", action: "update", id: employee.id });
+    return res.status(200).json({ success: true, data: employee });
+  } catch (error) {
+    next(error);
+  }
+});
+router.post("/employees/:id/reactivate", authMiddleware, requireAnyPermission(employeeCoreManagePermissions), async (req, res, next) => {
+  try {
+    const employee = await models.Employee.findOne({ where: { id: req.params.id, companyId: req.companyId } });
+    if (!employee) throw new NotFoundError("Employee not found.");
+    await employee.update({ status: "present", deactivateReason: null });
+    emitEntityChanged(req.companyId, { entity: "Employee", action: "update", id: employee.id });
+    return res.status(200).json({ success: true, data: employee });
+  } catch (error) {
+    next(error);
+  }
+});
 
 // 1. Initialize Standard CRUD Endpoints
 setupCrud("customers", models.Customer, ["name", "phone", "email"]);

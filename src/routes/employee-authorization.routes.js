@@ -43,9 +43,71 @@ function attemptSafe(row) {
     requestedLevel: row.requestedLevel,
     result: row.result,
     failureCode: row.failureCode,
-    ipAddress: row.ipAddress,
-    userAgent: row.userAgent,
+    ipAddress: maskIp(row.ipAddress),
+    userAgent: summarizeUserAgent(row.userAgent),
     createdAt: row.createdAt
+  };
+}
+
+function maskIp(value) {
+  if (!value) return null;
+  const text = String(value);
+  if (text.includes(":")) return `${text.slice(0, 6)}…`;
+  const parts = text.split(".");
+  if (parts.length === 4) return `${parts[0]}.${parts[1]}.x.x`;
+  return "masked";
+}
+
+function summarizeUserAgent(value) {
+  if (!value) return null;
+  const text = String(value);
+  if (/Chrome/i.test(text)) return "Chrome";
+  if (/Firefox/i.test(text)) return "Firefox";
+  if (/Safari/i.test(text)) return "Safari";
+  if (/Edg/i.test(text)) return "Edge";
+  return "Browser";
+}
+
+function maskedDeviceLabel(value) {
+  const text = String(value || "");
+  if (!text) return null;
+  return `device-••••${text.slice(-6)}`;
+}
+
+function operationalSessionState(row) {
+  const now = new Date();
+  if (row.lockedAt) return "locked";
+  if (row.revokedAt) return "revoked";
+  if (row.absoluteExpiresAt && new Date(row.absoluteExpiresAt) <= now) return "absolute_expired";
+  if (row.idleExpiresAt && new Date(row.idleExpiresAt) <= now) return "idle_expired";
+  if (Number(row.verificationLevel || 1) >= 2) {
+    const level2At = row.level2VerifiedAt ? new Date(row.level2VerifiedAt) : null;
+    if (!level2At || now.getTime() - level2At.getTime() > 5 * 60 * 1000) return "level_2_expired";
+    return "active_level_2";
+  }
+  return "active_level_1";
+}
+
+function operationalSessionSafe(row) {
+  return {
+    id: row.id,
+    state: operationalSessionState(row),
+    maskedDeviceLabel: maskedDeviceLabel(row.deviceSessionId),
+    branch: row.branch ? { id: row.branch.id, name: row.branch.name, code: row.branch.code } : { id: row.branchId },
+    technicalUser: row.sessionUser ? {
+      id: row.sessionUser.id,
+      name: `${row.sessionUser.firstName || ""} ${row.sessionUser.lastName || ""}`.trim() || row.sessionUser.email,
+      email: row.sessionUser.email
+    } : null,
+    verificationLevel: Number(row.verificationLevel || 1),
+    verifiedAt: row.verifiedAt,
+    level2VerifiedAt: row.level2VerifiedAt,
+    lastActivityAt: row.lastActivityAt,
+    idleExpiresAt: row.idleExpiresAt,
+    absoluteExpiresAt: row.absoluteExpiresAt,
+    lockedAt: row.lockedAt,
+    revokedAt: row.revokedAt,
+    revokedReason: row.revokedReason
   };
 }
 
@@ -257,6 +319,45 @@ router.get("/employees/:id/verification-attempts", authMiddleware, requirePermis
         pageSize,
         total: count,
         totalPages: Math.ceil(count / pageSize)
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/employees/:id/operator-sessions", authMiddleware, requirePermission("employees.verification.view"), async (req, res, next) => {
+  try {
+    await assertEmployee(req.companyId, req.params.id);
+    const page = Math.max(1, Number.parseInt(req.query.page || "1", 10) || 1);
+    const pageSize = Math.min(100, Math.max(1, Number.parseInt(req.query.pageSize || req.query.limit || "25", 10) || 25));
+    const where = { companyId: req.companyId, employeeId: req.params.id };
+    if (req.query.branchId) where.branchId = String(req.query.branchId);
+    if (req.query.from || req.query.to) {
+      where.createdAt = {};
+      if (req.query.from) where.createdAt[Op.gte] = new Date(String(req.query.from));
+      if (req.query.to) where.createdAt[Op.lte] = new Date(String(req.query.to));
+    }
+    const { rows, count } = await models.EmployeeOperationalSession.findAndCountAll({
+      where,
+      include: [
+        { model: models.Branch, as: "branch", attributes: ["id", "name", "code"] },
+        { model: models.User, as: "sessionUser", attributes: ["id", "firstName", "lastName", "email"] }
+      ],
+      order: [["createdAt", "DESC"], ["id", "DESC"]],
+      limit: pageSize,
+      offset: (page - 1) * pageSize
+    });
+    const stateFilter = req.query.state ? String(req.query.state) : null;
+    const mapped = rows.map(operationalSessionSafe).filter((row) => !stateFilter || row.state === stateFilter);
+    return res.status(200).json({
+      success: true,
+      data: {
+        items: mapped,
+        page,
+        pageSize,
+        total: stateFilter ? mapped.length : count,
+        totalPages: Math.ceil((stateFilter ? mapped.length : count) / pageSize)
       }
     });
   } catch (error) {
