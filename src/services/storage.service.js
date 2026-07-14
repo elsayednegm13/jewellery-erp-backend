@@ -1,11 +1,37 @@
-const { v2: cloudinary } = require("cloudinary");
 const fs = require("fs");
 const path = require("path");
 const logger = require("../utils/logger");
+const { AppError } = require("../utils/errors");
 
-cloudinary.config({
-  secure: true
-});
+let cloudinary;
+
+const storageError = (message, statusCode, errorCode) =>
+  new AppError(message, statusCode, errorCode);
+
+const cleanupTemporaryFile = async (filePath) => {
+  try {
+    await fs.promises.unlink(filePath);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      logger.warn("Could not delete temporary upload file.");
+    }
+  }
+};
+
+const getCloudinary = () => {
+  try {
+    cloudinary ||= require("cloudinary").v2;
+    cloudinary.config({ secure: true });
+    return cloudinary;
+  } catch (error) {
+    logger.error("Cloudinary storage configuration is invalid.");
+    throw storageError(
+      "Cloud storage is not configured.",
+      500,
+      "STORAGE_CONFIGURATION_MISSING"
+    );
+  }
+};
 
 class LocalStorageDriver {
   constructor() {
@@ -59,18 +85,35 @@ class LocalStorageDriver {
 
 class CloudinaryStorageDriver {
   constructor() {
-    if (!process.env.CLOUDINARY_URL) {
-      throw new Error(
-        "CLOUDINARY_URL is required when UPLOAD_DRIVER=cloudinary"
+    const cloudinaryUrl = process.env.CLOUDINARY_URL?.trim();
+    if (!cloudinaryUrl) {
+      throw storageError(
+        "Cloud storage is not configured.",
+        500,
+        "STORAGE_CONFIGURATION_MISSING"
       );
     }
+
+    try {
+      const parsedUrl = new URL(cloudinaryUrl);
+      if (parsedUrl.protocol !== "cloudinary:") {
+        throw new Error("Invalid Cloudinary URL");
+      }
+    } catch (error) {
+      logger.error("Cloudinary storage configuration is invalid.");
+      throw storageError(
+        "Cloud storage is not configured.",
+        500,
+        "STORAGE_CONFIGURATION_MISSING"
+      );
+    }
+
+    this.client = getCloudinary();
 
     this.folder =
       process.env.CLOUDINARY_FOLDER || "jewellery-erp";
 
-    logger.info(
-      `Cloudinary storage initialized. Folder: ${this.folder}`
-    );
+    logger.info("Cloudinary storage initialized.");
   }
 
   async upload(file) {
@@ -79,16 +122,14 @@ class CloudinaryStorageDriver {
     }
 
     try {
-      const result = await cloudinary.uploader.upload(file.path, {
+      const result = await this.client.uploader.upload(file.path, {
         folder: this.folder,
         resource_type: "auto",
         overwrite: false,
         unique_filename: true
       });
 
-      logger.info(
-        `File uploaded to Cloudinary: ${result.public_id}`
-      );
+      logger.info("File uploaded to Cloudinary.");
 
       return {
         id: result.asset_id,
@@ -101,51 +142,16 @@ class CloudinaryStorageDriver {
         uploadedAt:
           result.created_at || new Date().toISOString()
       };
+    } catch (error) {
+      logger.error("Cloudinary file upload failed.");
+      throw storageError(
+        "File upload failed. Please try again.",
+        502,
+        "STORAGE_UPLOAD_FAILED"
+      );
     } finally {
-      try {
-        await fs.promises.unlink(file.path);
-      } catch (error) {
-        if (error.code !== "ENOENT") {
-          logger.warn(
-            `Could not delete temporary upload: ${error.message}`
-          );
-        }
-      }
+      await cleanupTemporaryFile(file.path);
     }
-  }
-}
-
-class S3StorageDriver {
-  constructor() {
-    logger.info(
-      "AWS S3 Storage driver initialized (Stubbed)."
-    );
-  }
-
-  async upload(file) {
-    logger.warn(
-      "AWS S3 upload called but stubbed. Falling back to LocalStorage."
-    );
-
-    const fallback = new LocalStorageDriver();
-    return fallback.upload(file);
-  }
-}
-
-class AzureStorageDriver {
-  constructor() {
-    logger.info(
-      "Azure Blob Storage driver initialized (Stubbed)."
-    );
-  }
-
-  async upload(file) {
-    logger.warn(
-      "Azure Blob upload called but stubbed. Falling back to LocalStorage."
-    );
-
-    const fallback = new LocalStorageDriver();
-    return fallback.upload(file);
   }
 }
 
@@ -157,19 +163,11 @@ class StorageService {
 
   initDriver() {
     const driverType =
-      process.env.UPLOAD_DRIVER || "local";
+      String(process.env.UPLOAD_DRIVER || "").trim().toLowerCase() || "local";
 
     switch (driverType.toLowerCase()) {
       case "cloudinary":
         this.driver = new CloudinaryStorageDriver();
-        break;
-
-      case "s3":
-        this.driver = new S3StorageDriver();
-        break;
-
-      case "azure":
-        this.driver = new AzureStorageDriver();
         break;
 
       case "local":
@@ -177,12 +175,12 @@ class StorageService {
         break;
 
       default:
-        logger.warn(
-          `Unknown upload driver "${driverType}". Using local storage.`
+        logger.warn("Storage provider configuration is invalid.");
+        throw storageError(
+          "Storage provider configuration is invalid.",
+          500,
+          "STORAGE_PROVIDER_INVALID"
         );
-
-        this.driver = new LocalStorageDriver();
-        break;
     }
   }
 
