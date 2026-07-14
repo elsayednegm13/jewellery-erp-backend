@@ -32,6 +32,9 @@ function validatePin(pin) {
   if (typeof pin !== "string" || !PIN_RE.test(pin)) {
     throw new ValidationError("PIN must be exactly 6 numeric digits.", { pin: ["PIN must be exactly 6 numeric digits."] });
   }
+  if (/^(\d)\1{5}$/.test(pin) || ["123456", "654321", "000000"].includes(pin)) {
+    throw new ValidationError("PIN is too weak.", { pin: ["Choose a stronger PIN."] });
+  }
 }
 
 function verificationError(code = "EMPLOYEE_VERIFICATION_FAILED", statusCode = 403) {
@@ -152,6 +155,13 @@ async function setEmployeePin({ companyId, employeeId, pin, resetRequired = fals
       severity: "warning",
       after: JSON.stringify({ employeeId: employee.id, credentialVersion: credential.credentialVersion, resetRequired: credential.resetRequired })
     }, { transaction: t });
+    await models.EmployeeOperationalSession.update({
+      revokedAt: now,
+      revokedReason: "pin_reset"
+    }, {
+      where: { companyId, employeeId, revokedAt: null },
+      transaction: t
+    });
     return { employee, credential };
   };
   return transaction ? execute(transaction) : models.sequelize.transaction(execute);
@@ -419,6 +429,154 @@ async function updateEmployeeBranches({ companyId, employeeId, actorUser, branch
   return transaction ? execute(transaction) : models.sequelize.transaction(execute);
 }
 
+async function changeEmployeeCode({ companyId, employeeId, newCode, reason, actorUser, actorEmployeeId = null, transaction }) {
+  await assertManagerPermission(actorUser, "employees.credentials.manage");
+  if (!reason || !String(reason).trim()) throw new ValidationError("Reason is required.", { reason: ["Reason is required."] });
+  const normalized = normalizeEmployeeCode(newCode);
+  const execute = async (t) => {
+    const employee = await getEmployeeOrThrow(companyId, employeeId, t);
+    const existing = await models.Employee.findOne({
+      where: { companyId, employeeCodeNormalized: normalized, id: { [Op.ne]: employeeId } },
+      transaction: t
+    });
+    if (existing) throw new ValidationError("Employee Code is already used.", { employeeCode: ["Employee Code is already used."] });
+    const oldCode = employee.employeeCode || null;
+    await employee.update({
+      employeeCode: String(newCode).trim(),
+      employeeCodeNormalized: normalized,
+      authorizationVersion: Number(employee.authorizationVersion || 1) + 1
+    }, { transaction: t });
+    await models.EmployeeCodeHistory.create({
+      id: id("ECH"),
+      companyId,
+      employeeId,
+      oldCode,
+      newCode: String(newCode).trim(),
+      changedByUserId: actorUser?.id || null,
+      changedByEmployeeId: actorEmployeeId || null,
+      reason: String(reason).trim()
+    }, { transaction: t });
+    await models.EmployeeOperationalSession.update({
+      revokedAt: new Date(),
+      revokedReason: "employee_code_changed"
+    }, {
+      where: { companyId, employeeId, revokedAt: null },
+      transaction: t
+    });
+    await auditService.record(companyId, {
+      action: "employee.code.changed",
+      description: `Employee Code changed for ${employee.id}.`,
+      user: actorName(actorUser),
+      userId: actorUser?.id || null,
+      technicalUserId: actorUser?.id || null,
+      employeeId: actorEmployeeId || null,
+      place: "Employees",
+      sourceDocument: employee.id,
+      severity: "critical",
+      after: JSON.stringify({ employeeId, oldCode, newCode: String(newCode).trim(), reason: String(reason).trim() })
+    }, { transaction: t });
+    return employee;
+  };
+  return transaction ? execute(transaction) : models.sequelize.transaction(execute);
+}
+
+async function changeOwnPin({ companyId, employeeId, currentPin, newPin, transaction }) {
+  validatePin(currentPin);
+  validatePin(newPin);
+  if (currentPin === newPin) throw new ValidationError("New PIN must be different.", { pin: ["New PIN must be different."] });
+  const execute = async (t) => {
+    const employee = await getEmployeeOrThrow(companyId, employeeId, t);
+    const credential = await models.EmployeeCredential.findOne({
+      where: { companyId, employeeId, active: true },
+      transaction: t,
+      lock: t.LOCK.UPDATE
+    });
+    if (!credential) throw verificationError("EMPLOYEE_VERIFICATION_FAILED", 403);
+    const ok = await bcrypt.compare(currentPin, credential.pinHash);
+    if (!ok) throw verificationError("EMPLOYEE_VERIFICATION_FAILED", 403);
+    const now = new Date();
+    await credential.update({
+      pinHash: await bcrypt.hash(newPin, 10),
+      credentialVersion: Number(credential.credentialVersion || 1) + 1,
+      failedAttemptCount: 0,
+      lockedUntil: null,
+      lastFailedAt: null,
+      pinChangedAt: now,
+      resetRequired: false
+    }, { transaction: t });
+    await models.EmployeeOperationalSession.update({
+      revokedAt: now,
+      revokedReason: "pin_changed"
+    }, {
+      where: { companyId, employeeId, revokedAt: null },
+      transaction: t
+    });
+    await auditService.record(companyId, {
+      action: "employee.pin.changed",
+      description: `Employee PIN changed for ${employee.employeeCode || employee.id}.`,
+      user: employee.name,
+      employeeId,
+      employeeCodeSnapshot: employee.employeeCode || null,
+      employeeNameSnapshot: employee.name || null,
+      place: "Employees",
+      sourceDocument: employee.id,
+      severity: "warning",
+      after: JSON.stringify({ employeeId, credentialVersion: credential.credentialVersion })
+    }, { transaction: t });
+    return { employee, credential };
+  };
+  return transaction ? execute(transaction) : models.sequelize.transaction(execute);
+}
+
+async function unlockEmployeeCredential({ companyId, employeeId, actorUser, transaction }) {
+  await assertManagerPermission(actorUser, "employees.credentials.manage");
+  const execute = async (t) => {
+    const employee = await getEmployeeOrThrow(companyId, employeeId, t);
+    const credential = await models.EmployeeCredential.findOne({ where: { companyId, employeeId }, transaction: t, lock: t.LOCK.UPDATE });
+    if (!credential) throw new NotFoundError("Employee credential not found.");
+    await credential.update({ failedAttemptCount: 0, lockedUntil: null, lastFailedAt: null }, { transaction: t });
+    await auditService.record(companyId, {
+      action: "employee.credential.unlocked",
+      description: `Employee credential unlocked for ${employee.employeeCode || employee.id}.`,
+      user: actorName(actorUser),
+      userId: actorUser?.id || null,
+      technicalUserId: actorUser?.id || null,
+      place: "Employees",
+      sourceDocument: employee.id,
+      severity: "warning"
+    }, { transaction: t });
+    return { employee, credential };
+  };
+  return transaction ? execute(transaction) : models.sequelize.transaction(execute);
+}
+
+async function revokeEmployeeOperatorSessions({ companyId, employeeId, actorUser, reason = "admin_revocation", transaction }) {
+  await assertManagerPermission(actorUser, "employees.credentials.manage");
+  const execute = async (t) => {
+    const employee = await getEmployeeOrThrow(companyId, employeeId, t);
+    const [count] = await models.EmployeeOperationalSession.update({
+      revokedAt: new Date(),
+      revokedReason: reason
+    }, {
+      where: { companyId, employeeId, revokedAt: null },
+      transaction: t
+    });
+    await auditService.record(companyId, {
+      action: "employee.operator_sessions.revoked",
+      description: `Operator sessions revoked for ${employee.employeeCode || employee.id}.`,
+      user: actorName(actorUser),
+      userId: actorUser?.id || null,
+      technicalUserId: actorUser?.id || null,
+      place: "Employees",
+      sourceDocument: employee.id,
+      severity: "warning",
+      after: JSON.stringify({ employeeId, count, reason })
+    }, { transaction: t });
+    return { employee, count };
+  };
+  return transaction ? execute(transaction) : models.sequelize.transaction(execute);
+}
+
 module.exports = {
   normalizeEmployeeCode,
   setEmployeePin,
@@ -430,5 +588,9 @@ module.exports = {
   incrementEmployeeAuthorizationVersion,
   updateEmployeeAuthorization,
   updateEmployeeBranches,
+  changeEmployeeCode,
+  changeOwnPin,
+  unlockEmployeeCredential,
+  revokeEmployeeOperatorSessions,
   recordVerificationAttempt
 };

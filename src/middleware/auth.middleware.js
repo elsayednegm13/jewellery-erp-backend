@@ -3,6 +3,7 @@ const { UnauthorizedError, ForbiddenError } = require("../utils/errors");
 const User = require("../models/user.model");
 const logger = require("../utils/logger");
 const permissionService = require("../services/permission.service");
+const technicalSessions = require("../services/technical-session.service");
 
 const { JWT_SECRET } = require("../config/security");
 
@@ -25,12 +26,11 @@ const authMiddleware = async (req, res, next) => {
       throw new UnauthorizedError("انتهت الجلسة. يرجى تسجيل الدخول مرة أخرى.");
     }
 
-    const user = await User.findByPk(decoded.userId);
-    if (!user) {
-      throw new UnauthorizedError("المستخدم غير موجود.");
-    }
+    const { user, session } = await technicalSessions.assertAccessSession(decoded);
 
     req.user = user;
+    req.technicalSession = session;
+    req.accountScope = technicalSessions.safeScope(user);
     req.companyId = req.headers["x-company-id"] || user.companyId || "CMP-DEMO";
     req.branchId = user.branchId || "Main Branch";
 
@@ -45,7 +45,15 @@ const authMiddleware = async (req, res, next) => {
     ];
     const isCompanyLevel = COMPANY_LEVEL_PREFIXES.some(prefix => req.path.startsWith(prefix));
 
-    if (headerBranchId && !isCompanyLevel) {
+    if ((user.accountType || "legacy") === "branch_shell") {
+      if (!user.branchId) {
+        throw new ForbiddenError("Branch Shell account is missing its fixed branch.");
+      }
+      if (headerBranchId && String(headerBranchId) !== String(user.branchId)) {
+        throw new ForbiddenError("Branch Shell accounts cannot switch branches.");
+      }
+      req.branchId = user.branchId;
+    } else if (headerBranchId && !isCompanyLevel) {
       const models = require("../models");
       const branchRecord = await models.Branch.findOne({
         where: { id: headerBranchId, companyId: req.companyId, isActive: true }

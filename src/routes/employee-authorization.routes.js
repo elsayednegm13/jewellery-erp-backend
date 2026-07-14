@@ -4,6 +4,7 @@ const models = require("../models");
 const { authMiddleware, requirePermission } = require("../middleware/auth.middleware");
 const employeeAuth = require("../services/employee-authorization.service");
 const operatorSessionService = require("../services/operator-session.service");
+const systemAccounts = require("../services/system-account.service");
 const { ValidationError, NotFoundError } = require("../utils/errors");
 
 const router = express.Router();
@@ -199,8 +200,35 @@ router.post("/operator/lock", authMiddleware, async (req, res, next) => {
   }
 });
 
+router.post("/operator/change-pin", authMiddleware, async (req, res, next) => {
+  try {
+    const current = await operatorSessionService.currentFromRequest(req, { touch: false });
+    if (!current.active) throw operatorSessionService.operatorError(current.reason || "OPERATOR_SESSION_REQUIRED", current.statusCode || 401);
+    const result = await employeeAuth.changeOwnPin({
+      companyId: req.companyId,
+      employeeId: current.session.employeeId,
+      currentPin: req.body?.currentPin,
+      newPin: req.body?.newPin
+    });
+    return res.status(200).json({
+      success: true,
+      data: {
+        employee: employeeSafe(result.employee),
+        credential: {
+          credentialVersion: result.credential.credentialVersion,
+          resetRequired: result.credential.resetRequired,
+          pinChangedAt: result.credential.pinChangedAt
+        }
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post("/employees/:id/credential/reset", authMiddleware, requirePermission("employees.credentials.manage"), async (req, res, next) => {
   try {
+    await systemAccounts.requireSensitiveAdminLevel2(req, { permissionName: "employees.credentials.manage", operation: "employee.pin.reset" });
     const result = await employeeAuth.resetEmployeePin({
       companyId: req.companyId,
       employeeId: req.params.id,
@@ -218,6 +246,88 @@ router.post("/employees/:id/credential/reset", authMiddleware, requirePermission
           active: result.credential.active,
           pinChangedAt: result.credential.pinChangedAt
         }
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/employees/:id/credential/unlock", authMiddleware, requirePermission("employees.credentials.manage"), async (req, res, next) => {
+  try {
+    await systemAccounts.requireSensitiveAdminLevel2(req, { permissionName: "employees.credentials.manage", operation: "employee.credential.unlock" });
+    const result = await employeeAuth.unlockEmployeeCredential({
+      companyId: req.companyId,
+      employeeId: req.params.id,
+      actorUser: req.user
+    });
+    return res.status(200).json({
+      success: true,
+      data: {
+        employee: employeeSafe(result.employee),
+        credential: {
+          credentialVersion: result.credential.credentialVersion,
+          failedAttemptCount: result.credential.failedAttemptCount,
+          lockedUntil: result.credential.lockedUntil
+        }
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/employees/:id/credential/revoke-sessions", authMiddleware, requirePermission("employees.credentials.manage"), async (req, res, next) => {
+  try {
+    await systemAccounts.requireSensitiveAdminLevel2(req, { permissionName: "employees.credentials.manage", operation: "employee.operator-sessions.revoke" });
+    const result = await employeeAuth.revokeEmployeeOperatorSessions({
+      companyId: req.companyId,
+      employeeId: req.params.id,
+      actorUser: req.user,
+      reason: req.body?.reason || "admin_revocation"
+    });
+    return res.status(200).json({ success: true, data: { employee: employeeSafe(result.employee), revoked: result.count } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/employees/:id/change-code", authMiddleware, requirePermission("employees.credentials.manage"), async (req, res, next) => {
+  try {
+    const current = await systemAccounts.requireSensitiveAdminLevel2(req, { permissionName: "employees.credentials.manage", operation: "employee.code.change" });
+    const employee = await employeeAuth.changeEmployeeCode({
+      companyId: req.companyId,
+      employeeId: req.params.id,
+      newCode: req.body?.employeeCode,
+      reason: req.body?.reason,
+      actorUser: req.user,
+      actorEmployeeId: current.session?.employeeId || null
+    });
+    return res.status(200).json({ success: true, data: { employee: employeeSafe(employee) } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/employees/:id/code-history", authMiddleware, requirePermission("employees.credentials.manage"), async (req, res, next) => {
+  try {
+    await assertEmployee(req.companyId, req.params.id);
+    const rows = await models.EmployeeCodeHistory.findAll({
+      where: { companyId: req.companyId, employeeId: req.params.id },
+      order: [["createdAt", "DESC"]]
+    });
+    return res.status(200).json({
+      success: true,
+      data: {
+        items: rows.map((row) => ({
+          id: row.id,
+          oldCode: row.oldCode,
+          newCode: row.newCode,
+          changedByUserId: row.changedByUserId,
+          changedByEmployeeId: row.changedByEmployeeId,
+          reason: row.reason,
+          createdAt: row.createdAt
+        }))
       }
     });
   } catch (error) {

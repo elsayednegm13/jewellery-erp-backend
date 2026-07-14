@@ -5,6 +5,7 @@ const eventsRoutes = require("./events.routes");
 const erpRoutes = require("./erp.routes");
 const goldPurchaseRoutes = require("./gold-purchase.routes");
 const employeeAuthorizationRoutes = require("./employee-authorization.routes");
+const systemAccountRoutes = require("./system-account.routes");
 const uploadMiddleware = require("../middleware/upload.middleware");
 const uploadController = require("../controllers/upload.controller");
 const sequelize = require("../config/database");
@@ -20,6 +21,7 @@ router.use("/auth", authRoutes);
 router.use("/gold", goldRoutes);
 router.use("/events", eventsRoutes);
 router.use("/gold-purchases", goldPurchaseRoutes);
+router.use("/system-accounts", systemAccountRoutes);
 router.use("/", employeeAuthorizationRoutes);
 
 // 2. Attachment Upload Endpoint

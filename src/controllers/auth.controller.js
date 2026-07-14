@@ -1,17 +1,36 @@
-const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
-const { User, Company, Employee } = require("../models");
-const { ValidationError, UnauthorizedError } = require("../utils/errors");
+const crypto = require("crypto");
+const { Op } = require("sequelize");
+const { User, Company, PasswordResetToken } = require("../models");
+const { AppError, ValidationError, UnauthorizedError } = require("../utils/errors");
 const logger = require("../utils/logger");
 const permissionService = require("../services/permission.service");
+const technicalSessions = require("../services/technical-session.service");
+const localRecoveryDelivery = require("../services/local-recovery-delivery.service");
+const auditService = require("../services/audit.service");
 
-const { JWT_SECRET, JWT_REFRESH_SECRET, ACCESS_EXPIRY, REFRESH_EXPIRY } = require("../config/security");
+const DUMMY_BCRYPT_HASH = "$2a$10$7EqJtq98hPqEX7fNZaFWoOhiHNO7Q8NOq8B4EGKGU9Yh/8q0LJcMK";
+const MAX_LOGIN_FAILURES = 5;
+const LOCKOUT_MINUTES = 15;
+const RESET_EXPIRY_MINUTES = 30;
 
-const generateTokens = (userId) => {
-  const token = jwt.sign({ userId }, JWT_SECRET, { expiresIn: ACCESS_EXPIRY });
-  const refreshToken = jwt.sign({ userId }, JWT_REFRESH_SECRET, { expiresIn: REFRESH_EXPIRY });
-  return { token, refreshToken };
-};
+function genericLoginError() {
+  return new ValidationError("بيانات الاعتماد غير صالحة. البريد الإلكتروني أو كلمة المرور غير صحيحة.");
+}
+
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function validatePassword(password) {
+  if (typeof password !== "string" || password.length < 8) {
+    throw new ValidationError("Password does not meet policy.", { password: ["Password must be at least 8 characters."] });
+  }
+}
+
+function resetTokenHash(token) {
+  return crypto.createHash("sha256").update(String(token)).digest("hex");
+}
 
 const serializeCompany = (company) => company ? {
   id: company.id,
@@ -34,6 +53,26 @@ const serializeCompany = (company) => company ? {
   branchName: company.branchName || "Main Branch"
 } : null;
 
+const serializeUser = async (user) => {
+  const permissions = await permissionService.getUserPermissionNames(user);
+  const roles = await permissionService.getUserRoles(user);
+  return {
+    id: user.id,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    email: user.email,
+    phone: user.phone || "",
+    jobTitle: user.jobTitle || "",
+    role: user.role,
+    accountType: user.accountType || "legacy",
+    accountScope: technicalSessions.safeScope(user),
+    forcePasswordChange: Boolean(user.forcePasswordChange),
+    defaultEmployeeId: user.defaultEmployeeId || null,
+    roles: roles.map((role) => ({ id: role.id, name: role.name, slug: role.slug, isAdmin: role.isAdmin })),
+    permissions
+  };
+};
+
 class AuthController {
   login = async (req, res, next) => {
     try {
@@ -44,17 +83,43 @@ class AuthController {
       }
 
       const user = await User.findOne({
-        where: { email: email.trim().toLowerCase() }
+        where: { email: normalizeEmail(email) }
       });
 
-      if (!user || !bcrypt.compareSync(password, user.password)) {
-        throw new ValidationError("بيانات الاعتماد غير صالحة. البريد الإلكتروني أو كلمة المرور غير صحيحة.");
+      if (!user) {
+        await bcrypt.compare(password, DUMMY_BCRYPT_HASH);
+        throw genericLoginError();
+      }
+      const now = new Date();
+      if (user.lockedUntil && new Date(user.lockedUntil) > now) {
+        throw genericLoginError();
+      }
+      const passwordMatches = await bcrypt.compare(password, user.password);
+      if (!passwordMatches) {
+        const failedLoginCount = Number(user.failedLoginCount || 0) + 1;
+        const lockedUntil = failedLoginCount >= MAX_LOGIN_FAILURES ? new Date(now.getTime() + LOCKOUT_MINUTES * 60 * 1000) : null;
+        await user.update({ failedLoginCount, lockedUntil });
+        if (lockedUntil) {
+          await auditService.record(user.companyId, {
+            action: "system_account.locked",
+            description: `System account locked after failed login attempts for ${user.email}.`,
+            user: "System",
+            place: "Auth",
+            sourceDocument: user.id,
+            severity: "warning",
+            after: JSON.stringify({ failedLoginCount, lockedUntil })
+          });
+        }
+        throw genericLoginError();
+      }
+
+      if ((user.accountType || "legacy") === "branch_shell" && !user.branchId) {
+        throw new AppError("Branch Shell account is not ready.", 403, "BRANCH_SHELL_NOT_READY");
       }
 
       const company = await Company.findByPk(user.companyId);
-      const permissions = await permissionService.getUserPermissionNames(user);
-      const roles = await permissionService.getUserRoles(user);
-      const tokens = generateTokens(user.id);
+      await user.update({ failedLoginCount: 0, lockedUntil: null, lastLoginAt: now });
+      const tokens = await technicalSessions.issueTokens(user, req);
 
       logger.info(`User logged in: ${user.email} (${user.role})`);
 
@@ -63,17 +128,7 @@ class AuthController {
         data: {
           token: tokens.token,
           refreshToken: tokens.refreshToken,
-          user: {
-            id: user.id,
-            firstName: user.firstName,
-            lastName: user.lastName,
-            email: user.email,
-            phone: user.phone || "",
-            jobTitle: user.jobTitle || "",
-            role: user.role,
-            roles: roles.map((role) => ({ id: role.id, name: role.name, slug: role.slug, isAdmin: role.isAdmin })),
-            permissions
-          },
+          user: await serializeUser(user),
           company: serializeCompany(company)
         }
       });
@@ -90,40 +145,18 @@ class AuthController {
         throw new UnauthorizedError("رمز التحديث مفقود.");
       }
 
-      let decoded;
-      try {
-        decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET);
-      } catch (err) {
-        throw new UnauthorizedError("انتهت صلاحية جلسة العمل. يرجى تسجيل الدخول مرة أخرى.");
-      }
-
-      const user = await User.findByPk(decoded.userId);
-      if (!user) {
-        throw new UnauthorizedError("المستخدم غير موجود.");
-      }
+      const rotated = await technicalSessions.rotateRefreshToken(refreshToken, req);
+      const user = rotated.user;
 
       const company = await Company.findByPk(user.companyId);
-      const permissions = await permissionService.getUserPermissionNames(user);
-      const roles = await permissionService.getUserRoles(user);
-      const tokens = generateTokens(user.id);
       logger.info(`Tokens refreshed for user ID: ${user.id}`);
 
       return res.status(200).json({
         success: true,
         data: {
-          token: tokens.token,
-          refreshToken: tokens.refreshToken,
-          user: {
-            id: user.id,
-            firstName: user.firstName,
-            lastName: user.lastName,
-            email: user.email,
-            phone: user.phone || "",
-            jobTitle: user.jobTitle || "",
-            role: user.role,
-            roles: roles.map((role) => ({ id: role.id, name: role.name, slug: role.slug, isAdmin: role.isAdmin })),
-            permissions
-          },
+          token: rotated.token,
+          refreshToken: rotated.refreshToken,
+          user: await serializeUser(user),
           company: serializeCompany(company)
         }
       });
@@ -134,6 +167,9 @@ class AuthController {
 
   logout = async (req, res, next) => {
     try {
+      if (req.technicalSession?.id && req.user?.id) {
+        await technicalSessions.revokeSession(req.technicalSession.id, req.user.id, "logout");
+      }
       logger.info(`User logged out successfully`);
       return res.status(200).json({
         success: true,
@@ -150,23 +186,11 @@ class AuthController {
     try {
       const user = req.user;
       const company = await Company.findByPk(user.companyId);
-      const permissions = await permissionService.getUserPermissionNames(user);
-      const roles = await permissionService.getUserRoles(user);
 
       return res.status(200).json({
         success: true,
         data: {
-          user: {
-            id: user.id,
-            firstName: user.firstName,
-            lastName: user.lastName,
-            email: user.email,
-            phone: user.phone || "",
-            jobTitle: user.jobTitle || "",
-            role: user.role,
-            roles: roles.map((role) => ({ id: role.id, name: role.name, slug: role.slug, isAdmin: role.isAdmin })),
-            permissions
-          },
+          user: await serializeUser(user),
           company: serializeCompany(company)
         }
       });
@@ -246,7 +270,7 @@ class AuthController {
         jobTitle: payload.jobTitle
       });
 
-      const tokens = generateTokens(user.id);
+      const tokens = await technicalSessions.issueTokens(user, req);
       logger.info(`Organization registered: ${company.businessName} (Workspace: ${company.workspace})`);
 
       return res.status(201).json({
@@ -261,7 +285,9 @@ class AuthController {
             email: user.email,
             phone: user.phone || "",
             jobTitle: user.jobTitle || "",
-            role: user.role
+            role: user.role,
+            accountType: user.accountType || "legacy",
+            accountScope: technicalSessions.safeScope(user)
           },
           company: serializeCompany(company)
         }
@@ -270,6 +296,129 @@ class AuthController {
       next(error);
     }
   };
+
+  changePassword = async (req, res, next) => {
+    try {
+      const { currentPassword, newPassword, confirmation } = req.body || {};
+      if (!currentPassword || !newPassword || newPassword !== confirmation) {
+        throw new ValidationError("Password confirmation does not match.", { password: ["Password confirmation does not match."] });
+      }
+      validatePassword(newPassword);
+      const user = await User.findByPk(req.user.id);
+      const matches = await bcrypt.compare(currentPassword, user.password);
+      if (!matches) throw new ValidationError("Current password is invalid.", { currentPassword: ["Current password is invalid."] });
+      await modelsTransaction(async (transaction) => {
+        await user.update({
+          password: await bcrypt.hash(newPassword, 10),
+          forcePasswordChange: false,
+          failedLoginCount: 0,
+          lockedUntil: null
+        }, { transaction });
+        await technicalSessions.bumpPasswordVersion(user, "self_password_change", transaction);
+        await auditService.record(user.companyId, {
+          action: "system_account.password_changed",
+          description: `Password changed for ${user.email}.`,
+          user: `${user.firstName || ""} ${user.lastName || ""}`.trim() || user.email,
+          userId: user.id,
+          technicalUserId: user.id,
+          place: "Auth",
+          sourceDocument: user.id,
+          severity: "warning"
+        }, { transaction });
+      });
+      res.status(200).json({ success: true, data: { message: "Password changed. Please log in again." } });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  forgotPassword = async (req, res, next) => {
+    try {
+      const email = normalizeEmail(req.body?.email);
+      const user = email ? await User.findOne({ where: { email } }) : null;
+      if (user) {
+        const token = crypto.randomBytes(32).toString("base64url");
+        const expiresAt = new Date(Date.now() + RESET_EXPIRY_MINUTES * 60 * 1000);
+        await modelsTransaction(async (transaction) => {
+          await PasswordResetToken.update({ usedAt: new Date() }, {
+            where: { userId: user.id, usedAt: null, expiresAt: { [Op.gt]: new Date() } },
+            transaction
+          });
+          const deliveryId = `PWD-RESET-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          await PasswordResetToken.create({
+            id: deliveryId,
+            userId: user.id,
+            tokenHash: resetTokenHash(token),
+            expiresAt,
+            requestedIp: req.ip || req.connection?.remoteAddress || null,
+            requestedUserAgent: String(req.headers["user-agent"] || "").slice(0, 255) || null
+          }, { transaction });
+          localRecoveryDelivery.writeLocalDelivery({
+            id: deliveryId,
+            kind: "password_reset",
+            email,
+            userId: user.id,
+            token,
+            expiresAt: expiresAt.toISOString()
+          });
+          await auditService.record(user.companyId, {
+            action: "system_account.forgot_password_requested",
+            description: `Password reset requested for ${user.email}.`,
+            user: "System",
+            place: "Auth",
+            sourceDocument: user.id,
+            severity: "warning",
+            after: JSON.stringify({ deliveryId, localDevDelivery: process.env.NODE_ENV !== "production" })
+          }, { transaction });
+        });
+      } else {
+        await bcrypt.compare("invalid", DUMMY_BCRYPT_HASH);
+      }
+      res.status(200).json({ success: true, data: { message: "If the account can be recovered, reset instructions have been sent." } });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  resetPassword = async (req, res, next) => {
+    try {
+      const { token, newPassword, confirmation } = req.body || {};
+      if (!token || !newPassword || newPassword !== confirmation) {
+        throw new ValidationError("Invalid reset request.", { password: ["Password confirmation does not match."] });
+      }
+      validatePassword(newPassword);
+      const row = await PasswordResetToken.findOne({ where: { tokenHash: resetTokenHash(token), usedAt: null } });
+      if (!row || new Date(row.expiresAt) <= new Date()) throw new AppError("Reset token is invalid or expired.", 422, "RESET_TOKEN_INVALID");
+      const user = await User.findByPk(row.userId);
+      if (!user) throw new AppError("Reset token is invalid or expired.", 422, "RESET_TOKEN_INVALID");
+      await modelsTransaction(async (transaction) => {
+        await row.update({ usedAt: new Date() }, { transaction });
+        await user.update({
+          password: await bcrypt.hash(newPassword, 10),
+          forcePasswordChange: false,
+          failedLoginCount: 0,
+          lockedUntil: null
+        }, { transaction });
+        await technicalSessions.bumpPasswordVersion(user, "password_reset_token", transaction);
+        await auditService.record(user.companyId, {
+          action: "system_account.forgot_password_completed",
+          description: `Password reset completed for ${user.email}.`,
+          user: "System",
+          place: "Auth",
+          sourceDocument: user.id,
+          severity: "warning"
+        }, { transaction });
+      });
+      res.status(200).json({ success: true, data: { message: "Password reset complete. Please log in." } });
+    } catch (error) {
+      next(error);
+    }
+  };
+}
+
+async function modelsTransaction(fn) {
+  const models = require("../models");
+  return models.sequelize.transaction(fn);
 }
 
 module.exports = new AuthController();

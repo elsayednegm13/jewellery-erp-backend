@@ -10,6 +10,9 @@ router.post("/login", authRateLimit, authController.login);
 router.post("/refresh", authRateLimit, authController.refresh);
 router.post("/logout", authMiddleware, authController.logout);
 router.get("/me", authMiddleware, authController.me);
+router.post("/change-password", authMiddleware, authController.changePassword);
+router.post("/forgot-password", authRateLimit, authController.forgotPassword);
+router.post("/reset-password", authRateLimit, authController.resetPassword);
 // Public self-registration is disabled. Account creation is admin-only via
 // /api/v1/users. Keep a hard stop here so old clients fail safely.
 router.post("/register", (req, res) => {

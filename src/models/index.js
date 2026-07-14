@@ -76,12 +76,34 @@ const CustomerCreditTransaction = require("./customerCreditTransaction.model");
 const BarcodeInventoryCode = require("./barcodeInventoryCode.model");
 const BarcodeItemCode = require("./barcodeItemCode.model");
 const BarcodeSequence = require("./barcodeSequence.model");
+const TechnicalAccountSession = require("./technicalAccountSession.model");
+const PasswordResetToken = require("./passwordResetToken.model");
+const EmailChangeToken = require("./emailChangeToken.model");
+const EmployeeCodeHistory = require("./employeeCodeHistory.model");
 
 // Define Associations
 
 // Company relationships
 Company.hasMany(User, { foreignKey: "companyId", as: "users" });
 User.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(User, { foreignKey: "branchId", as: "systemAccounts" });
+User.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+Employee.hasMany(User, { foreignKey: "defaultEmployeeId", as: "defaultForSystemAccounts" });
+User.belongsTo(Employee, { foreignKey: "defaultEmployeeId", as: "defaultEmployee" });
+User.hasMany(TechnicalAccountSession, { foreignKey: "userId", as: "technicalSessions" });
+TechnicalAccountSession.belongsTo(User, { foreignKey: "userId", as: "user" });
+Company.hasMany(TechnicalAccountSession, { foreignKey: "companyId", as: "technicalAccountSessions" });
+TechnicalAccountSession.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(TechnicalAccountSession, { foreignKey: "branchId", as: "technicalAccountSessions" });
+TechnicalAccountSession.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+User.hasMany(PasswordResetToken, { foreignKey: "userId", as: "passwordResetTokens" });
+PasswordResetToken.belongsTo(User, { foreignKey: "userId", as: "user" });
+User.hasMany(EmailChangeToken, { foreignKey: "userId", as: "emailChangeTokens" });
+EmailChangeToken.belongsTo(User, { foreignKey: "userId", as: "user" });
+Employee.hasMany(EmployeeCodeHistory, { foreignKey: "employeeId", as: "codeHistory" });
+EmployeeCodeHistory.belongsTo(Employee, { foreignKey: "employeeId", as: "employee" });
+Company.hasMany(EmployeeCodeHistory, { foreignKey: "companyId", as: "employeeCodeHistory" });
+EmployeeCodeHistory.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
 Company.hasMany(Role, { foreignKey: "companyId", as: "roles" });
 Role.belongsTo(Company, { foreignKey: "companyId", as: "company" });
@@ -533,5 +555,9 @@ module.exports = {
   CustomerCreditTransaction,
   BarcodeInventoryCode,
   BarcodeItemCode,
-  BarcodeSequence
+  BarcodeSequence,
+  TechnicalAccountSession,
+  PasswordResetToken,
+  EmailChangeToken,
+  EmployeeCodeHistory
 };
