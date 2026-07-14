@@ -22,10 +22,12 @@ const barcodeIdentityService = require("../services/barcode-identity.service");
 const reservationService = require("../services/reservation.service");
 const permissionService = require("../services/permission.service");
 const employeeAuthorizationService = require("../services/employee-authorization.service");
+const commandActorContext = require("../services/command-actor-context.service");
+const salesOperatorPolicy = require("../services/sales-operator-policy.service");
 const statementReconciliationService = require("../services/statement-reconciliation.service");
 const sourceAwareStatementService = require("../services/source-aware-statement.service");
 const logger = require("../utils/logger");
-const { ValidationError, NotFoundError, ConflictError, ForbiddenError } = require("../utils/errors");
+const { AppError, ValidationError, NotFoundError, ConflictError, ForbiddenError } = require("../utils/errors");
 const uploadMiddleware = require("../middleware/upload.middleware");
 const { moveUploadedFileSafe } = require("../utils/file-move");
 
@@ -121,6 +123,14 @@ function linkedRecordsError(req, code, linked) {
   err.errorCode = code || "HAS_LINKED_RECORDS";
   err.linked = linked;
   return err;
+}
+
+function assertOperatorBranchForCommand(req, branchId) {
+  if (req.salesOperatorMode !== "shared_employee_operator") return;
+  const operatorBranchId = req.operatorContext?.branchId || req.operatorSessionState?.session?.branchId || req.branchId;
+  if (branchId && operatorBranchId && String(operatorBranchId) !== String(branchId)) {
+    throw new AppError("Operator branch does not match the command branch.", 403, "OPERATOR_BRANCH_MISMATCH");
+  }
 }
 
 // Phase 31.4-Fix — customer-facing invoice search uses a deliberately small,
@@ -274,6 +284,21 @@ function setupCrud(resourceName, model, searchFields = ["name"]) {
 
   router.get(`/${resourceName}`, authMiddleware, guardFor(resourceName, "list"), controller.list);
   router.get(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "get"), controller.getById);
+  if (resourceName === "invoices") {
+    const blockInvoiceMutation = (req, res) => res.status(403).json({
+      success: false,
+      message: "Invoice lifecycle mutations must use the dedicated Sales/POS endpoints",
+      code: "GENERIC_INVOICE_MUTATION_FORBIDDEN",
+      errorCode: "GENERIC_INVOICE_MUTATION_FORBIDDEN"
+    });
+    router.post(`/${resourceName}`, authMiddleware, guardFor(resourceName, "create"), blockInvoiceMutation);
+    router.put(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "update"), blockInvoiceMutation);
+    router.patch(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "update"), blockInvoiceMutation);
+    router.post(`/${resourceName}/:id/deactivate`, authMiddleware, guardFor(resourceName, "update"), blockInvoiceMutation);
+    router.post(`/${resourceName}/:id/reactivate`, authMiddleware, guardFor(resourceName, "update"), blockInvoiceMutation);
+    router.delete(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "delete"), blockInvoiceMutation);
+    return controller;
+  }
   router.post(`/${resourceName}`, authMiddleware, guardFor(resourceName, "create"), controller.create);
   // Support both PUT (full) and PATCH (partial) — the generic update merges
   // only the fields present in the body, so both are safe.
@@ -287,11 +312,23 @@ function setupCrud(resourceName, model, searchFields = ["name"]) {
 }
 
 // ─── Custom POS Checkout Endpoint ───────────────────────────────────────────
-router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), async (req, res, next) => {
+router.post(
+  "/pos/checkout",
+  authMiddleware,
+  requirePermission("pos.sell"),
+  salesOperatorPolicy.requireSalesOperator("pos.checkout", {
+    resolveBranchId: (req) => (req.body && req.body.branchId) || req.headers["x-branch-id"] || req.branchId
+  }),
+  async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const body = req.body || {};
-    const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
+    const commandActor = commandActorContext.fromRequest(req, {
+      requiredPermission: "pos.sell",
+      requestedOperation: "pos.checkout",
+      authorizationResult: "allowed"
+    });
+    const actor = commandActor.employeeName || commandActor.technicalUserName || "System";
     const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
 
     // 1. Idempotency Check — Phase 21.3 central race-safe (unique company_id+scope+key).
@@ -431,8 +468,22 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
     if (discount > (subtotal + makingCharge + stoneValue)) {
       const hasDiscountApprove = req.user && (req.user.permissions && req.user.permissions.includes("pos.discount.approve") || req.user.isAdmin);
       if (!hasDiscountApprove) {
-        throw new ValidationError("قيمة الخصم تتجاوز إجمالي الفاتورة وتتطلب صلاحية اعتماد الخصم");
+        throw new AppError("قيمة الخصم تتجاوز إجمالي الفاتورة وتتطلب صلاحية اعتماد الخصم", 403, "POS_DISCOUNT_APPROVAL_REQUIRED");
       }
+      await salesOperatorPolicy.assertSalesOperatorPolicy(req, "pos.discount.override", { branchId, transaction: t });
+      await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
+        action: "pos.discount.override",
+        description: `POS discount override authorized at ${branchRecord.name}`,
+        place: branchRecord.name,
+        branch: branchRecord.name,
+        severity: "warning",
+        before: null,
+        after: JSON.stringify({ subtotal, makingCharge, stoneValue, discount, branchId })
+      }, {
+        requiredPermission: "pos.discount.approve",
+        requestedOperation: "pos.discount.override",
+        authorizationResult: "allowed"
+      }), { transaction: t });
     }
 
     // 6. Settings + totals via the shared sales service (single source of truth)
@@ -498,7 +549,8 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
       idempotencyKey: idempotencyKey || null,
       postingStatus: "posted", // immediate-post path (POS checkout)
       invoiceNumber, // customer-facing, company-scoped human number (≠ technical id)
-      postedAt: nowStr
+      postedAt: nowStr,
+      finalizedByEmployeeId: commandActor.employeeId || null
     }, { transaction: t });
 
     // 9. Create Invoice Items & Update Stock Status (Products & Assets)
@@ -602,7 +654,8 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
           amount: split.amount,
           reference: split.reference || "",
           date: body.date || nowStr.slice(0, 10),
-          notes: `دفع مجزأ للفاتورة ${invoiceNumber}`
+          notes: `دفع مجزأ للفاتورة ${invoiceNumber}`,
+          receivedByEmployeeId: commandActor.employeeId || null
         }, { transaction: t });
         paymentsCreated.push(payment.toJSON());
       }
@@ -618,7 +671,8 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
           amount: downPayment,
           reference: "",
           date: body.date || nowStr.slice(0, 10),
-          notes: `دفعة أولى للفاتورة ${invoiceNumber}`
+          notes: `دفعة أولى للفاتورة ${invoiceNumber}`,
+          receivedByEmployeeId: commandActor.employeeId || null
         }, { transaction: t });
         paymentsCreated.push(payment.toJSON());
       }
@@ -632,7 +686,8 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
         amount: paidAmount,
         reference: body.reference || "",
         date: body.date || nowStr.slice(0, 10),
-        notes: paymentMethod === "deposit" ? `عربون للفاتورة ${invoiceNumber}` : `سداد كامل للفاتورة ${invoiceNumber}`
+        notes: paymentMethod === "deposit" ? `عربون للفاتورة ${invoiceNumber}` : `سداد كامل للفاتورة ${invoiceNumber}`,
+        receivedByEmployeeId: commandActor.employeeId || null
       }, { transaction: t });
       paymentsCreated.push(payment.toJSON());
     }
@@ -717,17 +772,17 @@ router.post("/pos/checkout", authMiddleware, requirePermission("pos.sell"), asyn
 
     // 14. Record Audit Log — transaction MUST be the 3rd arg (opts), not in the
     // data object, so the audit row is part of `t` and rolls back if checkout fails.
-    await auditService.record(req.companyId, {
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
       action: "pos.checkout",
       description: `تم إتمام عملية بيع فاتورة رقم ${invoiceNumber} بمبلغ ${total} بفرع ${branchRecord.name}`,
       user: actor,
-      userId: req.user ? req.user.id : null,
       place: branchRecord.name,
+      branch: branchRecord.name,
       sourceDocument: "invoice",
       severity: "info",
       before: null,
       after: JSON.stringify({ invoiceId, total, paymentMethod })
-    }, { transaction: t });
+    }, commandActor), { transaction: t });
 
     // Recalculate customer net purchases
     const { recalculateCustomerNetPurchases } = require("../services/customer-purchases.service");
@@ -4623,6 +4678,99 @@ router.get("/invoices/search-print", authMiddleware, requirePermission("sales.vi
 });
 // End Phase 31.4-Fix — Unified Invoices Search & Print.
 
+router.post(
+  "/invoices/:id/print-events",
+  authMiddleware,
+  requirePermission("sales.print"),
+  salesOperatorPolicy.requireSalesOperator("sales.official_print", {
+    resolveBranchId: (req) => req.headers["x-branch-id"] || req.branchId
+  }),
+  async (req, res, next) => {
+    const t = await models.sequelize.transaction();
+    try {
+      const body = req.body || {};
+      const requestedType = String(body.type || "").trim();
+      if (!["official", "reprint"].includes(requestedType)) {
+        throw new ValidationError("نوع حدث الطباعة غير صالح", { type: ["Must be official or reprint"] });
+      }
+      if (requestedType === "reprint") {
+        const reason = String(body.reason || "").trim();
+        if (!reason) throw new AppError("Reprint reason is required.", 422, "REPRINT_REASON_REQUIRED");
+        await salesOperatorPolicy.assertSalesOperatorPolicy(req, "sales.reprint", { branchId: req.branchId, transaction: t });
+      }
+
+      const invoice = await models.Invoice.findOne({
+        where: { id: req.params.id, companyId: req.companyId },
+        lock: true,
+        transaction: t
+      });
+      if (!invoice) throw new NotFoundError("الفاتورة غير موجودة");
+      if (invoice.postingStatus !== "posted") {
+        throw new AppError("Invoice must be finalized before official print.", 409, "INVOICE_NOT_FINALIZED");
+      }
+      assertOperatorBranchForCommand(req, invoice.branchId);
+
+      const commandActor = commandActorContext.fromRequest(req, {
+        requiredPermission: "sales.print",
+        requestedOperation: requestedType === "reprint" ? "sales.reprint" : "sales.official_print",
+        authorizationResult: "allowed"
+      });
+      const official = await models.InvoicePrintEvent.findOne({
+        where: { invoiceId: invoice.id, eventType: "official_print_authorized" },
+        transaction: t
+      });
+      if (requestedType === "official" && official) {
+        throw new AppError("Official print has already been authorized for this invoice.", 409, "OFFICIAL_PRINT_ALREADY_AUTHORIZED");
+      }
+      if (requestedType === "reprint" && !official) {
+        throw new AppError("Official print must be authorized before reprint.", 409, "OFFICIAL_PRINT_REQUIRED");
+      }
+
+      let copyNumber = 1;
+      if (requestedType === "reprint") {
+        const latest = await models.InvoicePrintEvent.findOne({
+          where: { invoiceId: invoice.id },
+          order: [["copyNumber", "DESC"]],
+          lock: true,
+          transaction: t
+        });
+        copyNumber = Number(latest?.copyNumber || 1) + 1;
+      }
+      const eventType = requestedType === "official" ? "official_print_authorized" : "reprint_authorized";
+      const event = await models.InvoicePrintEvent.create({
+        id: `IPE-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        companyId: req.companyId,
+        branchId: invoice.branchId || req.branchId,
+        invoiceId: invoice.id,
+        technicalUserId: req.user.id,
+        employeeId: commandActor.employeeId || null,
+        operatorSessionId: commandActor.operatorSessionId || null,
+        eventType,
+        copyNumber,
+        reason: requestedType === "reprint" ? String(body.reason || "").trim() : null
+      }, { transaction: t });
+
+      await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
+        action: `invoice.${eventType}`,
+        description: `Invoice ${invoice.invoiceNumber || invoice.id} ${eventType} copy ${copyNumber}`,
+        place: invoice.branch || req.branchId,
+        branch: invoice.branch || req.branchId,
+        sourceDocument: invoice.id,
+        severity: "info",
+        before: null,
+        after: JSON.stringify({ invoiceId: invoice.id, eventType, copyNumber })
+      }, commandActor), { transaction: t });
+
+      await t.commit();
+      const out = event.toJSON();
+      return res.status(201).json({ success: true, ...out, data: out });
+    } catch (error) {
+      await t.rollback();
+      next(error);
+    }
+  }
+);
+
 // Search fields must be text columns — `status` is an ENUM and ILIKE cannot be
 // applied to it (Postgres: "operator does not exist: enum_invoices_status ~~*"),
 // which silently broke invoice search. Search by id / invoiceNumber / customer.
@@ -5149,7 +5297,7 @@ router.get("/inventory/products", authMiddleware, requirePermission("inventory.v
   }
 });
 
-router.get("/pos/products", authMiddleware, requirePermission("pos.sell"), async (req, res, next) => {
+router.get("/pos/products", authMiddleware, requireAnyPermission(["pos.view", "pos.sell"]), async (req, res, next) => {
   try {
     req.query.pageSize = req.query.pageSize || 10000;
     req.query.filters = JSON.stringify({ isActive: true });
@@ -10757,9 +10905,21 @@ router.post("/pricing/calculate", authMiddleware, async (req, res, next) => {
 });
 
 // Create a sales invoice (draft/post). Idempotent on Idempotency-Key header.
-router.post("/sales/invoices/draft", authMiddleware, requirePermission("sales.create"), async (req, res, next) => {
+router.post(
+  "/sales/invoices/draft",
+  authMiddleware,
+  requirePermission("sales.create"),
+  salesOperatorPolicy.requireSalesOperator("sales.legacy_immediate_post", {
+    resolveBranchId: (req) => (req.body && req.body.branchId) || req.headers["x-branch-id"] || req.branchId
+  }),
+  async (req, res, next) => {
   try {
     const body = req.body || {};
+    const commandActor = commandActorContext.fromRequest(req, {
+      requiredPermission: "sales.create",
+      requestedOperation: "sales.legacy_immediate_post",
+      authorizationResult: "allowed"
+    });
     const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
 
     // Return the existing invoice if this key was already used (idempotency).
@@ -10819,7 +10979,8 @@ router.post("/sales/invoices/draft", authMiddleware, requirePermission("sales.cr
       idempotencyKey: idempotencyKey || null,
       postingStatus: "posted", // legacy misnamed immediate-post route (used by reservations)
       invoiceNumber: id,
-      postedAt: now
+      postedAt: now,
+      finalizedByEmployeeId: commandActor.employeeId || null
     });
 
     // Phase 16B — resolve COGS book cost SERVER-SIDE (Asset.cost / Product
@@ -10865,7 +11026,7 @@ router.post("/sales/invoices/draft", authMiddleware, requirePermission("sales.cr
     }
 
     // ── Auto-post the double-entry journal (Financial Posting Engine) ──
-    const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
+    const actor = commandActor.employeeName || commandActor.technicalUserName || "System";
     const inv = invoice.toJSON();
     inv.downPayment = Number(body.downPayment) || 0;
     let journalEntry = null;
@@ -11003,11 +11164,23 @@ async function resolveDraftBranch(body, req, transaction) {
 }
 
 // 1) Create a DRAFT invoice (no side effects).
-router.post("/sales/invoices/drafts", authMiddleware, requirePermission("sales.create"), async (req, res, next) => {
+router.post(
+  "/sales/invoices/drafts",
+  authMiddleware,
+  requirePermission("sales.create"),
+  salesOperatorPolicy.requireSalesOperator("sales.draft.create", {
+    resolveBranchId: (req) => (req.body && req.body.branchId) || req.headers["x-branch-id"] || req.branchId
+  }),
+  async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const body = req.body || {};
-    const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
+    const commandActor = commandActorContext.fromRequest(req, {
+      requiredPermission: "sales.create",
+      requestedOperation: "sales.draft.create",
+      authorizationResult: "allowed"
+    });
+    const actor = commandActor.employeeName || commandActor.technicalUserName || "System";
     const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
 
     // Idempotency: same key returns the existing draft instead of a new one.
@@ -11070,7 +11243,8 @@ router.post("/sales/invoices/drafts", authMiddleware, requirePermission("sales.c
       branch: branch.name,
       branchId: branch.id,
       notes: body.notes || "",
-      idempotencyKey: idempotencyKey || null
+      idempotencyKey: idempotencyKey || null,
+      createdByEmployeeId: commandActor.employeeId || null
       // NOTE: deliberately NO postedAt — a draft is not posted.
     }, { transaction: t });
 
@@ -11078,18 +11252,17 @@ router.post("/sales/invoices/drafts", authMiddleware, requirePermission("sales.c
       await models.InvoiceItem.create({ invoiceId: id, ...r }, { transaction: t });
     }
 
-    await auditService.record(req.companyId, {
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
       action: "invoice.draft.create",
       description: `Draft invoice ${id} created for ${customer.name || customer.id}`,
       user: actor,
-      userId: req.user ? req.user.id : null,
       place: branch.name,
       branch: branch.name,
       sourceDocument: id,
       severity: "info",
       before: null,
       after: JSON.stringify({ id, postingStatus: "draft", total: invoice.total, items: itemRows.length })
-    }, { transaction: t });
+    }, commandActor), { transaction: t });
 
     await t.commit();
     emitEntityChanged(req.companyId, { entity: "Invoice", action: "draft-create", id, related: { customerId: customer.id } });
@@ -11103,10 +11276,22 @@ router.post("/sales/invoices/drafts", authMiddleware, requirePermission("sales.c
 });
 
 // 2) Edit a DRAFT invoice (draft only; no side effects).
-router.patch("/sales/invoices/:id", authMiddleware, requirePermission("sales.create"), async (req, res, next) => {
+router.patch(
+  "/sales/invoices/:id",
+  authMiddleware,
+  requirePermission("sales.create"),
+  salesOperatorPolicy.requireSalesOperator("sales.draft.update", {
+    resolveBranchId: (req) => (req.body && req.body.branchId) || req.headers["x-branch-id"] || req.branchId
+  }),
+  async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const body = req.body || {};
+    const commandActor = commandActorContext.fromRequest(req, {
+      requiredPermission: "sales.create",
+      requestedOperation: "sales.draft.update",
+      authorizationResult: "allowed"
+    });
     // Never allow lifecycle fields to be set through the edit route.
     if (DRAFT_PROTECTED_FIELDS.some((f) => Object.prototype.hasOwnProperty.call(body, f))) {
       await t.rollback();
@@ -11121,7 +11306,7 @@ router.patch("/sales/invoices/:id", authMiddleware, requirePermission("sales.cre
     }
 
     const before = invoice.toJSON();
-    const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
+    const actor = commandActor.employeeName || commandActor.technicalUserName || "System";
 
     // Allowed scalar fields.
     const updates = {};
@@ -11150,18 +11335,17 @@ router.patch("/sales/invoices/:id", authMiddleware, requirePermission("sales.cre
       }
     }
 
-    await auditService.record(req.companyId, {
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
       action: "invoice.draft.update",
       description: `Draft invoice ${invoice.id} updated`,
       user: actor,
-      userId: req.user ? req.user.id : null,
       place: invoice.branch,
       branch: invoice.branch,
       sourceDocument: invoice.id,
       severity: "info",
       before: JSON.stringify({ total: before.total, items: "(unchanged unless replaced)" }),
       after: JSON.stringify({ total: invoice.total, reason: body.reason || null, itemsReplaced: itemRows ? itemRows.length : false })
-    }, { transaction: t });
+    }, commandActor), { transaction: t });
 
     await t.commit();
     emitEntityChanged(req.companyId, { entity: "Invoice", action: "draft-update", id: invoice.id });
@@ -11175,10 +11359,22 @@ router.patch("/sales/invoices/:id", authMiddleware, requirePermission("sales.cre
 });
 
 // 3) Cancel a DRAFT invoice (draft only; no reversal needed — drafts have no effects).
-router.post("/sales/invoices/:id/cancel", authMiddleware, requirePermission("sales.create"), async (req, res, next) => {
+router.post(
+  "/sales/invoices/:id/cancel",
+  authMiddleware,
+  requirePermission("sales.create"),
+  salesOperatorPolicy.requireSalesOperator("sales.draft.cancel", {
+    resolveBranchId: (req) => (req.body && req.body.branchId) || req.headers["x-branch-id"] || req.branchId
+  }),
+  async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const body = req.body || {};
+    const commandActor = commandActorContext.fromRequest(req, {
+      requiredPermission: "sales.create",
+      requestedOperation: "sales.draft.cancel",
+      authorizationResult: "allowed"
+    });
     const invoice = await models.Invoice.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t });
     if (!invoice) { await t.rollback(); return res.status(404).json({ success: false, message: "الفاتورة غير موجودة" }); }
 
@@ -11199,22 +11395,21 @@ router.post("/sales/invoices/:id/cancel", authMiddleware, requirePermission("sal
       return res.status(422).json({ success: false, message: "سبب الإلغاء مطلوب" });
     }
 
-    const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
+    const actor = commandActor.employeeName || commandActor.technicalUserName || "System";
     const now = new Date().toISOString().slice(0, 16).replace("T", " ");
     await invoice.update({ postingStatus: "cancelled", cancelledAt: now, cancelReason: reason }, { transaction: t });
 
-    await auditService.record(req.companyId, {
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
       action: "invoice.draft.cancel",
       description: `Draft invoice ${invoice.id} cancelled: ${reason}`,
       user: actor,
-      userId: req.user ? req.user.id : null,
       place: invoice.branch,
       branch: invoice.branch,
       sourceDocument: invoice.id,
       severity: "info",
       before: JSON.stringify({ postingStatus: "draft" }),
       after: JSON.stringify({ postingStatus: "cancelled", cancelledAt: now, cancelReason: reason })
-    }, { transaction: t });
+    }, commandActor), { transaction: t });
 
     await t.commit();
     emitEntityChanged(req.companyId, { entity: "Invoice", action: "draft-cancel", id: invoice.id });
@@ -11233,11 +11428,23 @@ router.post("/sales/invoices/:id/cancel", authMiddleware, requirePermission("sal
 // NOTE: the draft keeps its DRAFT-* id when posted (no PK change → no broken
 // InvoiceItem FK). Assigning a final sequential invoice number at post time is a
 // deliberate FOLLOW-UP (see docs) — not done here to avoid PK/relation risk.
-router.post("/sales/invoices/:id/post", authMiddleware, requirePermission("sales.create"), async (req, res, next) => {
+router.post(
+  "/sales/invoices/:id/post",
+  authMiddleware,
+  requirePermission("sales.create"),
+  salesOperatorPolicy.requireSalesOperator("sales.post", {
+    resolveBranchId: (req) => req.headers["x-branch-id"] || req.branchId
+  }),
+  async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const body = req.body || {};
-    const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
+    const commandActor = commandActorContext.fromRequest(req, {
+      requiredPermission: "sales.create",
+      requestedOperation: "sales.post",
+      authorizationResult: "allowed"
+    });
+    const actor = commandActor.employeeName || commandActor.technicalUserName || "System";
     const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
 
     // Lock the invoice row so concurrent posts serialize.
@@ -11267,6 +11474,7 @@ router.post("/sales/invoices/:id/post", authMiddleware, requirePermission("sales
     const customer = await models.Customer.findOne({ where: { id: invoice.customerId, companyId: req.companyId }, transaction: t });
     if (!customer) throw new NotFoundError("العميل غير موجود");
     const branchId = invoice.branchId;
+    assertOperatorBranchForCommand(req, branchId);
     const branchRecord = await models.Branch.findOne({ where: { id: branchId, companyId: req.companyId, isActive: true }, transaction: t });
     if (!branchRecord) throw new ValidationError("الفرع المحدد غير موجود أو غير نشط");
 
@@ -11341,7 +11549,8 @@ router.post("/sales/invoices/:id/post", authMiddleware, requirePermission("sales
       postingStatus: "posted",
       invoiceNumber: finalInvoiceNumber,
       postedAt: nowStr,
-      idempotencyKey: idempotencyKey || invoice.idempotencyKey
+      idempotencyKey: idempotencyKey || invoice.idempotencyKey,
+      finalizedByEmployeeId: commandActor.employeeId || null
     }, { transaction: t });
 
     // Inventory effects (InvoiceItems already exist — do NOT recreate them).
@@ -11379,7 +11588,8 @@ router.post("/sales/invoices/:id/post", authMiddleware, requirePermission("sales
         id: `PAY-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         companyId: req.companyId, branchId, invoiceId: invoice.id,
         paymentMethod: method, amount, reference: body.reference || "",
-        date: invoice.date || nowStr.slice(0, 10), notes
+        date: invoice.date || nowStr.slice(0, 10), notes,
+        receivedByEmployeeId: commandActor.employeeId || null
       }, { transaction: t });
       paymentsCreated.push(p.toJSON());
     };
@@ -11466,15 +11676,15 @@ router.post("/sales/invoices/:id/post", authMiddleware, requirePermission("sales
       );
     }
 
-    await auditService.record(req.companyId, {
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
       action: "invoice.draft.post",
       description: `Draft invoice ${invoice.id} posted (total ${totals.total})`,
-      user: actor, userId: req.user ? req.user.id : null,
+      user: actor,
       place: branchRecord.name, branch: branchRecord.name, sourceDocument: invoice.id,
       severity: "info",
       before: JSON.stringify({ postingStatus: "draft" }),
       after: JSON.stringify({ postingStatus: "posted", postedAt: nowStr, total: totals.total, paymentMethod, idempotencyKey: idempotencyKey || null })
-    }, { transaction: t });
+    }, commandActor), { transaction: t });
 
     const { recalculateCustomerNetPurchases } = require("../services/customer-purchases.service");
     await recalculateCustomerNetPurchases(models, req.companyId, customer.id, { transaction: t });

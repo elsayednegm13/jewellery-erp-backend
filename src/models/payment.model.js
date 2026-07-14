@@ -38,6 +38,11 @@ const Payment = sequelize.define("Payment", {
     type: DataTypes.STRING,
     allowNull: false
   },
+  receivedByEmployeeId: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    field: "received_by_employee_id"
+  },
   notes: {
     type: DataTypes.TEXT
   }

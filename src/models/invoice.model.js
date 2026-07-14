@@ -165,6 +165,16 @@ const Invoice = sequelize.define("Invoice", {
   cancelReason: {
     type: DataTypes.STRING,
     field: "cancel_reason"
+  },
+  createdByEmployeeId: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    field: "created_by_employee_id"
+  },
+  finalizedByEmployeeId: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    field: "finalized_by_employee_id"
   }
 }, {
   tableName: "invoices",

@@ -29,6 +29,7 @@ const PurchaseOrder = require("./purchaseOrder.model");
 const PurchaseOrderItem = require("./purchaseOrderItem.model");
 const Invoice = require("./invoice.model");
 const InvoiceItem = require("./invoiceItem.model");
+const InvoicePrintEvent = require("./invoicePrintEvent.model");
 const Reservation = require("./reservation.model");
 const ReservationItem = require("./reservationItem.model");
 const ReservationPayment = require("./reservationPayment.model");
@@ -184,6 +185,26 @@ Payment.belongsTo(Branch, { foreignKey: "branchId", as: "branchDetail" });
 
 Invoice.hasMany(Payment, { foreignKey: "invoiceId", as: "payments" });
 Payment.belongsTo(Invoice, { foreignKey: "invoiceId", as: "invoice" });
+
+Employee.hasMany(Invoice, { foreignKey: "createdByEmployeeId", as: "createdInvoices" });
+Invoice.belongsTo(Employee, { foreignKey: "createdByEmployeeId", as: "createdByEmployee" });
+Employee.hasMany(Invoice, { foreignKey: "finalizedByEmployeeId", as: "finalizedInvoices" });
+Invoice.belongsTo(Employee, { foreignKey: "finalizedByEmployeeId", as: "finalizedByEmployee" });
+Employee.hasMany(Payment, { foreignKey: "receivedByEmployeeId", as: "receivedPayments" });
+Payment.belongsTo(Employee, { foreignKey: "receivedByEmployeeId", as: "receivedByEmployee" });
+
+Company.hasMany(InvoicePrintEvent, { foreignKey: "companyId", as: "invoicePrintEvents" });
+InvoicePrintEvent.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(InvoicePrintEvent, { foreignKey: "branchId", as: "invoicePrintEvents" });
+InvoicePrintEvent.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+Invoice.hasMany(InvoicePrintEvent, { foreignKey: "invoiceId", as: "printEvents" });
+InvoicePrintEvent.belongsTo(Invoice, { foreignKey: "invoiceId", as: "invoice" });
+User.hasMany(InvoicePrintEvent, { foreignKey: "technicalUserId", as: "invoicePrintEvents" });
+InvoicePrintEvent.belongsTo(User, { foreignKey: "technicalUserId", as: "technicalUser" });
+Employee.hasMany(InvoicePrintEvent, { foreignKey: "employeeId", as: "invoicePrintEvents" });
+InvoicePrintEvent.belongsTo(Employee, { foreignKey: "employeeId", as: "employee" });
+EmployeeOperationalSession.hasMany(InvoicePrintEvent, { foreignKey: "operatorSessionId", as: "invoicePrintEvents" });
+InvoicePrintEvent.belongsTo(EmployeeOperationalSession, { foreignKey: "operatorSessionId", as: "operatorSession" });
 
 
 Company.hasMany(GiftVoucher, { foreignKey: "companyId", as: "giftVouchers" });
@@ -466,6 +487,7 @@ module.exports = {
   PurchaseOrderItem,
   Invoice,
   InvoiceItem,
+  InvoicePrintEvent,
   Reservation,
   ReservationItem,
   ReservationPayment,

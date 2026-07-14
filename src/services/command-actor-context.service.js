@@ -8,6 +8,7 @@ function fromRequest(req, extras = {}) {
     employeeId: operator?.employeeId || null,
     employeeCode: operator?.employeeCode || null,
     employeeName: operator?.employeeName || null,
+    branchId: operator?.branchId || req.branchId || null,
     operatorSessionId: operator?.operatorSessionId || null,
     deviceSessionId: operator?.deviceSessionId || null,
     verificationLevel: operator?.verificationLevel || null,

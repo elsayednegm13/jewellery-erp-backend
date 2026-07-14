@@ -4,6 +4,7 @@ const PERMISSIONS = [
   "dashboard.view",
   "customers.view", "customers.create", "customers.update", "customers.delete", "customers.export",
   "sales.view", "sales.create", "sales.approve", "sales.export", "sales.print",
+  "pos.view", "pos.sell", "pos.discount.approve",
   "inventory.view", "inventory.create", "inventory.update", "inventory.delete", "inventory.adjust", "inventory.export", "inventory.print",
   "suppliers.view", "suppliers.create", "suppliers.update", "suppliers.delete", "suppliers.export",
   "accounting.view", "accounting.post", "accounting.export", "treasury.view", "treasury.update",
@@ -41,7 +42,7 @@ const ROLE_DEFS = {
     "reservations.statement_view", "reservations.configure_account"
   ],
   sales: [
-    "dashboard.view", "sales.view", "sales.create", "sales.print", "customers.view", "customers.create",
+    "dashboard.view", "sales.view", "sales.create", "sales.print", "pos.view", "pos.sell", "customers.view", "customers.create",
     "customers.update", "inventory.view", "notifications.view", "reservations.view", "reservations.view_branch",
     "reservations.create", "reservations.record_payment", "reservations.view_payments", "reservations.view_receipts",
     "reservations.complete_sale", "reservations.cancel", "reservations.amend_items", "reservations.reprice_items",

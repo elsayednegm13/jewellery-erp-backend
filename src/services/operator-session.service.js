@@ -83,6 +83,7 @@ function contextFromSession(session, req, extras = {}) {
     employeeId: session.employeeId,
     employeeCode: session.employeeCodeSnapshot,
     employeeName: session.employeeNameSnapshot,
+    branchId: session.branchId,
     operatorSessionId: session.id,
     deviceSessionId: session.deviceSessionId,
     verificationLevel: Number(session.verificationLevel || 1),
