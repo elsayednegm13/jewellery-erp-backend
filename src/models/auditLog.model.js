@@ -27,6 +27,58 @@ const AuditLog = sequelize.define("AuditLog", {
     type: DataTypes.STRING,
     field: "user_id"
   },
+  technicalUserId: {
+    type: DataTypes.STRING,
+    field: "technical_user_id"
+  },
+  employeeId: {
+    type: DataTypes.STRING,
+    field: "employee_id"
+  },
+  employeeCodeSnapshot: {
+    type: DataTypes.STRING,
+    field: "employee_code_snapshot"
+  },
+  employeeNameSnapshot: {
+    type: DataTypes.STRING,
+    field: "employee_name_snapshot"
+  },
+  operatorSessionId: {
+    type: DataTypes.STRING,
+    field: "operator_session_id"
+  },
+  deviceSessionId: {
+    type: DataTypes.STRING,
+    field: "device_session_id"
+  },
+  verificationLevel: {
+    type: DataTypes.INTEGER,
+    field: "verification_level"
+  },
+  level2VerifiedAt: {
+    type: DataTypes.DATE,
+    field: "level_2_verified_at"
+  },
+  requiredPermission: {
+    type: DataTypes.STRING,
+    field: "required_permission"
+  },
+  requestedOperation: {
+    type: DataTypes.STRING,
+    field: "requested_operation"
+  },
+  authorizationResult: {
+    type: DataTypes.STRING,
+    field: "authorization_result"
+  },
+  authorizationFailureCode: {
+    type: DataTypes.STRING,
+    field: "authorization_failure_code"
+  },
+  operatorReason: {
+    type: DataTypes.STRING,
+    field: "operator_reason"
+  },
   place: {
     type: DataTypes.STRING,
     allowNull: false
@@ -66,6 +118,12 @@ const AuditLog = sequelize.define("AuditLog", {
   prevHash: {
     type: DataTypes.STRING,
     field: "prev_hash"
+  },
+  hashVersion: {
+    type: DataTypes.STRING,
+    allowNull: false,
+    defaultValue: "v2",
+    field: "hash_version"
   }
 }, {
   tableName: "audit_logs",

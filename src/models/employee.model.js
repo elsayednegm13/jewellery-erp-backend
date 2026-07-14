@@ -25,6 +25,12 @@ const Employee = sequelize.define("Employee", {
     allowNull: true,
     field: "employee_code_normalized"
   },
+  authorizationVersion: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    defaultValue: 1,
+    field: "authorization_version"
+  },
   role: {
     type: DataTypes.STRING,
     allowNull: false

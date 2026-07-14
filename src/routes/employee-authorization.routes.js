@@ -3,6 +3,7 @@ const { Op } = require("sequelize");
 const models = require("../models");
 const { authMiddleware, requirePermission } = require("../middleware/auth.middleware");
 const employeeAuth = require("../services/employee-authorization.service");
+const operatorSessionService = require("../services/operator-session.service");
 const { ValidationError, NotFoundError } = require("../utils/errors");
 
 const router = express.Router();
@@ -69,29 +70,66 @@ router.post("/operator/verify", authMiddleware, async (req, res, next) => {
     if (!body.employeeCode || !body.pin || !body.branchId) {
       throw new ValidationError("employeeCode, pin and branchId are required.");
     }
-    const result = await employeeAuth.verifyEmployeeCredential({
-      companyId: req.companyId,
-      branchId: String(body.branchId),
-      user: req.user,
-      employeeCode: body.employeeCode,
-      pin: body.pin,
-      requestedLevel: Number(body.requestedLevel || 1),
-      requestedPermission: body.requestedPermission || null,
-      requestedOperation: body.requestedOperation || null,
-      ipAddress: req.ip || req.connection?.remoteAddress || null,
-      userAgent: req.headers["user-agent"] || null
-    });
+    const result = await operatorSessionService.verifyOperator({ req, body });
     return res.status(200).json({
       success: true,
       data: {
         employee: employeeSafe(result.employee),
         verification: {
-          level: Number(body.requestedLevel || 1),
-          verifiedAt: result.verifiedAt,
-          expiresAt: result.expiresAt,
-          verificationAttemptId: result.attempt.id
+          level: result.verification.level,
+          verifiedAt: result.verification.verifiedAt,
+          expiresAt: result.verification.expiresAt,
+          absoluteExpiresAt: result.verification.absoluteExpiresAt,
+          verificationAttemptId: result.verification.verificationAttemptId
         },
+        operatorSession: operatorSessionService.sessionSafe(result.session),
         authorization: result.authorization
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/operator/current", authMiddleware, async (req, res, next) => {
+  try {
+    const result = await operatorSessionService.currentFromRequest(req, { touch: true });
+    return res.status(200).json({
+      success: true,
+      data: {
+        operatorSession: operatorSessionService.sessionSafe(result.session, result.active ? "active" : "inactive", result.reason),
+        active: result.active,
+        reason: result.reason
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/operator/authorize-action", authMiddleware, async (req, res, next) => {
+  try {
+    const result = await operatorSessionService.authorizeAction(req, req.body || {});
+    return res.status(200).json({
+      success: true,
+      data: {
+        operatorSession: operatorSessionService.sessionSafe(result.session),
+        employee: employeeSafe(result.employee),
+        verificationAttemptId: result.verificationAttemptId
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/operator/lock", authMiddleware, async (req, res, next) => {
+  try {
+    const session = await operatorSessionService.lockCurrent(req, req.body?.reason || "manual_lock");
+    return res.status(200).json({
+      success: true,
+      data: {
+        operatorSession: operatorSessionService.sessionSafe(session, "locked", "OPERATOR_SESSION_LOCKED")
       }
     });
   } catch (error) {

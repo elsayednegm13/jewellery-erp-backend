@@ -10,8 +10,29 @@ const logger = require("../utils/logger");
  * breaks the chain from that point onward, which verifyChain() detects.
  */
 
-// Deterministic serialization of the fields that make a log meaningful.
-function canonical(row) {
+function stableValue(value) {
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      try {
+        return stableValue(JSON.parse(trimmed));
+      } catch {
+        return value;
+      }
+    }
+    return value;
+  }
+  if (Array.isArray(value)) return `[${value.map(stableValue).join(",")}]`;
+  if (typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${key}:${stableValue(value[key])}`).join(",")}}`;
+  }
+  return String(value);
+}
+
+// Deterministic serialization of the legacy fields that make a log meaningful.
+function canonicalV1(row) {
   return [
     row.id,
     row.companyId,
@@ -28,6 +49,30 @@ function canonical(row) {
   ].join("|");
 }
 
+function canonicalV2(row) {
+  return [
+    canonicalV1(row),
+    row.technicalUserId || "",
+    row.employeeId || "",
+    row.employeeCodeSnapshot || "",
+    row.employeeNameSnapshot || "",
+    row.operatorSessionId || "",
+    row.deviceSessionId || "",
+    row.verificationLevel || "",
+    row.level2VerifiedAt ? new Date(row.level2VerifiedAt).toISOString() : "",
+    row.requiredPermission || "",
+    row.requestedOperation || "",
+    row.authorizationResult || "",
+    row.authorizationFailureCode || "",
+    row.operatorReason || "",
+    row.hashVersion || "v2"
+  ].map(stableValue).join("|");
+}
+
+function canonical(row) {
+  return (row.hashVersion || "v1") === "v2" ? canonicalV2(row) : canonicalV1(row);
+}
+
 function computeHash(prevHash, row) {
   return crypto.createHash("sha256").update(`${prevHash || ""}|${canonical(row)}`).digest("hex");
 }
@@ -35,6 +80,30 @@ function computeHash(prevHash, row) {
 const auditService = {
   computeHash,
   canonical,
+  canonicalV1,
+  canonicalV2,
+
+  attachDualAuditActor(data = {}, actorContext = {}) {
+    return {
+      ...data,
+      user: data.user || actorContext.technicalUserName || actorContext.employeeName || "System",
+      userId: data.userId || actorContext.technicalUserId || null,
+      technicalUserId: actorContext.technicalUserId || data.technicalUserId || data.userId || null,
+      employeeId: actorContext.employeeId || data.employeeId || null,
+      employeeCodeSnapshot: actorContext.employeeCode || data.employeeCodeSnapshot || null,
+      employeeNameSnapshot: actorContext.employeeName || data.employeeNameSnapshot || null,
+      operatorSessionId: actorContext.operatorSessionId || data.operatorSessionId || null,
+      deviceSessionId: actorContext.deviceSessionId || data.deviceSessionId || null,
+      verificationLevel: actorContext.verificationLevel || data.verificationLevel || null,
+      level2VerifiedAt: actorContext.level2VerifiedAt || data.level2VerifiedAt || null,
+      requiredPermission: actorContext.requiredPermission || data.requiredPermission || null,
+      requestedOperation: actorContext.requestedOperation || data.requestedOperation || null,
+      authorizationResult: actorContext.authorizationResult || data.authorizationResult || null,
+      authorizationFailureCode: actorContext.authorizationFailureCode || data.authorizationFailureCode || null,
+      operatorReason: actorContext.reason || data.operatorReason || null,
+      hashVersion: data.hashVersion || "v2"
+    };
+  },
 
   /**
    * Append a new audit entry, linking it to the chain head for its company.
@@ -62,7 +131,21 @@ const auditService = {
       device: data.device || null,
       correlationId: data.correlationId || null,
       sourceDocument: data.sourceDocument || null,
-      severity: data.severity || "info"
+      severity: data.severity || "info",
+      technicalUserId: data.technicalUserId || data.userId || null,
+      employeeId: data.employeeId || null,
+      employeeCodeSnapshot: data.employeeCodeSnapshot || null,
+      employeeNameSnapshot: data.employeeNameSnapshot || null,
+      operatorSessionId: data.operatorSessionId || null,
+      deviceSessionId: data.deviceSessionId || null,
+      verificationLevel: data.verificationLevel || null,
+      level2VerifiedAt: data.level2VerifiedAt || null,
+      requiredPermission: data.requiredPermission || null,
+      requestedOperation: data.requestedOperation || null,
+      authorizationResult: data.authorizationResult || null,
+      authorizationFailureCode: data.authorizationFailureCode || null,
+      operatorReason: data.operatorReason || null,
+      hashVersion: data.hashVersion || "v2"
     };
     row.prevHash = prevHash;
     row.hash = computeHash(prevHash, row);

@@ -4067,6 +4067,15 @@ async function updateEmployeeAuthoritative(req, res, next) {
     }
     const before = employee.toJSON();
     await employee.update(updates, { transaction: t });
+    const authorizationFields = ["employeeCode", "employeeCodeNormalized", "role", "systemRole", "branchId", "status"];
+    const authorizationChanged = authorizationFields.some((field) => String(before[field] ?? "") !== String(employee[field] ?? ""));
+    if (authorizationChanged) {
+      await employeeAuthorizationService.incrementEmployeeAuthorizationVersion({
+        companyId: req.companyId,
+        employeeId: employee.id,
+        transaction: t
+      });
+    }
     await auditService.record(req.companyId, {
       action: "employee.updated",
       description: `Employee ${employee.name} updated.`,

@@ -15,6 +15,7 @@ const EmployeeRoleAssignment = require("./employeeRoleAssignment.model");
 const EmployeePermissionGrant = require("./employeePermissionGrant.model");
 const EmployeePermissionDenial = require("./employeePermissionDenial.model");
 const EmployeeVerificationAttempt = require("./employeeVerificationAttempt.model");
+const EmployeeOperationalSession = require("./employeeOperationalSession.model");
 const Asset = require("./asset.model");
 const AssetEvent = require("./assetEvent.model");
 const AssetCertificate = require("./assetCertificate.model");
@@ -281,6 +282,20 @@ Branch.hasMany(EmployeeVerificationAttempt, { foreignKey: "branchId", as: "emplo
 Company.hasMany(EmployeeVerificationAttempt, { foreignKey: "companyId", as: "employeeVerificationAttempts" });
 EmployeeVerificationAttempt.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
+Employee.hasMany(EmployeeOperationalSession, { foreignKey: "employeeId", as: "operationalSessions" });
+EmployeeOperationalSession.belongsTo(Employee, { foreignKey: "employeeId", as: "employee" });
+EmployeeOperationalSession.belongsTo(User, { foreignKey: "sessionUserId", as: "sessionUser" });
+User.hasMany(EmployeeOperationalSession, { foreignKey: "sessionUserId", as: "employeeOperationalSessions" });
+EmployeeOperationalSession.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+Branch.hasMany(EmployeeOperationalSession, { foreignKey: "branchId", as: "employeeOperationalSessions" });
+Company.hasMany(EmployeeOperationalSession, { foreignKey: "companyId", as: "employeeOperationalSessions" });
+EmployeeOperationalSession.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+
+AuditLog.belongsTo(Employee, { foreignKey: "employeeId", as: "operatorEmployee" });
+Employee.hasMany(AuditLog, { foreignKey: "employeeId", as: "operatorAuditLogs" });
+AuditLog.belongsTo(EmployeeOperationalSession, { foreignKey: "operatorSessionId", as: "operatorSession" });
+EmployeeOperationalSession.hasMany(AuditLog, { foreignKey: "operatorSessionId", as: "auditLogs" });
+
 // Asset relationships
 Asset.hasMany(AssetEvent, { foreignKey: "assetId", as: "events" });
 AssetEvent.belongsTo(Asset, { foreignKey: "assetId", as: "asset" });
@@ -437,6 +452,7 @@ module.exports = {
   EmployeePermissionGrant,
   EmployeePermissionDenial,
   EmployeeVerificationAttempt,
+  EmployeeOperationalSession,
   Asset,
   AssetEvent,
   AssetCertificate,

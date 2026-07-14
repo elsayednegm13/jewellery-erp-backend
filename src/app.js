@@ -44,7 +44,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Company-ID", "X-Branch-ID", "X-Correlation-ID", "Idempotency-Key"]
+  allowedHeaders: ["Content-Type", "Authorization", "X-Company-ID", "X-Branch-ID", "X-Correlation-ID", "X-Device-Session-ID", "Idempotency-Key"]
 }));
 
 // Setup Morgan request logger mapped to Winston

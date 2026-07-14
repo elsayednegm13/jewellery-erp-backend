@@ -81,6 +81,25 @@ async function getEmployeeOrThrow(companyId, employeeId, transaction) {
   return employee;
 }
 
+function sortedUnique(values = []) {
+  return [...new Set(values.map(String))].sort();
+}
+
+function sameStringSet(a = [], b = []) {
+  const left = sortedUnique(a);
+  const right = sortedUnique(b);
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
+async function incrementEmployeeAuthorizationVersion({ companyId, employeeId, transaction }) {
+  const employee = await getEmployeeOrThrow(companyId, employeeId, transaction);
+  await employee.update({
+    authorizationVersion: Number(employee.authorizationVersion || 1) + 1
+  }, { transaction });
+  return employee.authorizationVersion;
+}
+
 async function setEmployeePin({ companyId, employeeId, pin, resetRequired = false, actorUser, transaction }) {
   await assertManagerPermission(actorUser, "employees.credentials.manage");
   validatePin(pin);
@@ -317,9 +336,9 @@ async function updateEmployeeAuthorization({ companyId, employeeId, actorUser, r
   await assertManagerPermission(actorUser, "employees.permissions.manage");
   const execute = async (t) => {
     const employee = await getEmployeeOrThrow(companyId, employeeId, t);
-    const roleIdSet = [...new Set(roleIds)];
-    const grantSet = [...new Set(grantPermissionIds)];
-    const denialSet = [...new Set(denialPermissionIds)];
+    const roleIdSet = sortedUnique(roleIds);
+    const grantSet = sortedUnique(grantPermissionIds);
+    const denialSet = sortedUnique(denialPermissionIds);
     const contradictions = grantSet.filter((id) => denialSet.includes(id));
     if (contradictions.length) throw new ValidationError("Permission cannot be both granted and denied.", { permissions: ["Grant and denial sets overlap."] });
     const roles = roleIdSet.length ? await models.Role.findAll({ where: { id: roleIdSet, companyId }, transaction: t }) : [];
@@ -327,6 +346,16 @@ async function updateEmployeeAuthorization({ companyId, employeeId, actorUser, r
     const permissionIds = [...new Set([...grantSet, ...denialSet])];
     const permissions = permissionIds.length ? await models.Permission.findAll({ where: { id: permissionIds }, transaction: t }) : [];
     if (permissions.length !== permissionIds.length) throw new ValidationError("One or more permissions are invalid.", { permissions: ["Invalid permission ID."] });
+    const [existingRoles, existingGrants, existingDenials] = await Promise.all([
+      models.EmployeeRoleAssignment.findAll({ where: { companyId, employeeId, active: true }, attributes: ["roleId"], transaction: t }),
+      models.EmployeePermissionGrant.findAll({ where: { companyId, employeeId, active: true }, attributes: ["permissionId"], transaction: t }),
+      models.EmployeePermissionDenial.findAll({ where: { companyId, employeeId, active: true }, attributes: ["permissionId"], transaction: t })
+    ]);
+    const changed =
+      !sameStringSet(existingRoles.map((row) => row.roleId), roleIdSet) ||
+      !sameStringSet(existingGrants.map((row) => row.permissionId), grantSet) ||
+      !sameStringSet(existingDenials.map((row) => row.permissionId), denialSet);
+
     await models.EmployeeRoleAssignment.destroy({ where: { companyId, employeeId }, transaction: t });
     await models.EmployeePermissionGrant.destroy({ where: { companyId, employeeId }, transaction: t });
     await models.EmployeePermissionDenial.destroy({ where: { companyId, employeeId }, transaction: t });
@@ -348,6 +377,9 @@ async function updateEmployeeAuthorization({ companyId, employeeId, actorUser, r
       sourceDocument: employee.id,
       after: JSON.stringify({ roleIds: roleIdSet, grantPermissionIds: grantSet, denialPermissionIds: denialSet })
     }, { transaction: t });
+    if (changed) {
+      await incrementEmployeeAuthorizationVersion({ companyId, employeeId, transaction: t });
+    }
     return resolveEmployeePermissions({ companyId, employeeId, transaction: t });
   };
   return transaction ? execute(transaction) : models.sequelize.transaction(execute);
@@ -357,9 +389,15 @@ async function updateEmployeeBranches({ companyId, employeeId, actorUser, branch
   await assertManagerPermission(actorUser, "employees.branches.manage");
   const execute = async (t) => {
     const employee = await getEmployeeOrThrow(companyId, employeeId, t);
-    const branchIdSet = [...new Set(branchIds)];
+    const branchIdSet = sortedUnique(branchIds);
     const branches = branchIdSet.length ? await models.Branch.findAll({ where: { id: branchIdSet, companyId, isActive: true }, transaction: t }) : [];
     if (branches.length !== branchIdSet.length) throw new ValidationError("One or more branches are invalid for this company.", { branchIds: ["Invalid branch ID."] });
+    const existingBranches = await models.EmployeeBranchAccess.findAll({
+      where: { companyId, employeeId, active: true },
+      attributes: ["branchId"],
+      transaction: t
+    });
+    const changed = !sameStringSet(existingBranches.map((row) => row.branchId), branchIdSet);
     await models.EmployeeBranchAccess.destroy({ where: { companyId, employeeId }, transaction: t });
     await models.EmployeeBranchAccess.bulkCreate(branchIdSet.map((branchId) => ({
       id: id("EBA"), companyId, employeeId, branchId, active: true, validFrom: new Date(), createdByUserId: actorUser?.id || null
@@ -373,6 +411,9 @@ async function updateEmployeeBranches({ companyId, employeeId, actorUser, branch
       sourceDocument: employee.id,
       after: JSON.stringify({ branchIds: branchIdSet })
     }, { transaction: t });
+    if (changed) {
+      await incrementEmployeeAuthorizationVersion({ companyId, employeeId, transaction: t });
+    }
     return models.EmployeeBranchAccess.findAll({ where: { companyId, employeeId }, include: [{ model: models.Branch, as: "branch" }], transaction: t });
   };
   return transaction ? execute(transaction) : models.sequelize.transaction(execute);
@@ -386,6 +427,7 @@ module.exports = {
   assertEmployeeBranchAccess,
   resolveEmployeePermissions,
   employeeHasPermission,
+  incrementEmployeeAuthorizationVersion,
   updateEmployeeAuthorization,
   updateEmployeeBranches,
   recordVerificationAttempt

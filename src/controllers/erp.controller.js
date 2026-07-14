@@ -679,6 +679,14 @@ class ErpController {
 
       await item.update(updates);
 
+      if (this.model.name === "Employee" && originalState.status !== item.status) {
+        const employeeAuthorizationService = require("../services/employee-authorization.service");
+        await employeeAuthorizationService.incrementEmployeeAuthorizationVersion({
+          companyId: req.companyId,
+          employeeId: item.id
+        });
+      }
+
       logger.info(`${this.model.name} deactivated: ${item.id}`);
       await this.logAudit(req, "DEACTIVATE", item.id, originalState, item.toJSON());
 
@@ -737,6 +745,14 @@ class ErpController {
       }
 
       await item.update(updates);
+
+      if (this.model.name === "Employee" && originalState.status !== item.status) {
+        const employeeAuthorizationService = require("../services/employee-authorization.service");
+        await employeeAuthorizationService.incrementEmployeeAuthorizationVersion({
+          companyId: req.companyId,
+          employeeId: item.id
+        });
+      }
 
       logger.info(`${this.model.name} reactivated: ${item.id}`);
       await this.logAudit(req, "REACTIVATE", item.id, originalState, item.toJSON());
