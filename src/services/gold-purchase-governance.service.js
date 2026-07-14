@@ -96,7 +96,8 @@ async function submit(kind, context, id, body, transaction) {
 }
 
 async function review(kind, context, id, body, decision, transaction) {
-  await assertAction(kind, context, decision === "approved" ? "approve" : "reject", { reviewer: true });
+  const action = decision === "approved" ? "approve" : "reject";
+  await assertAction(kind, context, action, { reviewer: true });
   const document = await draftService.findScoped(kind, context, id, transaction, { lock: true });
   const version = draftService.parseVersion(body.version);
   if (document.version !== version) fail("Gold Purchase document version conflict", "STATE_CONFLICT");
@@ -104,9 +105,15 @@ async function review(kind, context, id, body, decision, transaction) {
   const approval = await models.GoldPurchaseApprovalRequest.findOne({ where: { id: document.currentApprovalRequestId, companyId: context.companyId, documentId: id }, transaction, lock: transaction.LOCK.UPDATE });
   if (!approval || approval.approvalStatus !== "pending") fail("Approval request is not pending", "APPROVAL_NOT_PENDING");
   if (approval.version !== draftService.parseVersion(body.approvalVersion)) fail("Approval request version conflict", "STATE_CONFLICT");
-  if (context.user.id === document.createdBy || context.user.id === approval.requestedBy) fail("Creator or submitter cannot review their own Gold Purchase", "SELF_APPROVAL_FORBIDDEN");
+  const isSelfReview = context.user.id === document.createdBy || context.user.id === approval.requestedBy;
+  const selfReviewPermission = `gold_purchase.${kind}.self_approve`;
+  if (isSelfReview && !(await permissionService.userHasPermission(context.user, selfReviewPermission))) {
+    throw new AppError("Controlled self-review permission is required", 403, "SELF_APPROVAL_FORBIDDEN");
+  }
   const reason = String(body.reason || "").trim();
-  if (decision === "rejected" && !reason) throw new ValidationError("Rejection reason is required", { reason: ["required"] });
+  if ((decision === "rejected" || isSelfReview) && !reason) {
+    throw new ValidationError(isSelfReview ? "Self-review reason is required" : "Rejection reason is required", { reason: ["required"] });
+  }
   const currentSnapshot = snapshotFor(kind, document, approval.documentVersion, approval.requestedBy);
   if (hashSnapshot(currentSnapshot) !== approval.submittedSnapshotHash) fail("Submitted Gold Purchase snapshot does not match", "SNAPSHOT_MISMATCH");
 
@@ -117,7 +124,29 @@ async function review(kind, context, id, body, decision, transaction) {
   } else {
     await document.update({ status: "draft", validatedAt: null, validatedBy: null, submittedAt: null, submittedBy: null, currentApprovalRequestId: null, lastRejectedAt: now, lastRejectedBy: context.user.id, lastRejectionReason: reason, updatedBy: context.user.id, version: version + 1 }, { transaction });
   }
-  await audit(kind, context, document, decision, { status: "submitted", version, approvalRequestId: approval.id }, { status: decision === "approved" ? "approved" : "draft", version: version + 1, approvalRequestId: approval.id, reason: reason || null }, transaction);
+  await audit(kind, context, document, decision,
+    { status: "submitted", version, approvalRequestId: approval.id },
+    {
+      status: decision === "approved" ? "approved" : "draft",
+      version: version + 1,
+      approvalRequestId: approval.id,
+      reviewReason: reason || null,
+      isSelfReview,
+      selfReviewPermission: isSelfReview ? selfReviewPermission : null,
+      reviewerId: context.user.id,
+      creatorId: document.createdBy,
+      submitterId: approval.requestedBy,
+      companyId: context.companyId,
+      branchId: document.branchId,
+      aggregateType: kind,
+      documentId: document.id,
+      previousStatus: "submitted",
+      newStatus: decision === "approved" ? "approved" : "draft",
+      previousVersion: version,
+      newVersion: version + 1,
+      snapshotHash: approval.submittedSnapshotHash,
+      timestamp: now.toISOString()
+    }, transaction);
   return { document: draftService.serialize(await draftService.findScoped(kind, context, id, transaction)), approvalRequest: approval.toJSON() };
 }
 
