@@ -4197,7 +4197,42 @@ router.get("/employees/:id", authMiddleware, requireAnyPermission(employeeViewPe
   try {
     const employee = await models.Employee.findOne({ where: { id: req.params.id, companyId: req.companyId } });
     if (!employee) throw new NotFoundError("Employee not found.");
-    return res.status(200).json({ success: true, data: employee });
+    const [credential, branchAccessCount, roleTemplateCount, activeOperatorSessionCount, lastVerifiedAt] = await Promise.all([
+      models.EmployeeCredential.findOne({
+        where: { companyId: req.companyId, employeeId: employee.id },
+        raw: true
+      }),
+      models.EmployeeBranchAccess.count({
+        where: { companyId: req.companyId, employeeId: employee.id, active: true }
+      }),
+      models.EmployeeRoleAssignment.count({
+        where: { companyId: req.companyId, employeeId: employee.id, active: true }
+      }),
+      models.EmployeeOperationalSession.count({
+        where: {
+          companyId: req.companyId,
+          employeeId: employee.id,
+          revokedAt: null,
+          lockedAt: null,
+          idleExpiresAt: { [Op.gt]: new Date() },
+          absoluteExpiresAt: { [Op.gt]: new Date() }
+        }
+      }),
+      models.EmployeeVerificationAttempt.max("created_at", {
+        where: { companyId: req.companyId, employeeId: employee.id, result: "success" }
+      })
+    ]);
+    const authorizationSummary = {
+      credentialState: employeeCredentialState(credential),
+      branchAccessCount,
+      roleTemplateCount,
+      activeOperatorSessionCount,
+      lastVerifiedAt: lastVerifiedAt || null,
+      primaryBranch: employee.branchId ? { id: employee.branchId, name: employee.branch } : null
+    };
+    const canSeeCredentialDetails = await permissionService.userHasPermission(req.user, "employees.credentials.manage");
+    if (canSeeCredentialDetails && credential?.lockedUntil) authorizationSummary.lockedUntil = credential.lockedUntil;
+    return res.status(200).json({ success: true, data: { ...employee.toJSON(), authorizationSummary } });
   } catch (error) {
     next(error);
   }
