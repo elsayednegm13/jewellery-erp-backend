@@ -9,6 +9,12 @@ const RolePermission = require("./rolePermission.model");
 const UserRole = require("./userRole.model");
 const Employee = require("./employee.model");
 const EmployeeSession = require("./employeeSession.model");
+const EmployeeCredential = require("./employeeCredential.model");
+const EmployeeBranchAccess = require("./employeeBranchAccess.model");
+const EmployeeRoleAssignment = require("./employeeRoleAssignment.model");
+const EmployeePermissionGrant = require("./employeePermissionGrant.model");
+const EmployeePermissionDenial = require("./employeePermissionDenial.model");
+const EmployeeVerificationAttempt = require("./employeeVerificationAttempt.model");
 const Asset = require("./asset.model");
 const AssetEvent = require("./assetEvent.model");
 const AssetCertificate = require("./assetCertificate.model");
@@ -233,6 +239,47 @@ StockAuditItem.belongsTo(Branch, { foreignKey: "scannedBranchId", as: "scannedBr
 // Employee & Sessions
 Employee.hasMany(EmployeeSession, { foreignKey: "employeeId", as: "sessions" });
 EmployeeSession.belongsTo(Employee, { foreignKey: "employeeId", as: "employee" });
+Employee.hasOne(EmployeeCredential, { foreignKey: "employeeId", as: "credential" });
+EmployeeCredential.belongsTo(Employee, { foreignKey: "employeeId", as: "employee" });
+Company.hasMany(EmployeeCredential, { foreignKey: "companyId", as: "employeeCredentials" });
+EmployeeCredential.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+
+Employee.hasMany(EmployeeBranchAccess, { foreignKey: "employeeId", as: "branchAccess" });
+EmployeeBranchAccess.belongsTo(Employee, { foreignKey: "employeeId", as: "employee" });
+EmployeeBranchAccess.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+Branch.hasMany(EmployeeBranchAccess, { foreignKey: "branchId", as: "employeeAccess" });
+Company.hasMany(EmployeeBranchAccess, { foreignKey: "companyId", as: "employeeBranchAccess" });
+EmployeeBranchAccess.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+
+Employee.hasMany(EmployeeRoleAssignment, { foreignKey: "employeeId", as: "roleAssignments" });
+EmployeeRoleAssignment.belongsTo(Employee, { foreignKey: "employeeId", as: "employee" });
+EmployeeRoleAssignment.belongsTo(Role, { foreignKey: "roleId", as: "role" });
+Role.hasMany(EmployeeRoleAssignment, { foreignKey: "roleId", as: "employeeAssignments" });
+Company.hasMany(EmployeeRoleAssignment, { foreignKey: "companyId", as: "employeeRoleAssignments" });
+EmployeeRoleAssignment.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+
+Employee.hasMany(EmployeePermissionGrant, { foreignKey: "employeeId", as: "permissionGrants" });
+EmployeePermissionGrant.belongsTo(Employee, { foreignKey: "employeeId", as: "employee" });
+EmployeePermissionGrant.belongsTo(Permission, { foreignKey: "permissionId", as: "permission" });
+Permission.hasMany(EmployeePermissionGrant, { foreignKey: "permissionId", as: "employeeGrants" });
+Company.hasMany(EmployeePermissionGrant, { foreignKey: "companyId", as: "employeePermissionGrants" });
+EmployeePermissionGrant.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+
+Employee.hasMany(EmployeePermissionDenial, { foreignKey: "employeeId", as: "permissionDenials" });
+EmployeePermissionDenial.belongsTo(Employee, { foreignKey: "employeeId", as: "employee" });
+EmployeePermissionDenial.belongsTo(Permission, { foreignKey: "permissionId", as: "permission" });
+Permission.hasMany(EmployeePermissionDenial, { foreignKey: "permissionId", as: "employeeDenials" });
+Company.hasMany(EmployeePermissionDenial, { foreignKey: "companyId", as: "employeePermissionDenials" });
+EmployeePermissionDenial.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+
+Employee.hasMany(EmployeeVerificationAttempt, { foreignKey: "employeeId", as: "verificationAttempts" });
+EmployeeVerificationAttempt.belongsTo(Employee, { foreignKey: "employeeId", as: "employee" });
+EmployeeVerificationAttempt.belongsTo(User, { foreignKey: "technicalUserId", as: "technicalUser" });
+User.hasMany(EmployeeVerificationAttempt, { foreignKey: "technicalUserId", as: "employeeVerificationAttempts" });
+EmployeeVerificationAttempt.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+Branch.hasMany(EmployeeVerificationAttempt, { foreignKey: "branchId", as: "employeeVerificationAttempts" });
+Company.hasMany(EmployeeVerificationAttempt, { foreignKey: "companyId", as: "employeeVerificationAttempts" });
+EmployeeVerificationAttempt.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
 // Asset relationships
 Asset.hasMany(AssetEvent, { foreignKey: "assetId", as: "events" });
@@ -384,6 +431,12 @@ module.exports = {
   UserRole,
   Employee,
   EmployeeSession,
+  EmployeeCredential,
+  EmployeeBranchAccess,
+  EmployeeRoleAssignment,
+  EmployeePermissionGrant,
+  EmployeePermissionDenial,
+  EmployeeVerificationAttempt,
   Asset,
   AssetEvent,
   AssetCertificate,

@@ -22,6 +22,7 @@ const PERMISSIONS = [
   "gold_purchase.igp.create", "gold_purchase.igp.update_draft", "gold_purchase.igp.validate", "gold_purchase.igp.submit",
   "gold_purchase.igp.approve", "gold_purchase.igp.reject", "gold_purchase.igp.self_approve", "gold_purchase.igp.void",
   "users.view", "users.create", "users.update", "users.delete", "users.manage",
+  "employees.credentials.manage", "employees.permissions.manage", "employees.branches.manage", "employees.verification.view",
   "roles.view", "roles.manage", "permissions.manage",
   "notifications.view", "notifications.manage", "approvals.view", "approvals.manage",
   "audit.view", "gold.view", "gold.update", "payroll.view", "payroll.manage"

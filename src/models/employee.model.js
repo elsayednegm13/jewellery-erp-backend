@@ -15,6 +15,16 @@ const Employee = sequelize.define("Employee", {
     type: DataTypes.STRING,
     allowNull: false
   },
+  employeeCode: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    field: "employee_code"
+  },
+  employeeCodeNormalized: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    field: "employee_code_normalized"
+  },
   role: {
     type: DataTypes.STRING,
     allowNull: false

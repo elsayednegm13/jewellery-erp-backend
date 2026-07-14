@@ -21,6 +21,7 @@ const customerCreditService = require("../services/customer-credit.service");
 const barcodeIdentityService = require("../services/barcode-identity.service");
 const reservationService = require("../services/reservation.service");
 const permissionService = require("../services/permission.service");
+const employeeAuthorizationService = require("../services/employee-authorization.service");
 const statementReconciliationService = require("../services/statement-reconciliation.service");
 const sourceAwareStatementService = require("../services/source-aware-statement.service");
 const logger = require("../utils/logger");
@@ -3973,6 +3974,120 @@ router.delete("/suppliers/:id", authMiddleware, requirePermission("suppliers.del
     next(error);
   }
 });
+
+// Phase 34.2 — Employee Code is backend-authoritative. These routes intentionally
+// shadow the generic Employee create/update handlers while leaving list/get and
+// activation behavior on the existing generic CRUD surface.
+router.post("/employees", authMiddleware, async (req, res, next) => {
+  const t = await models.sequelize.transaction();
+  try {
+    const body = req.body || {};
+    if (!body.name || !body.role || !body.branch || !body.employeeCode) {
+      throw new ValidationError("name, role, branch and employeeCode are required.");
+    }
+    const normalized = employeeAuthorizationService.normalizeEmployeeCode(body.employeeCode);
+    const existing = await models.Employee.findOne({
+      where: { companyId: req.companyId, employeeCodeNormalized: normalized },
+      transaction: t
+    });
+    if (existing) throw new ConflictError("Employee Code already exists.");
+    const employee = await models.Employee.create({
+      id: body.id || `EMP-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      companyId: req.companyId,
+      name: String(body.name).trim(),
+      employeeCode: String(body.employeeCode).trim().normalize("NFKC"),
+      employeeCodeNormalized: normalized,
+      role: String(body.role).trim(),
+      systemRole: body.systemRole || "sales",
+      branch: String(body.branch).trim(),
+      branchId: body.branchId || null,
+      status: body.status || "present",
+      email: body.email || "",
+      phone: body.phone || "",
+      joinDate: body.joinDate || null,
+      jobTitle: body.jobTitle || "",
+      approvalLimit: body.approvalLimit || 0,
+      assignedDevice: body.assignedDevice || "",
+      notes: body.notes || "",
+      approvalLimitsDetail: body.approvalLimitsDetail || null
+    }, { transaction: t });
+    if (employee.branchId) {
+      const branch = await models.Branch.findOne({ where: { id: employee.branchId, companyId: req.companyId, isActive: true }, transaction: t });
+      if (!branch) throw new ValidationError("branchId is invalid for this company.", { branchId: ["Invalid branch."] });
+      await models.EmployeeBranchAccess.findOrCreate({
+        where: { companyId: req.companyId, employeeId: employee.id, branchId: employee.branchId },
+        defaults: { id: `EBA-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, active: true, validFrom: new Date(), createdByUserId: req.user?.id || null },
+        transaction: t
+      });
+    }
+    await auditService.record(req.companyId, {
+      action: "employee.created",
+      description: `Employee ${employee.name} created.`,
+      user: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
+      userId: req.user?.id,
+      place: req.branchId || "Employees",
+      sourceDocument: employee.id,
+      after: JSON.stringify({ employeeId: employee.id, employeeCode: employee.employeeCode })
+    }, { transaction: t });
+    await t.commit();
+    emitEntityChanged(req.companyId, { entity: "Employee", action: "create", id: employee.id });
+    return res.status(201).json({ success: true, data: employee });
+  } catch (error) {
+    await t.rollback();
+    next(error);
+  }
+});
+
+async function updateEmployeeAuthoritative(req, res, next) {
+  const t = await models.sequelize.transaction();
+  try {
+    const employee = await models.Employee.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t, lock: t.LOCK.UPDATE });
+    if (!employee) throw new NotFoundError("Employee not found.");
+    const updates = {};
+    for (const key of ["name", "role", "systemRole", "branch", "branchId", "status", "email", "phone", "joinDate", "jobTitle", "approvalLimit", "assignedDevice", "notes", "approvalLimitsDetail", "deactivateReason"]) {
+      if (req.body[key] !== undefined) updates[key] = req.body[key];
+    }
+    if (req.body.employeeCode !== undefined) {
+      const normalized = employeeAuthorizationService.normalizeEmployeeCode(req.body.employeeCode);
+      if (normalized !== employee.employeeCodeNormalized) {
+        const hasCredential = await models.EmployeeCredential.count({ where: { companyId: req.companyId, employeeId: employee.id }, transaction: t });
+        const hasAttempts = await models.EmployeeVerificationAttempt.count({ where: { companyId: req.companyId, employeeId: employee.id }, transaction: t });
+        if (hasCredential || hasAttempts) {
+          const allowed = await permissionService.userHasPermission(req.user, "employees.credentials.manage");
+          if (!allowed) throw new ForbiddenError("employees.credentials.manage is required to change Employee Code after credential history exists.");
+        }
+        const duplicate = await models.Employee.findOne({
+          where: { companyId: req.companyId, employeeCodeNormalized: normalized, id: { [Op.ne]: employee.id } },
+          transaction: t
+        });
+        if (duplicate) throw new ConflictError("Employee Code already exists.");
+      }
+      updates.employeeCode = String(req.body.employeeCode).trim().normalize("NFKC");
+      updates.employeeCodeNormalized = normalized;
+    }
+    const before = employee.toJSON();
+    await employee.update(updates, { transaction: t });
+    await auditService.record(req.companyId, {
+      action: "employee.updated",
+      description: `Employee ${employee.name} updated.`,
+      user: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
+      userId: req.user?.id,
+      place: req.branchId || "Employees",
+      sourceDocument: employee.id,
+      before: JSON.stringify({ employeeCode: before.employeeCode, role: before.role, branchId: before.branchId }),
+      after: JSON.stringify({ employeeCode: employee.employeeCode, role: employee.role, branchId: employee.branchId })
+    }, { transaction: t });
+    await t.commit();
+    emitEntityChanged(req.companyId, { entity: "Employee", action: "update", id: employee.id });
+    return res.status(200).json({ success: true, data: employee });
+  } catch (error) {
+    await t.rollback();
+    next(error);
+  }
+}
+
+router.put("/employees/:id", authMiddleware, updateEmployeeAuthoritative);
+router.patch("/employees/:id", authMiddleware, updateEmployeeAuthoritative);
 
 // 1. Initialize Standard CRUD Endpoints
 setupCrud("customers", models.Customer, ["name", "phone", "email"]);
