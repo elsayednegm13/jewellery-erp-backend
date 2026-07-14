@@ -312,8 +312,7 @@ function setupCrud(resourceName, model, searchFields = ["name"]) {
 }
 
 // ─── Custom POS Checkout Endpoint ───────────────────────────────────────────
-router.post(
-  "/pos/checkout",
+router.post("/pos/checkout",
   authMiddleware,
   requirePermission("pos.sell"),
   salesOperatorPolicy.requireSalesOperator("pos.checkout", {
@@ -330,6 +329,10 @@ router.post(
     });
     const actor = commandActor.employeeName || commandActor.technicalUserName || "System";
     const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
+    await salesOperatorPolicy.assertSalesOperatorPolicy(req, "pos.checkout", {
+      branchId: (body.branchId || req.headers["x-branch-id"] || req.branchId),
+      transaction: t
+    });
 
     // 1. Idempotency Check — Phase 21.3 central race-safe (unique company_id+scope+key).
     if (!idempotencyKey) {
@@ -466,7 +469,7 @@ router.post(
     const stoneValue = Number(body.stoneValue) || 0;
 
     if (discount > (subtotal + makingCharge + stoneValue)) {
-      const hasDiscountApprove = req.user && (req.user.permissions && req.user.permissions.includes("pos.discount.approve") || req.user.isAdmin);
+      const hasDiscountApprove = req.user && await permissionService.userHasPermission(req.user, "pos.discount.approve");
       if (!hasDiscountApprove) {
         throw new AppError("قيمة الخصم تتجاوز إجمالي الفاتورة وتتطلب صلاحية اعتماد الخصم", 403, "POS_DISCOUNT_APPROVAL_REQUIRED");
       }
@@ -4708,6 +4711,10 @@ router.post(
       if (invoice.postingStatus !== "posted") {
         throw new AppError("Invoice must be finalized before official print.", 409, "INVOICE_NOT_FINALIZED");
       }
+      await salesOperatorPolicy.assertSalesOperatorPolicy(req, requestedType === "reprint" ? "sales.reprint" : "sales.official_print", {
+        branchId: invoice.branchId || req.branchId,
+        transaction: t
+      });
       assertOperatorBranchForCommand(req, invoice.branchId);
 
       const commandActor = commandActorContext.fromRequest(req, {
@@ -10935,6 +10942,9 @@ router.post(
     const id = body.id || `INV-${Date.now()}`;
     const now = new Date().toISOString().slice(0, 16).replace("T", " ");
     const items = Array.isArray(body.items) ? body.items : [];
+    await salesOperatorPolicy.assertSalesOperatorPolicy(req, "sales.legacy_immediate_post", {
+      branchId: (body.branchId || req.headers["x-branch-id"] || req.branchId)
+    });
 
     // VAT rate from settings (single source of truth) — stored on the invoice
     // so receipts/reports can show the exact rate applied at the time of sale.
@@ -11474,6 +11484,7 @@ router.post(
     const customer = await models.Customer.findOne({ where: { id: invoice.customerId, companyId: req.companyId }, transaction: t });
     if (!customer) throw new NotFoundError("العميل غير موجود");
     const branchId = invoice.branchId;
+    await salesOperatorPolicy.assertSalesOperatorPolicy(req, "sales.post", { branchId, transaction: t });
     assertOperatorBranchForCommand(req, branchId);
     const branchRecord = await models.Branch.findOne({ where: { id: branchId, companyId: req.companyId, isActive: true }, transaction: t });
     if (!branchRecord) throw new ValidationError("الفرع المحدد غير موجود أو غير نشط");
