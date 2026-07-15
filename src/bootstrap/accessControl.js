@@ -4,6 +4,7 @@ const PERMISSIONS = [
   "dashboard.view",
   "customers.view", "customers.create", "customers.update", "customers.delete", "customers.export",
   "sales.view", "sales.create", "sales.approve", "sales.export", "sales.print",
+  "sales.returns.execute", "sales.exchanges.execute", "sales.installments.collect",
   "pos.view", "pos.sell", "pos.discount.approve",
   "inventory.view", "inventory.create", "inventory.update", "inventory.delete", "inventory.adjust", "inventory.export", "inventory.print",
   "suppliers.view", "suppliers.create", "suppliers.update", "suppliers.delete", "suppliers.export",

@@ -133,6 +133,42 @@ function assertOperatorBranchForCommand(req, branchId) {
   }
 }
 
+function idempotencyBodyWithActor(req, body = {}, commandActor = {}) {
+  return {
+    ...(body || {}),
+    __serverOperatorActor: {
+      technicalUserId: commandActor.technicalUserId || req.user?.id || null,
+      employeeId: commandActor.employeeId || null
+    }
+  };
+}
+
+async function resolveAdjustmentInvoiceBranchId(req) {
+  const body = req.body || {};
+  const headerBranchId = req.headers["x-branch-id"];
+  if (headerBranchId || body.branchId) return headerBranchId || body.branchId;
+  if (!body.originalInvoiceId) return req.branchId || null;
+  const invoice = await models.Invoice.findOne({
+    where: { id: body.originalInvoiceId, companyId: req.companyId },
+    attributes: ["branchId"]
+  });
+  return invoice?.branchId || req.branchId || null;
+}
+
+async function resolveInstallmentCollectionBranchId(req) {
+  if (req.headers["x-branch-id"] || req.branchId) return req.headers["x-branch-id"] || req.branchId;
+  const inst = await models.Installment.findOne({
+    where: { id: req.params.id, companyId: req.companyId },
+    attributes: ["invoiceId"]
+  });
+  if (!inst?.invoiceId) return null;
+  const invoice = await models.Invoice.findOne({
+    where: { id: inst.invoiceId, companyId: req.companyId },
+    attributes: ["branchId"]
+  });
+  return invoice?.branchId || null;
+}
+
 // Phase 31.4-Fix — customer-facing invoice search uses a deliberately small,
 // evidence-backed type map. Gift vouchers and customer-gold purchases live in
 // separate domain tables today, so they are not presented as invoice records.
@@ -314,8 +350,7 @@ function setupCrud(resourceName, model, searchFields = ["name"]) {
 // ─── Custom POS Checkout Endpoint ───────────────────────────────────────────
 router.post("/pos/checkout",
   authMiddleware,
-  requirePermission("pos.sell"),
-  salesOperatorPolicy.requireSalesOperator("pos.checkout", {
+  salesOperatorPolicy.requireSalesCommandAccess("pos.checkout", {
     resolveBranchId: (req) => (req.body && req.body.branchId) || req.headers["x-branch-id"] || req.branchId
   }),
   async (req, res, next) => {
@@ -833,11 +868,22 @@ router.post("/pos/checkout",
 });
 
 // ─── Custom Sales Returns Endpoint ──────────────────────────────────────────
-router.post("/sales/returns", authMiddleware, requirePermission("sales.create"), async (req, res, next) => {
+router.post(
+  "/sales/returns",
+  authMiddleware,
+  salesOperatorPolicy.requireSalesCommandAccess("sales.return.execute", {
+    resolveBranchId: resolveAdjustmentInvoiceBranchId
+  }),
+  async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const body = req.body || {};
     const { originalInvoiceId, returnedAssetIds = [], reason = "" } = body;
+    const commandActor = commandActorContext.fromRequest(req, {
+      requiredPermission: "sales.returns.execute",
+      requestedOperation: "sales.return.execute",
+      authorizationResult: "allowed"
+    });
 
     // Phase 21.3 — central race-safe idempotency (unique company_id+scope+key).
     const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
@@ -846,7 +892,7 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
       return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لعملية المرتجع" });
     }
     const idemScope = "sales.return";
-    const idemRequestHash = idempotencyService.hashRequest(idemScope, body);
+    const idemRequestHash = idempotencyService.hashRequest(idemScope, idempotencyBodyWithActor(req, body, commandActor));
     const idemClaim = await idempotencyService.claim({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash, transaction: t });
     if (!idemClaim.claimed) {
       try { await t.rollback(); } catch (_) { /* transaction already aborted by the unique violation */ }
@@ -979,6 +1025,7 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
     if (!branchRecord) {
       throw new ValidationError("الفرع المحدد غير موجود أو غير نشط");
     }
+    await salesOperatorPolicy.assertSalesOperatorPolicy(req, "sales.return.execute", { branchId, transaction: t });
 
     const settings = await settingsService.getCompanySettings(req.companyId, { transaction: t });
     const vatRatePercent = Number(originalInvoice.vatRate ?? settings.vatRate ?? 0);
@@ -1022,7 +1069,9 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
       idempotencyKey: req.headers["idempotency-key"] || body.idempotencyKey || null,
       postingStatus: "posted", // immediate-post path (sales return)
       invoiceNumber: returnInvoiceId,
-      postedAt: nowStr
+      postedAt: nowStr,
+      createdByEmployeeId: commandActor.employeeId || null,
+      finalizedByEmployeeId: commandActor.employeeId || null
     }, { transaction: t });
 
     // 7. Create Return Invoice Items and restore asset status
@@ -1246,7 +1295,7 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
     }
 
     // 12. Write Audit Log
-    await auditService.record(req.companyId, {
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
       action: "sales.return",
       description: `تم تسجيل مرتجع للفاتورة رقم ${originalInvoice.id} بمبلغ ${returnedTotal} - سند دائن رقم ${returnInvoiceId}`,
       user: actor,
@@ -1255,7 +1304,7 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
       sourceDocument: "invoice",
       severity: "info",
       after: JSON.stringify({ returnInvoiceId, originalInvoiceId, returnedTotal })
-    }, { transaction: t });
+    }, commandActor), { transaction: t });
 
     // Recalculate customer net purchases
     const { recalculateCustomerNetPurchases } = require("../services/customer-purchases.service");
@@ -1301,7 +1350,13 @@ router.post("/sales/returns", authMiddleware, requirePermission("sales.create"),
 });
 
 // ─── Exchange Preview Endpoint (read-only target policy) ─────────────────────
-router.post("/sales/exchanges/preview", authMiddleware, requirePermission("sales.create"), async (req, res, next) => {
+router.post(
+  "/sales/exchanges/preview",
+  authMiddleware,
+  salesOperatorPolicy.requireSalesCommandAccess("sales.exchange.preview", {
+    resolveBranchId: resolveAdjustmentInvoiceBranchId
+  }),
+  async (req, res, next) => {
   try {
     const body = req.body || {};
     const { originalInvoiceId } = body;
@@ -1562,11 +1617,22 @@ router.get("/invoices/:id/exchange-display", authMiddleware, requirePermission("
 });
 
 // ─── Custom Sales Exchanges Endpoint ─────────────────────────────────────────
-router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"), async (req, res, next) => {
+router.post(
+  "/sales/exchanges",
+  authMiddleware,
+  salesOperatorPolicy.requireSalesCommandAccess("sales.exchange.execute", {
+    resolveBranchId: resolveAdjustmentInvoiceBranchId
+  }),
+  async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const body = req.body || {};
     const { originalInvoiceId, returnedAssetId, newAssetIds = [], paymentMethod = "Exchange", notes = "" } = body;
+    const commandActor = commandActorContext.fromRequest(req, {
+      requiredPermission: "sales.exchanges.execute",
+      requestedOperation: "sales.exchange.execute",
+      authorizationResult: "allowed"
+    });
 
     // Phase 21.3 — central race-safe idempotency (unique company_id+scope+key).
     const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
@@ -1575,7 +1641,7 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
       return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لعملية الاستبدال" });
     }
     const idemScope = "sales.exchange";
-    const idemRequestHash = idempotencyService.hashRequest(idemScope, body);
+    const idemRequestHash = idempotencyService.hashRequest(idemScope, idempotencyBodyWithActor(req, body, commandActor));
     const idemClaim = await idempotencyService.claim({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash, transaction: t });
     if (!idemClaim.claimed) {
       try { await t.rollback(); } catch (_) { /* transaction already aborted by the unique violation */ }
@@ -1698,6 +1764,7 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
     if (!branchRecord) {
       throw new ValidationError("الفرع المحدد غير موجود أو غير نشط");
     }
+    await salesOperatorPolicy.assertSalesOperatorPolicy(req, "sales.exchange.execute", { branchId, transaction: t });
 
     // 3. Resolve the new (replacement) items. The new `newItems` payload supports
     //    a mix of assets and products; the legacy `newAssetIds` (assets only) is
@@ -1832,7 +1899,9 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
       idempotencyKey: req.headers["idempotency-key"] || body.idempotencyKey || null,
       postingStatus: "posted", // immediate-post path (exchange)
       invoiceNumber: exchangeInvoiceId,
-      postedAt: nowStr
+      postedAt: nowStr,
+      createdByEmployeeId: commandActor.employeeId || null,
+      finalizedByEmployeeId: commandActor.employeeId || null
     }, { transaction: t });
 
     // 8. Create exchange invoice item lines
@@ -2125,7 +2194,7 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
     }
 
     // 14. Write Audit Log
-    await auditService.record(req.companyId, {
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
       action: "sales.exchange",
       description: `تم إتمام عملية استبدال للفاتورة رقم ${originalInvoice.id}. فارق الاستبدال: ${difference} - فاتورة جديدة ${exchangeInvoiceId}`,
       user: actor,
@@ -2145,7 +2214,7 @@ router.post("/sales/exchanges", authMiddleware, requirePermission("sales.create"
         arRelief,
         excessDueToCustomer
       })
-    }, { transaction: t });
+    }, commandActor), { transaction: t });
 
     // Recalculate customer net purchases
     const { recalculateCustomerNetPurchases } = require("../services/customer-purchases.service");
@@ -4368,20 +4437,10 @@ async function updateEmployeeAuthoritative(req, res, next) {
     if (req.body.employeeCode !== undefined) {
       const normalized = employeeAuthorizationService.normalizeEmployeeCode(req.body.employeeCode);
       if (normalized !== employee.employeeCodeNormalized) {
-        const hasCredential = await models.EmployeeCredential.count({ where: { companyId: req.companyId, employeeId: employee.id }, transaction: t });
-        const hasAttempts = await models.EmployeeVerificationAttempt.count({ where: { companyId: req.companyId, employeeId: employee.id }, transaction: t });
-        if (hasCredential || hasAttempts) {
-          const allowed = await permissionService.userHasPermission(req.user, "employees.credentials.manage");
-          if (!allowed) throw new ForbiddenError("employees.credentials.manage is required to change Employee Code after credential history exists.");
-        }
-        const duplicate = await models.Employee.findOne({
-          where: { companyId: req.companyId, employeeCodeNormalized: normalized, id: { [Op.ne]: employee.id } },
-          transaction: t
+        throw new ValidationError("Employee Code must be changed through the dedicated credential endpoint.", {
+          employeeCode: ["Use POST /employees/:id/change-code with reason and Level 2 authorization."]
         });
-        if (duplicate) throw new ConflictError("Employee Code already exists.");
       }
-      updates.employeeCode = String(req.body.employeeCode).trim().normalize("NFKC");
-      updates.employeeCodeNormalized = normalized;
     }
     const before = employee.toJSON();
     await employee.update(updates, { transaction: t });
@@ -4684,8 +4743,7 @@ router.get("/invoices/search-print", authMiddleware, requirePermission("sales.vi
 router.post(
   "/invoices/:id/print-events",
   authMiddleware,
-  requirePermission("sales.print"),
-  salesOperatorPolicy.requireSalesOperator("sales.official_print", {
+  salesOperatorPolicy.requireSalesCommandAccess("sales.official_print", {
     resolveBranchId: (req) => req.headers["x-branch-id"] || req.branchId
   }),
   async (req, res, next) => {
@@ -10915,8 +10973,7 @@ router.post("/pricing/calculate", authMiddleware, async (req, res, next) => {
 router.post(
   "/sales/invoices/draft",
   authMiddleware,
-  requirePermission("sales.create"),
-  salesOperatorPolicy.requireSalesOperator("sales.legacy_immediate_post", {
+  salesOperatorPolicy.requireSalesCommandAccess("sales.legacy_immediate_post", {
     resolveBranchId: (req) => (req.body && req.body.branchId) || req.headers["x-branch-id"] || req.branchId
   }),
   async (req, res, next) => {
@@ -11177,8 +11234,7 @@ async function resolveDraftBranch(body, req, transaction) {
 router.post(
   "/sales/invoices/drafts",
   authMiddleware,
-  requirePermission("sales.create"),
-  salesOperatorPolicy.requireSalesOperator("sales.draft.create", {
+  salesOperatorPolicy.requireSalesCommandAccess("sales.draft.create", {
     resolveBranchId: (req) => (req.body && req.body.branchId) || req.headers["x-branch-id"] || req.branchId
   }),
   async (req, res, next) => {
@@ -11289,8 +11345,7 @@ router.post(
 router.patch(
   "/sales/invoices/:id",
   authMiddleware,
-  requirePermission("sales.create"),
-  salesOperatorPolicy.requireSalesOperator("sales.draft.update", {
+  salesOperatorPolicy.requireSalesCommandAccess("sales.draft.update", {
     resolveBranchId: (req) => (req.body && req.body.branchId) || req.headers["x-branch-id"] || req.branchId
   }),
   async (req, res, next) => {
@@ -11372,8 +11427,7 @@ router.patch(
 router.post(
   "/sales/invoices/:id/cancel",
   authMiddleware,
-  requirePermission("sales.create"),
-  salesOperatorPolicy.requireSalesOperator("sales.draft.cancel", {
+  salesOperatorPolicy.requireSalesCommandAccess("sales.draft.cancel", {
     resolveBranchId: (req) => (req.body && req.body.branchId) || req.headers["x-branch-id"] || req.branchId
   }),
   async (req, res, next) => {
@@ -11441,8 +11495,7 @@ router.post(
 router.post(
   "/sales/invoices/:id/post",
   authMiddleware,
-  requirePermission("sales.create"),
-  salesOperatorPolicy.requireSalesOperator("sales.post", {
+  salesOperatorPolicy.requireSalesCommandAccess("sales.post", {
     resolveBranchId: (req) => req.headers["x-branch-id"] || req.branchId
   }),
   async (req, res, next) => {
@@ -12355,7 +12408,13 @@ router.get("/installments", authMiddleware, async (req, res, next) => {
 });
 
 // Pay (collect) an installment + auto-post the journal.
-router.post("/installments/:id/pay", authMiddleware, async (req, res, next) => {
+router.post(
+  "/installments/:id/pay",
+  authMiddleware,
+  salesOperatorPolicy.requireSalesCommandAccess("sales.installment.collect", {
+    resolveBranchId: resolveInstallmentCollectionBranchId
+  }),
+  async (req, res, next) => {
   try {
     const inst = await models.Installment.findOne({
       where: { id: req.params.id, companyId: req.companyId }
@@ -12371,7 +12430,16 @@ router.post("/installments/:id/pay", authMiddleware, async (req, res, next) => {
       return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لتحصيل القسط" });
     }
     const idemScope = "installment.payment";
-    const idemRequestHash = idempotencyService.hashRequest(idemScope, req.body, req.params);
+    const commandActor = commandActorContext.fromRequest(req, {
+      requiredPermission: "sales.installments.collect",
+      requestedOperation: "sales.installment.collect",
+      authorizationResult: "allowed"
+    });
+    const idemRequestHash = idempotencyService.hashRequest(
+      idemScope,
+      idempotencyBodyWithActor(req, req.body, commandActor),
+      req.params
+    );
 
     if (inst.status === "paid") {
       return res.status(409).json({ success: false, message: "القسط مدفوع بالفعل" });
@@ -12453,6 +12521,10 @@ router.post("/installments/:id/pay", authMiddleware, async (req, res, next) => {
           lock: { level: t.LOCK.UPDATE, of: models.Invoice }
         });
         if (!invoice) throw new NotFoundError("الفاتورة المرتبطة بالقسط غير موجودة");
+        await salesOperatorPolicy.assertSalesOperatorPolicy(req, "sales.installment.collect", {
+          branchId: invoice.branchId || branchId,
+          transaction: t
+        });
 
         const customerId = inst.customerId || invoice.customerId;
         const customer = customerId
@@ -12491,7 +12563,8 @@ router.post("/installments/:id/pay", authMiddleware, async (req, res, next) => {
           amount,
           reference: req.body.reference || `Installment #${inst.sequence}`,
           date: payDate,
-          notes: req.body.notes || `تحصيل قسط ${inst.id}`
+          notes: req.body.notes || `تحصيل قسط ${inst.id}`,
+          receivedByEmployeeId: commandActor.employeeId || null
         }, { transaction: t });
 
         journalEntry = await postingService.postInstallmentPayment(
@@ -12514,6 +12587,25 @@ router.post("/installments/:id/pay", authMiddleware, async (req, res, next) => {
           status: "posted",
           journalEntryId: journalEntry ? journalEntry.id : null
         }, { transaction: t });
+
+        await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
+          action: "sales.installment.collect",
+          description: `Collected installment ${inst.id} for invoice ${inst.invoiceId}`,
+          user: actor,
+          userId: req.user ? req.user.id : null,
+          place: inst.branch || branchId || null,
+          branch: inst.branch || branchId || null,
+          sourceDocument: inst.invoiceId,
+          severity: "info",
+          after: JSON.stringify({
+            installmentId: inst.id,
+            invoiceId: inst.invoiceId,
+            paymentId: installmentPayment.id,
+            amount,
+            status,
+            journalEntryId: journalEntry ? journalEntry.id : null
+          })
+        }, commandActor), { transaction: t });
 
         // Persist the success response for idempotent replay BEFORE commit.
         const out = inst.toJSON();

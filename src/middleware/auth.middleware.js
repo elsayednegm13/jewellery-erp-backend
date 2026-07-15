@@ -1,5 +1,5 @@
 const jwt = require("jsonwebtoken");
-const { UnauthorizedError, ForbiddenError } = require("../utils/errors");
+const { AppError, UnauthorizedError, ForbiddenError } = require("../utils/errors");
 const User = require("../models/user.model");
 const logger = require("../utils/logger");
 const permissionService = require("../services/permission.service");
@@ -50,7 +50,7 @@ const authMiddleware = async (req, res, next) => {
         throw new ForbiddenError("Branch Shell account is missing its fixed branch.");
       }
       if (headerBranchId && String(headerBranchId) !== String(user.branchId)) {
-        throw new ForbiddenError("Branch Shell accounts cannot switch branches.");
+        throw new AppError("Branch Shell accounts cannot switch branches.", 403, "OPERATOR_BRANCH_MISMATCH");
       }
       req.branchId = user.branchId;
     } else if (headerBranchId && !isCompanyLevel) {

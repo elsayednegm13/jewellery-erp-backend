@@ -202,8 +202,15 @@ router.post("/operator/lock", authMiddleware, async (req, res, next) => {
 
 router.post("/operator/change-pin", authMiddleware, async (req, res, next) => {
   try {
-    const current = await operatorSessionService.currentFromRequest(req, { touch: false });
+    const current = await operatorSessionService.currentFromRequest(req, {
+      touch: false,
+      requiredLevel: 2,
+      requestedOperation: "employee.pin.self_change"
+    });
     if (!current.active) throw operatorSessionService.operatorError(current.reason || "OPERATOR_SESSION_REQUIRED", current.statusCode || 401);
+    if (req.body?.newPin !== req.body?.confirmation) {
+      throw new ValidationError("PIN confirmation does not match.", { confirmation: ["PIN confirmation does not match."] });
+    }
     const result = await employeeAuth.changeOwnPin({
       companyId: req.companyId,
       employeeId: current.session.employeeId,
@@ -395,7 +402,8 @@ router.put("/employees/:id/permissions", authMiddleware, requirePermission("empl
       actorUser: req.user,
       roleIds: Array.isArray(req.body?.roleIds) ? req.body.roleIds.map(String) : [],
       grantPermissionIds: Array.isArray(req.body?.grantPermissionIds) ? req.body.grantPermissionIds.map(String) : [],
-      denialPermissionIds: Array.isArray(req.body?.denialPermissionIds) ? req.body.denialPermissionIds.map(String) : []
+      denialPermissionIds: Array.isArray(req.body?.denialPermissionIds) ? req.body.denialPermissionIds.map(String) : [],
+      reason: req.body?.reason || null
     });
     return res.status(200).json({ success: true, data: { authorization: authorizationSafe(resolved) } });
   } catch (error) {

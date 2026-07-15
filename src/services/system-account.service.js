@@ -1,5 +1,4 @@
 const bcrypt = require("bcryptjs");
-const crypto = require("crypto");
 const { Op } = require("sequelize");
 const models = require("../models");
 const auditService = require("./audit.service");
@@ -7,9 +6,9 @@ const permissionService = require("./permission.service");
 const operatorSessionService = require("./operator-session.service");
 const technicalSessions = require("./technical-session.service");
 const { ValidationError, ForbiddenError, NotFoundError, ConflictError } = require("../utils/errors");
+const { validatePasswordPolicy, generatePolicyCompliantPassword } = require("../utils/password-policy");
 
 const ACCOUNT_TYPES = new Set(["legacy", "super_admin", "branch_shell"]);
-const PASSWORD_MIN_LENGTH = 8;
 
 function id(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -25,14 +24,8 @@ function normalizeEmail(value) {
   return email;
 }
 
-function validatePassword(password) {
-  if (typeof password !== "string" || password.length < PASSWORD_MIN_LENGTH) {
-    throw new ValidationError("Password does not meet policy.", { password: [`Password must be at least ${PASSWORD_MIN_LENGTH} characters.`] });
-  }
-}
-
 function generateTemporaryPassword() {
-  return crypto.randomBytes(18).toString("base64url");
+  return generatePolicyCompliantPassword(18);
 }
 
 function maskEmail(email) {
@@ -120,9 +113,10 @@ async function validateAccountShape({ accountType, companyId, branchId, defaultE
   }
 }
 
-async function activeSuperAdminCount(transaction = null) {
+async function activeSuperAdminCount(companyId, transaction = null) {
   return models.User.count({
     where: {
+      companyId,
       accountType: "super_admin",
       deletedAt: null,
       [Op.or]: [{ lockedUntil: null }, { lockedUntil: { [Op.lte]: new Date() } }]
@@ -131,9 +125,15 @@ async function activeSuperAdminCount(transaction = null) {
   });
 }
 
+async function isFinalActiveSuperAdmin(user, transaction = null) {
+  if ((user?.accountType || "legacy") !== "super_admin") return false;
+  const count = await activeSuperAdminCount(user.companyId, transaction);
+  return count <= 1;
+}
+
 async function assertNotFinalSuperAdmin(targetUser, operation, transaction = null) {
   if ((targetUser.accountType || "legacy") !== "super_admin") return;
-  const count = await activeSuperAdminCount(transaction);
+  const count = await activeSuperAdminCount(targetUser.companyId, transaction);
   if (count <= 1) {
     await auditService.record(targetUser.companyId, {
       action: "system_account.final_admin_safeguard_denied",
@@ -146,6 +146,23 @@ async function assertNotFinalSuperAdmin(targetUser, operation, transaction = nul
     }, { transaction });
     throw new ConflictError("Final active Super Admin cannot be removed, demoted, disabled, or locked out.");
   }
+}
+
+async function assertFinalRecoveryPathPreserved(targetUser, nextRecoveryEmail, transaction = null) {
+  if ((targetUser.accountType || "legacy") !== "super_admin") return;
+  if (nextRecoveryEmail) return;
+  const count = await activeSuperAdminCount(targetUser.companyId, transaction);
+  if (count > 1) return;
+  await auditService.record(targetUser.companyId, {
+    action: "system_account.final_recovery_safeguard_denied",
+    description: "Final Super Admin recovery safeguard denied recovery removal.",
+    user: "System",
+    place: "System Accounts",
+    sourceDocument: targetUser.id,
+    severity: "critical",
+    after: JSON.stringify({ operation: "remove_recovery_email", targetUserId: targetUser.id })
+  }, { transaction });
+  throw new ConflictError("Final active Super Admin must retain a recovery email.");
 }
 
 async function listAccounts(req) {
@@ -177,7 +194,7 @@ async function createAccount(req) {
   const accountType = body.accountType || "legacy";
   const email = normalizeEmail(body.email);
   const temporaryPassword = body.temporaryPassword || generateTemporaryPassword();
-  validatePassword(temporaryPassword);
+  validatePasswordPolicy(temporaryPassword, { email, firstName: body.firstName, lastName: body.lastName });
   await validateAccountShape({
     accountType,
     companyId: req.companyId,
@@ -232,7 +249,11 @@ async function patchAccount(req) {
   for (const key of ["firstName", "lastName", "phone", "jobTitle", "recoveryPhone"]) {
     if (Object.prototype.hasOwnProperty.call(body, key)) updates[key] = body[key] || "";
   }
-  if (Object.prototype.hasOwnProperty.call(body, "recoveryEmail")) updates.recoveryEmail = body.recoveryEmail ? normalizeEmail(body.recoveryEmail) : null;
+  if (Object.prototype.hasOwnProperty.call(body, "recoveryEmail")) {
+    const nextRecoveryEmail = body.recoveryEmail ? normalizeEmail(body.recoveryEmail) : null;
+    await assertFinalRecoveryPathPreserved(user, nextRecoveryEmail, null);
+    updates.recoveryEmail = nextRecoveryEmail;
+  }
   if (Object.prototype.hasOwnProperty.call(body, "defaultEmployeeId")) {
     await validateAccountShape({
       accountType: user.accountType || "legacy",
@@ -261,7 +282,7 @@ async function resetPassword(req) {
   await requireSensitiveAdminLevel2(req, { permissionName: "system_accounts.credentials.reset", operation: "system-account.reset-password" });
   const user = await getAccountOrThrow(req.companyId, req.params.id);
   const temporaryPassword = req.body?.temporaryPassword || generateTemporaryPassword();
-  validatePassword(temporaryPassword);
+  validatePasswordPolicy(temporaryPassword, { email: user.email, firstName: user.firstName, lastName: user.lastName });
   await models.sequelize.transaction(async (transaction) => {
     await user.update({
       password: await bcrypt.hash(temporaryPassword, 10),
@@ -404,6 +425,8 @@ module.exports = {
   requireSensitiveAdminLevel2,
   validateAccountShape,
   assertNotFinalSuperAdmin,
+  assertFinalRecoveryPathPreserved,
+  isFinalActiveSuperAdmin,
   listAccounts,
   createAccount,
   patchAccount,

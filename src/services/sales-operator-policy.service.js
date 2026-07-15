@@ -1,6 +1,7 @@
 const models = require("../models");
 const operatorSessionService = require("./operator-session.service");
-const { AppError } = require("../utils/errors");
+const permissionService = require("./permission.service");
+const { AppError, ForbiddenError } = require("../utils/errors");
 
 const MODES = new Set(["legacy_users", "shared_employee_operator"]);
 
@@ -23,7 +24,13 @@ const POLICIES = {
   "sales.legacy_immediate_post": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create", level: 2 },
   "sales.official_print": { operatorRequired: true, technicalPermission: "sales.print", employeePermission: "sales.print", level: 2 },
   "sales.reprint": { operatorRequired: true, technicalPermission: "sales.print", employeePermission: "sales.print", level: 2 },
-  "pos.discount.override": { operatorRequired: true, technicalPermission: "pos.discount.approve", employeePermission: "pos.discount.approve", level: 2 }
+  "pos.discount.override": { operatorRequired: true, technicalPermission: "pos.discount.approve", employeePermission: "pos.discount.approve", level: 2 },
+
+  "sales.return.preview": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create", level: 1 },
+  "sales.return.execute": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.returns.execute", level: 2 },
+  "sales.exchange.preview": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create", level: 1 },
+  "sales.exchange.execute": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.exchanges.execute", level: 2 },
+  "sales.installment.collect": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.installments.collect", level: 2 }
 };
 
 function normalizeMode(value) {
@@ -71,9 +78,11 @@ async function assertSalesOperatorPolicy(req, operation, options = {}) {
   const policy = resolveSalesOperationPolicy(operation);
   const branchId = options.branchId || req.branchId || null;
   const mode = await resolveSalesOperatorMode({ companyId: req.companyId, branchId, transaction: options.transaction || null });
+  const accountType = req.user?.accountType || "legacy";
+  const accountTypeRequiresOperator = accountType === "branch_shell" || accountType === "super_admin";
   req.salesOperatorMode = mode;
   req.salesOperatorPolicy = policy;
-  if (mode !== "shared_employee_operator" || !policy.operatorRequired) {
+  if (!policy.operatorRequired || (mode !== "shared_employee_operator" && !accountTypeRequiresOperator)) {
     return { mode, policy, operatorContext: null };
   }
 
@@ -96,6 +105,36 @@ async function assertSalesOperatorPolicy(req, operation, options = {}) {
   return { mode, policy, operatorContext: result.context };
 }
 
+function requireSalesCommandAccess(operation, options = {}) {
+  return async (req, res, next) => {
+    try {
+      if (!req.user) {
+        throw new AppError("Authentication required.", 401, "UNAUTHORIZED");
+      }
+
+      const policy = resolveSalesOperationPolicy(operation);
+      const accountType = req.user.accountType || "legacy";
+      const branchId = typeof options.resolveBranchId === "function"
+        ? await options.resolveBranchId(req)
+        : options.branchId || req.branchId || null;
+
+      if (accountType === "legacy") {
+        const allowed = await permissionService.userHasPermission(req.user, policy.technicalPermission);
+        if (!allowed) {
+          throw new ForbiddenError("تم رفض الدخول. لا تملك الصلاحية المطلوبة.");
+        }
+      } else if (accountType !== "branch_shell" && accountType !== "super_admin") {
+        throw new ForbiddenError("Unsupported account type for Sales/POS command access.");
+      }
+
+      await assertSalesOperatorPolicy(req, operation, { ...options, branchId });
+      return next();
+    } catch (error) {
+      return next(error);
+    }
+  };
+}
+
 function requireSalesOperator(operation, options = {}) {
   return async (req, res, next) => {
     try {
@@ -115,6 +154,7 @@ module.exports = {
   isSharedEmployeeOperatorMode,
   resolveSalesOperationPolicy,
   assertSalesOperatorPolicy,
+  requireSalesCommandAccess,
   requireSalesOperator,
   MODES
 };

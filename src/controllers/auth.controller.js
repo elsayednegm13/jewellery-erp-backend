@@ -1,13 +1,14 @@
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const { Op } = require("sequelize");
-const { User, Company, PasswordResetToken } = require("../models");
+const { User, Company, PasswordResetToken, EmailChangeToken } = require("../models");
 const { AppError, ValidationError, UnauthorizedError } = require("../utils/errors");
 const logger = require("../utils/logger");
 const permissionService = require("../services/permission.service");
 const technicalSessions = require("../services/technical-session.service");
 const localRecoveryDelivery = require("../services/local-recovery-delivery.service");
 const auditService = require("../services/audit.service");
+const { validatePasswordPolicy } = require("../utils/password-policy");
 
 const DUMMY_BCRYPT_HASH = "$2a$10$7EqJtq98hPqEX7fNZaFWoOhiHNO7Q8NOq8B4EGKGU9Yh/8q0LJcMK";
 const MAX_LOGIN_FAILURES = 5;
@@ -20,12 +21,6 @@ function genericLoginError() {
 
 function normalizeEmail(value) {
   return String(value || "").trim().toLowerCase();
-}
-
-function validatePassword(password) {
-  if (typeof password !== "string" || password.length < 8) {
-    throw new ValidationError("Password does not meet policy.", { password: ["Password must be at least 8 characters."] });
-  }
 }
 
 function resetTokenHash(token) {
@@ -97,7 +92,11 @@ class AuthController {
       const passwordMatches = await bcrypt.compare(password, user.password);
       if (!passwordMatches) {
         const failedLoginCount = Number(user.failedLoginCount || 0) + 1;
-        const lockedUntil = failedLoginCount >= MAX_LOGIN_FAILURES ? new Date(now.getTime() + LOCKOUT_MINUTES * 60 * 1000) : null;
+        let lockedUntil = failedLoginCount >= MAX_LOGIN_FAILURES ? new Date(now.getTime() + LOCKOUT_MINUTES * 60 * 1000) : null;
+        if (lockedUntil && (user.accountType || "legacy") === "super_admin") {
+          const systemAccounts = require("../services/system-account.service");
+          if (await systemAccounts.isFinalActiveSuperAdmin(user)) lockedUntil = null;
+        }
         await user.update({ failedLoginCount, lockedUntil });
         if (lockedUntil) {
           await auditService.record(user.companyId, {
@@ -303,8 +302,12 @@ class AuthController {
       if (!currentPassword || !newPassword || newPassword !== confirmation) {
         throw new ValidationError("Password confirmation does not match.", { password: ["Password confirmation does not match."] });
       }
-      validatePassword(newPassword);
       const user = await User.findByPk(req.user.id);
+      validatePasswordPolicy(newPassword, { email: user.email, firstName: user.firstName, lastName: user.lastName });
+      if ((user.accountType || "legacy") === "super_admin") {
+        const systemAccounts = require("../services/system-account.service");
+        await systemAccounts.requireSensitiveAdminLevel2(req, { permissionName: "security.recovery.manage", operation: "auth.change-password" });
+      }
       const matches = await bcrypt.compare(currentPassword, user.password);
       if (!matches) throw new ValidationError("Current password is invalid.", { currentPassword: ["Current password is invalid."] });
       await modelsTransaction(async (transaction) => {
@@ -386,11 +389,11 @@ class AuthController {
       if (!token || !newPassword || newPassword !== confirmation) {
         throw new ValidationError("Invalid reset request.", { password: ["Password confirmation does not match."] });
       }
-      validatePassword(newPassword);
       const row = await PasswordResetToken.findOne({ where: { tokenHash: resetTokenHash(token), usedAt: null } });
       if (!row || new Date(row.expiresAt) <= new Date()) throw new AppError("Reset token is invalid or expired.", 422, "RESET_TOKEN_INVALID");
       const user = await User.findByPk(row.userId);
       if (!user) throw new AppError("Reset token is invalid or expired.", 422, "RESET_TOKEN_INVALID");
+      validatePasswordPolicy(newPassword, { email: user.email, firstName: user.firstName, lastName: user.lastName });
       await modelsTransaction(async (transaction) => {
         await row.update({ usedAt: new Date() }, { transaction });
         await user.update({
@@ -410,6 +413,108 @@ class AuthController {
         }, { transaction });
       });
       res.status(200).json({ success: true, data: { message: "Password reset complete. Please log in." } });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  validateResetToken = async (req, res, next) => {
+    try {
+      const { token } = req.body || {};
+      if (!token) throw new ValidationError("Reset token is required.", { token: ["Reset token is required."] });
+      const row = await PasswordResetToken.findOne({ where: { tokenHash: resetTokenHash(token) } });
+      let status = "invalid";
+      if (row?.usedAt) status = "used";
+      else if (row && new Date(row.expiresAt) <= new Date()) status = "expired";
+      else if (row) status = "valid";
+      res.status(200).json({ success: true, data: { valid: status === "valid", status } });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  changeEmail = async (req, res, next) => {
+    try {
+      const { currentPassword, newEmail } = req.body || {};
+      const email = normalizeEmail(newEmail || req.body?.email);
+      if (!currentPassword || !email) {
+        throw new ValidationError("Current password and new email are required.", { email: ["New email is required."] });
+      }
+      const user = await User.findByPk(req.user.id);
+      if ((user.accountType || "legacy") === "super_admin") {
+        const systemAccounts = require("../services/system-account.service");
+        await systemAccounts.requireSensitiveAdminLevel2(req, { permissionName: "security.recovery.manage", operation: "auth.change-email" });
+      }
+      const matches = await bcrypt.compare(currentPassword, user.password);
+      if (!matches) throw new ValidationError("Current password is invalid.", { currentPassword: ["Current password is invalid."] });
+      const exists = await User.findOne({ where: { email, id: { [Op.ne]: user.id } } });
+      if (exists) throw new AppError("Email is already used by another account.", 409, "STATE_CONFLICT");
+      const token = crypto.randomBytes(32).toString("base64url");
+      const expiresAt = new Date(Date.now() + RESET_EXPIRY_MINUTES * 60 * 1000);
+      await modelsTransaction(async (transaction) => {
+        await EmailChangeToken.update({ usedAt: new Date() }, {
+          where: { userId: user.id, usedAt: null, expiresAt: { [Op.gt]: new Date() } },
+          transaction
+        });
+        const deliveryId = `EMAIL-CHANGE-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        await EmailChangeToken.create({
+          id: deliveryId,
+          userId: user.id,
+          newEmail: email,
+          tokenHash: resetTokenHash(token),
+          expiresAt
+        }, { transaction });
+        localRecoveryDelivery.writeLocalDelivery({
+          id: deliveryId,
+          kind: "email_change",
+          email,
+          userId: user.id,
+          token,
+          expiresAt: expiresAt.toISOString()
+        });
+        await auditService.record(user.companyId, {
+          action: "system_account.email_change_requested",
+          description: `Email change requested for ${user.id}.`,
+          user: `${user.firstName || ""} ${user.lastName || ""}`.trim() || user.email,
+          userId: user.id,
+          technicalUserId: user.id,
+          place: "Auth",
+          sourceDocument: user.id,
+          severity: "warning",
+          after: JSON.stringify({ deliveryId, localDevDelivery: process.env.NODE_ENV !== "production" })
+        }, { transaction });
+      });
+      res.status(200).json({ success: true, data: { message: "Email change confirmation has been issued." } });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  confirmEmailChange = async (req, res, next) => {
+    try {
+      const { token } = req.body || {};
+      if (!token) throw new ValidationError("Email change token is required.", { token: ["Token is required."] });
+      const row = await EmailChangeToken.findOne({ where: { tokenHash: resetTokenHash(token), usedAt: null } });
+      if (!row || new Date(row.expiresAt) <= new Date()) throw new AppError("Email change token is invalid or expired.", 422, "EMAIL_CHANGE_TOKEN_INVALID");
+      const user = await User.findByPk(row.userId);
+      if (!user) throw new AppError("Email change token is invalid or expired.", 422, "EMAIL_CHANGE_TOKEN_INVALID");
+      const exists = await User.findOne({ where: { email: row.newEmail, id: { [Op.ne]: user.id } } });
+      if (exists) throw new AppError("Email is already used by another account.", 409, "STATE_CONFLICT");
+      await modelsTransaction(async (transaction) => {
+        await row.update({ usedAt: new Date() }, { transaction });
+        await user.update({ email: row.newEmail }, { transaction });
+        await technicalSessions.bumpSessionVersion(user, "email_change_confirmed", transaction);
+        await auditService.record(user.companyId, {
+          action: "system_account.email_change_completed",
+          description: `Email change completed for ${user.id}.`,
+          user: "System",
+          place: "Auth",
+          sourceDocument: user.id,
+          severity: "warning",
+          after: JSON.stringify({ targetUserId: user.id })
+        }, { transaction });
+      });
+      res.status(200).json({ success: true, data: { message: "Email changed. Please log in again." } });
     } catch (error) {
       next(error);
     }

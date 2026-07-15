@@ -342,7 +342,7 @@ async function verifyEmployeeCredential({
   return result;
 }
 
-async function updateEmployeeAuthorization({ companyId, employeeId, actorUser, roleIds = [], grantPermissionIds = [], denialPermissionIds = [], transaction }) {
+async function updateEmployeeAuthorization({ companyId, employeeId, actorUser, roleIds = [], grantPermissionIds = [], denialPermissionIds = [], reason = null, transaction }) {
   await assertManagerPermission(actorUser, "employees.permissions.manage");
   const execute = async (t) => {
     const employee = await getEmployeeOrThrow(companyId, employeeId, t);
@@ -385,7 +385,7 @@ async function updateEmployeeAuthorization({ companyId, employeeId, actorUser, r
       userId: actorUser?.id || null,
       place: "Employees",
       sourceDocument: employee.id,
-      after: JSON.stringify({ roleIds: roleIdSet, grantPermissionIds: grantSet, denialPermissionIds: denialSet })
+      after: JSON.stringify({ roleIds: roleIdSet, grantPermissionIds: grantSet, denialPermissionIds: denialSet, reason: reason ? String(reason).trim() : null })
     }, { transaction: t });
     if (changed) {
       await incrementEmployeeAuthorizationVersion({ companyId, employeeId, transaction: t });
