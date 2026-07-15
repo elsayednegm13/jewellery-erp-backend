@@ -79,9 +79,17 @@ async function assertSalesOperatorPolicy(req, operation, options = {}) {
   const branchId = options.branchId || req.branchId || null;
   const mode = await resolveSalesOperatorMode({ companyId: req.companyId, branchId, transaction: options.transaction || null });
   const accountType = req.user?.accountType || "legacy";
-  const accountTypeRequiresOperator = accountType === "branch_shell" || accountType === "super_admin";
+  const accountTypeRequiresOperator = accountType === "branch_shell";
   req.salesOperatorMode = mode;
   req.salesOperatorPolicy = policy;
+  if (accountType === "super_admin") {
+    if (policy.operatorRequired && !branchId) {
+      throw new AppError("A valid branch selection is required for this business operation.", 422, "BRANCH_SELECTION_REQUIRED");
+    }
+    req.operatorSessionState = null;
+    req.operatorContext = null;
+    return { mode, policy, operatorContext: null };
+  }
   if (!policy.operatorRequired || (mode !== "shared_employee_operator" && !accountTypeRequiresOperator)) {
     return { mode, policy, operatorContext: null };
   }

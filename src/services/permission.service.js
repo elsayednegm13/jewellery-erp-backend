@@ -34,6 +34,10 @@ async function getUserRoles(user) {
 
 async function getUserPermissionNames(user) {
   if (!user) return [];
+  if ((user.accountType || "legacy") === "super_admin") {
+    const all = await Permission.findAll({ attributes: ["name"] });
+    return all.map((p) => p.name);
+  }
   if ((user.accountType || "legacy") === "branch_shell") {
     return [];
   }
@@ -54,6 +58,7 @@ async function getUserPermissionNames(user) {
 
 async function userHasPermission(user, permissionName) {
   if (!user) return false;
+  if ((user.accountType || "legacy") === "super_admin") return true;
   if ((user.accountType || "legacy") === "branch_shell") return false;
   if (ADMIN_LEGACY_ROLES.has(user.role)) return true;
   const names = await getUserPermissionNames(user);
@@ -62,6 +67,7 @@ async function userHasPermission(user, permissionName) {
 
 async function userHasAnyPermission(user, permissionNames) {
   if (!user) return false;
+  if ((user.accountType || "legacy") === "super_admin") return true;
   if ((user.accountType || "legacy") === "branch_shell") return false;
   if (ADMIN_LEGACY_ROLES.has(user.role)) return true;
   const names = await getUserPermissionNames(user);

@@ -3,7 +3,6 @@ const { Op } = require("sequelize");
 const models = require("../models");
 const auditService = require("./audit.service");
 const permissionService = require("./permission.service");
-const operatorSessionService = require("./operator-session.service");
 const technicalSessions = require("./technical-session.service");
 const { ValidationError, ForbiddenError, NotFoundError, ConflictError } = require("../utils/errors");
 const { validatePasswordPolicy, generatePolicyCompliantPassword } = require("../utils/password-policy");
@@ -83,16 +82,23 @@ async function requireSystemAccountPermission(req, permissionName) {
 async function requireSensitiveAdminLevel2(req, { permissionName, operation }) {
   await requireSuperAdminTechnicalScope(req);
   if (permissionName) await requireSystemAccountPermission(req, permissionName);
-  const current = await operatorSessionService.currentFromRequest(req, {
-    touch: false,
-    requiredLevel: 2,
-    requiredPermission: permissionName || "system_accounts.manage",
-    requestedOperation: operation || permissionName || "system-account.sensitive"
+  return {
+    active: true,
+    accountType: "super_admin",
+    operation: operation || permissionName || "system-account.sensitive",
+    context: null
+  };
+}
+
+async function findUserByNormalizedEmail(email, { excludeId = null, transaction = null } = {}) {
+  const where = models.sequelize.where(
+    models.sequelize.fn("lower", models.sequelize.col("email")),
+    String(email || "").trim().toLowerCase()
+  );
+  return models.User.findOne({
+    where: excludeId ? { [Op.and]: [where, { id: { [Op.ne]: excludeId } }] } : where,
+    transaction
   });
-  if (!current.active) {
-    throw operatorSessionService.operatorError(current.reason || "OPERATOR_STEP_UP_REQUIRED", current.statusCode || 403);
-  }
-  return current;
 }
 
 async function validateAccountShape({ accountType, companyId, branchId, defaultEmployeeId, transaction }) {
@@ -166,6 +172,7 @@ async function assertFinalRecoveryPathPreserved(targetUser, nextRecoveryEmail, t
 }
 
 async function listAccounts(req) {
+  await requireSuperAdminTechnicalScope(req);
   await requireSystemAccountPermission(req, "system_accounts.view");
   const where = { companyId: req.companyId };
   if (req.query.accountType) where.accountType = String(req.query.accountType);
@@ -201,7 +208,7 @@ async function createAccount(req) {
     branchId: body.branchId || null,
     defaultEmployeeId: body.defaultEmployeeId || null
   });
-  const exists = await models.User.findOne({ where: { email } });
+  const exists = await findUserByNormalizedEmail(email);
   if (exists) throw new ConflictError("Email is already used by another account.");
   const user = await models.User.create({
     id: id("USR"),
@@ -310,7 +317,7 @@ async function changeEmail(req) {
   await requireSensitiveAdminLevel2(req, { permissionName: "system_accounts.manage", operation: "system-account.change-email" });
   const user = await getAccountOrThrow(req.companyId, req.params.id);
   const email = normalizeEmail(req.body?.email);
-  const exists = await models.User.findOne({ where: { email, id: { [Op.ne]: user.id } } });
+  const exists = await findUserByNormalizedEmail(email, { excludeId: user.id });
   if (exists) throw new ConflictError("Email is already used by another account.");
   await models.sequelize.transaction(async (transaction) => {
     await user.update({ email }, { transaction });
@@ -399,15 +406,19 @@ async function convertAccountType(req) {
 }
 
 async function readiness(req) {
-  await requireSuperAdminTechnicalScope(req);
+  const currentAccountType = req.user?.accountType || "legacy";
   const [superAdmins, superAdminsWithRecovery, branchShells, eligibleEmployees] = await Promise.all([
     models.User.count({ where: { companyId: req.companyId, accountType: "super_admin" } }),
     models.User.count({ where: { companyId: req.companyId, accountType: "super_admin", recoveryEmail: { [Op.ne]: null } } }),
     models.User.count({ where: { companyId: req.companyId, accountType: "branch_shell", branchId: { [Op.ne]: null } } }),
     models.Employee.count({ where: { companyId: req.companyId, status: "present", employeeCode: { [Op.ne]: null } } })
   ]);
+  if (currentAccountType !== "super_admin" && superAdmins > 0) {
+    await requireSuperAdminTechnicalScope(req);
+  }
   return {
     superAdmins,
+    bootstrapNeeded: superAdmins === 0,
     superAdminsWithRecovery,
     finalAdminProtected: superAdmins >= 1,
     branchShells,

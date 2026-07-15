@@ -4,6 +4,7 @@ const User = require("../models/user.model");
 const logger = require("../utils/logger");
 const permissionService = require("../services/permission.service");
 const technicalSessions = require("../services/technical-session.service");
+const models = require("../models");
 
 const { JWT_SECRET } = require("../config/security");
 
@@ -31,10 +32,13 @@ const authMiddleware = async (req, res, next) => {
     req.user = user;
     req.technicalSession = session;
     req.accountScope = technicalSessions.safeScope(user);
-    req.companyId = req.headers["x-company-id"] || user.companyId || "CMP-DEMO";
-    req.branchId = user.branchId || "Main Branch";
 
-    const headerBranchId = req.headers["x-branch-id"];
+    const accountType = user.accountType || "legacy";
+    const headerCompanyId = req.headers["x-company-id"] ? String(req.headers["x-company-id"]) : null;
+    const headerBranchId = req.headers["x-branch-id"] ? String(req.headers["x-branch-id"]) : null;
+    req.companyId = user.companyId || "CMP-DEMO";
+    req.branchId = user.branchId || null;
+
     const COMPANY_LEVEL_PREFIXES = [
       "/settings",
       "/barcode-settings",
@@ -45,7 +49,19 @@ const authMiddleware = async (req, res, next) => {
     ];
     const isCompanyLevel = COMPANY_LEVEL_PREFIXES.some(prefix => req.path.startsWith(prefix));
 
-    if ((user.accountType || "legacy") === "branch_shell") {
+    if (accountType === "super_admin") {
+      if (headerCompanyId) {
+        const company = await models.Company.findByPk(headerCompanyId);
+        if (!company) {
+          throw new AppError("Selected company is invalid.", 403, "COMPANY_SCOPE_INVALID");
+        }
+        req.companyId = headerCompanyId;
+      }
+    } else if (headerCompanyId && String(headerCompanyId) !== String(user.companyId)) {
+      throw new AppError("Selected company is outside this account scope.", 403, "COMPANY_SCOPE_FORBIDDEN");
+    }
+
+    if (accountType === "branch_shell") {
       if (!user.branchId) {
         throw new ForbiddenError("Branch Shell account is missing its fixed branch.");
       }
@@ -54,7 +70,6 @@ const authMiddleware = async (req, res, next) => {
       }
       req.branchId = user.branchId;
     } else if (headerBranchId && !isCompanyLevel) {
-      const models = require("../models");
       const branchRecord = await models.Branch.findOne({
         where: { id: headerBranchId, companyId: req.companyId, isActive: true }
       });

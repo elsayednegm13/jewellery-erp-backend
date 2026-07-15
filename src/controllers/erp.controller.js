@@ -217,10 +217,10 @@ class ErpController {
 
       const offset = (page - 1) * pageSize;
 
-      // Base query scoped to tenant companyId
-      const whereClause = {
+      // Base query scoped to tenant companyId when the model is tenant-owned.
+      const whereClause = this.model.rawAttributes.companyId ? {
         companyId: req.companyId
-      };
+      } : {};
 
       // Branch scope filtering — only when EXPLICITLY requested via ?branch=.
       // The active-branch header/default is context (used for create & audit),
@@ -386,7 +386,7 @@ class ErpController {
       const queryOptions = {
         where: {
           id: req.params.id,
-          companyId: req.companyId
+          ...(this.model.rawAttributes.companyId ? { companyId: req.companyId } : {})
         }
       };
 
@@ -436,7 +436,7 @@ class ErpController {
 
       const payload = {
         ...req.body,
-        companyId: req.companyId
+        ...(this.model.rawAttributes.companyId ? { companyId: req.companyId } : {})
       };
 
       // Phase 10M: Supplier.due is system-managed (frozen) and must never be set
@@ -518,7 +518,7 @@ class ErpController {
       const item = await this.model.findOne({
         where: {
           id: req.params.id,
-          companyId: req.companyId
+          ...(this.model.rawAttributes.companyId ? { companyId: req.companyId } : {})
         }
       });
 
@@ -645,7 +645,7 @@ class ErpController {
       const item = await this.model.findOne({
         where: {
           id: req.params.id,
-          companyId: req.companyId
+          ...(this.model.rawAttributes.companyId ? { companyId: req.companyId } : {})
         }
       });
 
@@ -718,7 +718,7 @@ class ErpController {
       const item = await this.model.findOne({
         where: {
           id: req.params.id,
-          companyId: req.companyId
+          ...(this.model.rawAttributes.companyId ? { companyId: req.companyId } : {})
         }
       });
 
@@ -796,7 +796,7 @@ class ErpController {
       const item = await this.model.findOne({
         where: {
           id: req.params.id,
-          companyId: req.companyId
+          ...(this.model.rawAttributes.companyId ? { companyId: req.companyId } : {})
         }
       });
 
