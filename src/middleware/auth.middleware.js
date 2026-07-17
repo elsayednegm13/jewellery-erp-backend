@@ -28,6 +28,9 @@ const authMiddleware = async (req, res, next) => {
     }
 
     const { user, session } = await technicalSessions.assertAccessSession(decoded);
+    if (user.isActive === false) {
+      throw new AppError("Account is inactive.", 403, "ACCOUNT_INACTIVE");
+    }
 
     req.user = user;
     req.technicalSession = session;
@@ -63,10 +66,23 @@ const authMiddleware = async (req, res, next) => {
 
     if (accountType === "branch_shell") {
       if (!user.branchId) {
-        throw new ForbiddenError("Branch Shell account is missing its fixed branch.");
+        throw new AppError("Branch Account requires an assigned branch.", 422, "BRANCH_ACCOUNT_BRANCH_REQUIRED");
+      }
+      const branchRecord = await models.Branch.findOne({
+        where: { id: user.branchId, isActive: true },
+        attributes: ["id", "companyId", "isActive"]
+      });
+      if (!branchRecord || branchRecord.isActive === false) {
+        throw new AppError("Branch Account branch is inactive or missing.", 422, "BRANCH_ACCOUNT_BRANCH_INACTIVE");
+      }
+      if (String(branchRecord.companyId) !== String(user.companyId)) {
+        throw new AppError("Branch Account company does not match assigned company.", 422, "BRANCH_ACCOUNT_COMPANY_MISMATCH");
+      }
+      if (headerCompanyId && String(headerCompanyId) !== String(user.companyId)) {
+        throw new AppError("Branch Account company scope is fixed.", 403, "BRANCH_ACCOUNT_FIXED_SCOPE");
       }
       if (headerBranchId && String(headerBranchId) !== String(user.branchId)) {
-        throw new AppError("Branch Shell accounts cannot switch branches.", 403, "OPERATOR_BRANCH_MISMATCH");
+        throw new AppError("Branch Account branch scope is fixed.", 403, "BRANCH_ACCOUNT_FIXED_SCOPE");
       }
       req.branchId = user.branchId;
     } else if (headerBranchId && !isCompanyLevel) {

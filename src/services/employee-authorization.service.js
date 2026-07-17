@@ -294,17 +294,17 @@ async function verifyEmployeeCredential({
     const branchAllowed = await assertEmployeeBranchAccess({ companyId, employeeId: employee.id, branchId, transaction: t });
     if (!branchAllowed) {
       await recordVerificationAttempt({ ...attemptWithEmployee, result: "failure", failureCode: "EMPLOYEE_BRANCH_FORBIDDEN" });
-      return { failed: true, code: "EMPLOYEE_VERIFICATION_FAILED", statusCode: 403 };
+      return { failed: true, code: "EMPLOYEE_BRANCH_ACCESS_DENIED", statusCode: 403 };
     }
     if (!credential) {
       await bcrypt.compare(pin, DUMMY_BCRYPT_HASH);
       await recordVerificationAttempt({ ...attemptWithEmployee, result: "failure", failureCode: "EMPLOYEE_VERIFICATION_FAILED" });
-      return { failed: true, code: "EMPLOYEE_VERIFICATION_FAILED", statusCode: 403 };
+      return { failed: true, code: "EMPLOYEE_CREDENTIAL_REQUIRED", statusCode: 403 };
     }
     const now = new Date();
     if (credential.lockedUntil && new Date(credential.lockedUntil) > now) {
       await recordVerificationAttempt({ ...attemptWithEmployee, result: "failure", failureCode: "EMPLOYEE_LOCKED" });
-      return { failed: true, code: "EMPLOYEE_LOCKED", statusCode: 423 };
+      return { failed: true, code: "EMPLOYEE_CREDENTIAL_LOCKED", statusCode: 423 };
     }
     const matches = await bcrypt.compare(pin, credential.pinHash);
     if (!matches) {
@@ -316,7 +316,7 @@ async function verifyEmployeeCredential({
         lockedUntil
       }, { transaction: t });
       await recordVerificationAttempt({ ...attemptWithEmployee, result: "failure", failureCode: lockedUntil ? "EMPLOYEE_LOCKED" : "EMPLOYEE_VERIFICATION_FAILED" });
-      return { failed: true, code: lockedUntil ? "EMPLOYEE_LOCKED" : "EMPLOYEE_VERIFICATION_FAILED", statusCode: lockedUntil ? 423 : 403 };
+      return { failed: true, code: lockedUntil ? "EMPLOYEE_CREDENTIAL_LOCKED" : "EMPLOYEE_VERIFICATION_FAILED", statusCode: lockedUntil ? 423 : 403 };
     }
     let allowed = true;
     let resolved = null;

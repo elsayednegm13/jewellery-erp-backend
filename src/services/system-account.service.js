@@ -4,7 +4,7 @@ const models = require("../models");
 const auditService = require("./audit.service");
 const permissionService = require("./permission.service");
 const technicalSessions = require("./technical-session.service");
-const { ValidationError, ForbiddenError, NotFoundError, ConflictError } = require("../utils/errors");
+const { AppError, ValidationError, ForbiddenError, NotFoundError, ConflictError } = require("../utils/errors");
 const { validatePasswordPolicy, generatePolicyCompliantPassword } = require("../utils/password-policy");
 
 const ACCOUNT_TYPES = new Set(["legacy", "super_admin", "branch_shell"]);
@@ -45,6 +45,7 @@ function safeUser(user, extras = {}) {
     phone: plain.phone || "",
     jobTitle: plain.jobTitle || "",
     role: plain.role,
+    isActive: plain.isActive !== false,
     accountType: plain.accountType || "legacy",
     branchId: plain.branchId || null,
     branch: plain.branch ? { id: plain.branch.id, name: plain.branch.name, code: plain.branch.code } : null,
@@ -101,21 +102,41 @@ async function findUserByNormalizedEmail(email, { excludeId = null, transaction 
   });
 }
 
+function stableError(message, statusCode, code, fieldErrors = null) {
+  return new AppError(message, statusCode, code, fieldErrors);
+}
+
 async function validateAccountShape({ accountType, companyId, branchId, defaultEmployeeId, transaction }) {
   if (!ACCOUNT_TYPES.has(accountType)) throw new ValidationError("Invalid account type.", { accountType: ["Invalid account type."] });
   if (accountType === "branch_shell" && !branchId) {
-    throw new ValidationError("Branch Shell requires a branch.", { branchId: ["Branch Shell requires a branch."] });
+    throw stableError("Branch Account requires a branch.", 422, "BRANCH_ACCOUNT_BRANCH_REQUIRED", { branchId: ["Branch Account requires a branch."] });
   }
   if (accountType === "super_admin" && branchId) {
     throw new ValidationError("Super Admin must not be fixed to a branch.", { branchId: ["Super Admin cannot have a branch assignment."] });
   }
   if (branchId) {
     const branch = await models.Branch.findOne({ where: { id: branchId, companyId, isActive: true }, transaction });
-    if (!branch) throw new ValidationError("Branch does not belong to this company or is inactive.", { branchId: ["Invalid branch."] });
+    if (!branch) throw stableError("Branch does not belong to this company or is inactive.", 422, "BRANCH_ACCOUNT_BRANCH_INACTIVE", { branchId: ["Invalid branch."] });
   }
   if (defaultEmployeeId) {
     const employee = await models.Employee.findOne({ where: { id: defaultEmployeeId, companyId, status: { [Op.ne]: "inactive" } }, transaction });
     if (!employee) throw new ValidationError("Default Employee must be active and in the same company.", { defaultEmployeeId: ["Invalid default Employee."] });
+  }
+}
+
+async function assertNoBranchAccountForBranch(branchId, { excludeId = null, transaction = null } = {}) {
+  if (!branchId) return;
+  const where = {
+    accountType: "branch_shell",
+    branchId,
+    deletedAt: null
+  };
+  if (excludeId) where.id = { [Op.ne]: excludeId };
+  const existing = await models.User.findOne({ where, transaction, paranoid: false });
+  if (existing) {
+    throw stableError("A Branch Account already exists for this branch.", 409, "BRANCH_ACCOUNT_ALREADY_EXISTS", {
+      branchId: ["A Branch Account already exists for this branch."]
+    });
   }
 }
 
@@ -199,6 +220,9 @@ async function createAccount(req) {
   await requireSensitiveAdminLevel2(req, { permissionName: "system_accounts.manage", operation: "system-account.create" });
   const body = req.body || {};
   const accountType = body.accountType || "legacy";
+  if (accountType === "branch_shell") {
+    return createBranchAccount(req);
+  }
   const email = normalizeEmail(body.email);
   const temporaryPassword = body.temporaryPassword || generateTemporaryPassword();
   validatePasswordPolicy(temporaryPassword, { email, firstName: body.firstName, lastName: body.lastName });
@@ -209,7 +233,10 @@ async function createAccount(req) {
     defaultEmployeeId: body.defaultEmployeeId || null
   });
   const exists = await findUserByNormalizedEmail(email);
-  if (exists) throw new ConflictError("Email is already used by another account.");
+  if (exists) throw stableError("Email is already used by another account.", 409, "EMAIL_ALREADY_USED", { email: ["Email is already used."] });
+  if (accountType === "branch_shell") {
+    await assertNoBranchAccountForBranch(body.branchId);
+  }
   const user = await models.User.create({
     id: id("USR"),
     companyId: req.companyId,
@@ -219,6 +246,7 @@ async function createAccount(req) {
     phone: body.phone || "",
     jobTitle: body.jobTitle || "",
     role: body.role || "sales",
+    isActive: body.active !== false,
     password: await bcrypt.hash(temporaryPassword, 10),
     accountType,
     branchId: accountType === "branch_shell" ? body.branchId : null,
@@ -242,6 +270,72 @@ async function createAccount(req) {
   return { account: safeUser(user), temporaryPassword };
 }
 
+async function createBranchAccount(req) {
+  await requireSensitiveAdminLevel2(req, { permissionName: "system_accounts.manage", operation: "branch-account.create" });
+  const body = req.body || {};
+  const allowed = new Set(["branchId", "email", "temporaryPassword", "active", "reason"]);
+  const forbidden = Object.keys(body).filter((key) => !allowed.has(key));
+  if (forbidden.length) {
+    throw stableError("Branch Account creation accepts only branch, login email, temporary password, and active status.", 422, "VALIDATION_FAILED", {
+      body: [`Forbidden fields: ${forbidden.join(", ")}`]
+    });
+  }
+  if (!body.branchId) {
+    throw stableError("Branch Account requires a branch.", 422, "BRANCH_ACCOUNT_BRANCH_REQUIRED", { branchId: ["Branch Account requires a branch."] });
+  }
+  const branch = await models.Branch.findOne({
+    where: { id: body.branchId, isActive: true },
+    include: [{ model: models.Company, as: "company", required: true }],
+    attributes: ["id", "companyId", "name", "code", "isActive"]
+  });
+  if (!branch) {
+    throw stableError("Branch does not exist or is inactive.", 422, "BRANCH_ACCOUNT_BRANCH_INACTIVE", { branchId: ["Branch is inactive or missing."] });
+  }
+  if (!branch.company) {
+    throw stableError("Branch company is missing.", 422, "BRANCH_ACCOUNT_COMPANY_MISMATCH");
+  }
+  if (String(branch.companyId) !== String(req.companyId)) {
+    throw stableError("Branch belongs to a different company.", 422, "BRANCH_ACCOUNT_COMPANY_MISMATCH");
+  }
+  const email = normalizeEmail(body.email);
+  const temporaryPassword = body.temporaryPassword || generateTemporaryPassword();
+  validatePasswordPolicy(temporaryPassword, { email, firstName: "Branch", lastName: "Account" });
+  return models.sequelize.transaction(async (transaction) => {
+    await assertNoBranchAccountForBranch(branch.id, { transaction });
+    const exists = await findUserByNormalizedEmail(email, { transaction });
+    if (exists) throw stableError("Email is already used by another account.", 409, "EMAIL_ALREADY_USED", { email: ["Email is already used."] });
+    const user = await models.User.create({
+      id: id("USR"),
+      companyId: branch.companyId,
+      firstName: "Branch",
+      lastName: branch.name || branch.code || "Account",
+      email,
+      phone: "",
+      jobTitle: "Branch Account",
+      role: "sales",
+      isActive: body.active !== false,
+      password: await bcrypt.hash(temporaryPassword, 10),
+      accountType: "branch_shell",
+      branchId: branch.id,
+      defaultEmployeeId: null,
+      forcePasswordChange: true,
+      credentialsChangedAt: new Date()
+    }, { transaction });
+    await auditService.record(branch.companyId, {
+      action: "branch_account.created",
+      description: `Branch Account created for ${branch.name || branch.id}.`,
+      user: actorName(req.user),
+      userId: req.user.id,
+      technicalUserId: req.user.id,
+      place: "System Accounts",
+      sourceDocument: user.id,
+      severity: "warning",
+      after: JSON.stringify({ targetUserId: user.id, branchId: branch.id, active: user.isActive !== false })
+    }, { transaction });
+    return { account: safeUser(user), temporaryPassword };
+  });
+}
+
 async function getAccountOrThrow(companyId, id, transaction = null) {
   const user = await models.User.findOne({ where: { companyId, id }, transaction });
   if (!user) throw new NotFoundError("System account not found.");
@@ -251,6 +345,11 @@ async function getAccountOrThrow(companyId, id, transaction = null) {
 async function patchAccount(req) {
   await requireSensitiveAdminLevel2(req, { permissionName: "system_accounts.manage", operation: "system-account.update" });
   const user = await getAccountOrThrow(req.companyId, req.params.id);
+  if ((user.accountType || "legacy") === "branch_shell") {
+    const blocked = ["companyId", "branchId", "accountType", "role", "defaultEmployeeId", "isActive", "active"];
+    const found = blocked.filter((key) => Object.prototype.hasOwnProperty.call(req.body || {}, key));
+    if (found.length) throw stableError("Branch Account fixed fields cannot be changed.", 403, "BRANCH_ACCOUNT_FIXED_SCOPE");
+  }
   const body = req.body || {};
   const updates = {};
   for (const key of ["firstName", "lastName", "phone", "jobTitle", "recoveryPhone"]) {
@@ -318,7 +417,7 @@ async function changeEmail(req) {
   const user = await getAccountOrThrow(req.companyId, req.params.id);
   const email = normalizeEmail(req.body?.email);
   const exists = await findUserByNormalizedEmail(email, { excludeId: user.id });
-  if (exists) throw new ConflictError("Email is already used by another account.");
+  if (exists) throw stableError("Email is already used by another account.", 409, "EMAIL_ALREADY_USED", { email: ["Email is already used."] });
   await models.sequelize.transaction(async (transaction) => {
     await user.update({ email }, { transaction });
     await technicalSessions.bumpSessionVersion(user, "email_change", transaction);
@@ -354,6 +453,28 @@ async function unlockAccount(req) {
   return safeUser(user);
 }
 
+async function setActive(req, active) {
+  await requireSensitiveAdminLevel2(req, { permissionName: "system_accounts.manage", operation: active ? "system-account.activate" : "system-account.deactivate" });
+  const user = await getAccountOrThrow(req.companyId, req.params.id);
+  if (!active) await assertNotFinalSuperAdmin(user, "deactivate", null);
+  await models.sequelize.transaction(async (transaction) => {
+    await user.update({ isActive: Boolean(active) }, { transaction });
+    await technicalSessions.bumpSessionVersion(user, active ? "account_activated" : "account_deactivated", transaction);
+    await auditService.record(req.companyId, {
+      action: active ? "system_account.activated" : "system_account.deactivated",
+      description: `${active ? "Activated" : "Deactivated"} system account ${user.email}.`,
+      user: actorName(req.user),
+      userId: req.user.id,
+      technicalUserId: req.user.id,
+      place: "System Accounts",
+      sourceDocument: user.id,
+      severity: "warning",
+      after: JSON.stringify({ targetUserId: user.id, active: Boolean(active), reason: req.body?.reason || null })
+    }, { transaction });
+  });
+  return safeUser(user);
+}
+
 async function revokeSessions(req) {
   await requireSensitiveAdminLevel2(req, { permissionName: "system_accounts.sessions.revoke", operation: "system-account.revoke-sessions" });
   const user = await getAccountOrThrow(req.companyId, req.params.id);
@@ -383,11 +504,14 @@ async function convertAccountType(req) {
     branchId: body.branchId || null,
     defaultEmployeeId: body.defaultEmployeeId || user.defaultEmployeeId || null
   });
+  if (targetType === "branch_shell") {
+    await assertNoBranchAccountForBranch(body.branchId, { excludeId: user.id });
+  }
   await models.sequelize.transaction(async (transaction) => {
     await user.update({
       accountType: targetType,
       branchId: targetType === "branch_shell" ? body.branchId : null,
-      defaultEmployeeId: body.defaultEmployeeId || user.defaultEmployeeId || null
+      defaultEmployeeId: targetType === "branch_shell" ? null : (body.defaultEmployeeId || user.defaultEmployeeId || null)
     }, { transaction });
     await technicalSessions.bumpSessionVersion(user, "account_type_change", transaction);
     await auditService.record(req.companyId, {
@@ -440,11 +564,13 @@ module.exports = {
   isFinalActiveSuperAdmin,
   listAccounts,
   createAccount,
+  createBranchAccount,
   patchAccount,
   resetPassword,
   changeEmail,
   unlockAccount,
   revokeSessions,
+  setActive,
   convertAccountType,
   readiness
 };

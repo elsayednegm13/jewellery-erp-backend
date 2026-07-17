@@ -3,7 +3,7 @@ const jwt = require("jsonwebtoken");
 const { Op } = require("sequelize");
 const models = require("../models");
 const auditService = require("./audit.service");
-const { UnauthorizedError } = require("../utils/errors");
+const { AppError, UnauthorizedError } = require("../utils/errors");
 const { JWT_SECRET, JWT_REFRESH_SECRET, ACCESS_EXPIRY, REFRESH_EXPIRY } = require("../config/security");
 
 function id(prefix) {
@@ -101,6 +101,7 @@ async function rotateRefreshToken(refreshToken, req) {
   if (!session || !session.user) throw new UnauthorizedError("انتهت صلاحية جلسة العمل. يرجى تسجيل الدخول مرة أخرى.");
   const now = new Date();
   const user = session.user;
+  if (user.isActive === false) throw new AppError("Account is inactive.", 403, "ACCOUNT_INACTIVE");
   const expectedHash = tokenHash(decoded.secret || "");
   const stale =
     session.revokedAt ||
@@ -134,6 +135,7 @@ async function rotateRefreshToken(refreshToken, req) {
 async function assertAccessSession(decoded) {
   const user = await models.User.findByPk(decoded.userId);
   if (!user) throw new UnauthorizedError("المستخدم غير موجود.");
+  if (user.isActive === false) throw new AppError("Account is inactive.", 403, "ACCOUNT_INACTIVE");
   if (!decoded.technicalSessionId) throw new UnauthorizedError("انتهت الجلسة. يرجى تسجيل الدخول مرة أخرى.");
   const session = await models.TechnicalAccountSession.findOne({
     where: { id: decoded.technicalSessionId, userId: user.id }
@@ -155,6 +157,10 @@ async function assertAccessSession(decoded) {
 
 async function revokeSession(sessionId, userId, reason = "logout", transaction = null) {
   if (!sessionId) return 0;
+  const session = await models.TechnicalAccountSession.findOne({
+    where: { id: sessionId, userId },
+    transaction
+  });
   const [count] = await models.TechnicalAccountSession.update({
     revokedAt: new Date(),
     revokeReason: reason
@@ -162,6 +168,12 @@ async function revokeSession(sessionId, userId, reason = "logout", transaction =
     where: { id: sessionId, userId, revokedAt: null },
     transaction
   });
+  if (count && session?.deviceSessionId) {
+    await revokeOperatorSessionsForUser(userId, reason, {
+      deviceSessionId: session.deviceSessionId,
+      transaction
+    });
+  }
   return count;
 }
 
@@ -171,6 +183,20 @@ async function revokeUserSessions(userId, reason = "security_change", { exceptSe
   const [count] = await models.TechnicalAccountSession.update({
     revokedAt: new Date(),
     revokeReason: reason
+  }, { where, transaction });
+  if (count) await revokeOperatorSessionsForUser(userId, reason, { transaction });
+  return count;
+}
+
+async function revokeOperatorSessionsForUser(userId, reason = "technical_session_revoked", { deviceSessionId = null, transaction = null } = {}) {
+  const where = {
+    sessionUserId: userId,
+    revokedAt: null
+  };
+  if (deviceSessionId) where.deviceSessionId = deviceSessionId;
+  const [count] = await models.EmployeeOperationalSession.update({
+    revokedAt: new Date(),
+    revokedReason: reason
   }, { where, transaction });
   return count;
 }
@@ -216,4 +242,5 @@ module.exports = {
   bumpSessionVersion,
   bumpPasswordVersion,
   auditSessionRevocation
+  , revokeOperatorSessionsForUser
 };

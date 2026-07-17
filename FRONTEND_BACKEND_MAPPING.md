@@ -215,4 +215,4 @@ NEXT_PUBLIC_DATA_SOURCE=api
      NEXT_PUBLIC_DATA_SOURCE=api
      ```
 4. **Boot Frontend**: Run `npm run dev` in the frontend root.
-5. **Login Validation**: Open `http://localhost:3000/ar/login` and login using `admin@admin.com` with password `123456`. The app will now pull dynamic assets, invoices, statement balances, and gold rates straight from PostgreSQL!
+5. **Login Validation**: Open `http://localhost:3000/ar/login` and login using `admin@admin.com` with the current local owner password. The app will now pull dynamic assets, invoices, statement balances, and gold rates straight from PostgreSQL!

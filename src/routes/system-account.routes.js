@@ -22,6 +22,15 @@ router.post("/", authMiddleware, async (req, res, next) => {
   }
 });
 
+router.post("/branch-accounts", authMiddleware, async (req, res, next) => {
+  try {
+    const result = await systemAccounts.createBranchAccount(req);
+    res.status(201).json({ success: true, data: result });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.patch("/:id", authMiddleware, async (req, res, next) => {
   try {
     const account = await systemAccounts.patchAccount(req);
@@ -52,6 +61,24 @@ router.post("/:id/reset-password", authMiddleware, async (req, res, next) => {
 router.post("/:id/unlock", authMiddleware, async (req, res, next) => {
   try {
     const account = await systemAccounts.unlockAccount(req);
+    res.status(200).json({ success: true, data: { account } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/:id/activate", authMiddleware, async (req, res, next) => {
+  try {
+    const account = await systemAccounts.setActive(req, true);
+    res.status(200).json({ success: true, data: { account } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/:id/deactivate", authMiddleware, async (req, res, next) => {
+  try {
+    const account = await systemAccounts.setActive(req, false);
     res.status(200).json({ success: true, data: { account } });
   } catch (error) {
     next(error);

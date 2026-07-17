@@ -358,6 +358,22 @@ async function lockCurrent(req, reason = "manual_lock") {
   return current.session;
 }
 
+async function endCurrent(req, reason = "operator_session_ended") {
+  const current = await currentFromRequest(req, { touch: false });
+  if (!current.session) throw operatorError(current.reason || "OPERATOR_SESSION_REQUIRED", current.statusCode || 401);
+  await revokeSession(current.session, reason);
+  await auditService.record(req.companyId, auditService.attachDualAuditActor({
+    action: "operator.session.ended",
+    description: "Operator session ended.",
+    place: req.branchId || "Operator",
+    branch: req.branchId || null,
+    sourceDocument: current.session.id,
+    severity: "info",
+    authorizationResult: "allowed"
+  }, contextFromSession(current.session, req)));
+  return current.session;
+}
+
 module.exports = {
   normalizeDeviceSessionId,
   employeeSafe,
@@ -366,6 +382,7 @@ module.exports = {
   verifyOperator,
   authorizeAction,
   lockCurrent,
+  endCurrent,
   assertLiveSession,
   operatorError,
   contextFromSession

@@ -64,7 +64,11 @@ function resolveSalesOperationPolicy(operation) {
   return { operation, ...policy };
 }
 
-function mapOperatorReason(reason) {
+function mapOperatorReason(reason, accountType = "legacy") {
+  if (accountType === "branch_shell") {
+    if (reason === "DEVICE_SESSION_REQUIRED" || reason === "OPERATOR_SESSION_REQUIRED") return "BRANCH_ACCOUNT_EMPLOYEE_REQUIRED";
+    if (reason === "OPERATOR_SESSION_BRANCH_FORBIDDEN") return "EMPLOYEE_BRANCH_ACCESS_DENIED";
+  }
   if (reason === "DEVICE_SESSION_REQUIRED") return "OPERATOR_SESSION_REQUIRED";
   if (reason === "OPERATOR_SESSION_IDLE_TIMEOUT") return "OPERATOR_SESSION_EXPIRED";
   if (reason === "OPERATOR_SESSION_STALE_CREDENTIAL") return "OPERATOR_SESSION_STALE";
@@ -101,7 +105,7 @@ async function assertSalesOperatorPolicy(req, operation, options = {}) {
     touch: true
   });
   if (!result.active) {
-    const code = mapOperatorReason(result.reason);
+    const code = mapOperatorReason(result.reason, accountType);
     throw new AppError("Operator authorization failed.", result.statusCode || 403, code);
   }
   const sessionBranchId = result.session?.branchId || result.context?.branchId || req.branchId;

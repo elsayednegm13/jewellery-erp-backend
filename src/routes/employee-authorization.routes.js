@@ -200,6 +200,20 @@ router.post("/operator/lock", authMiddleware, async (req, res, next) => {
   }
 });
 
+router.post("/operator/end-session", authMiddleware, async (req, res, next) => {
+  try {
+    const session = await operatorSessionService.endCurrent(req, req.body?.reason || "operator_session_ended");
+    return res.status(200).json({
+      success: true,
+      data: {
+        operatorSession: operatorSessionService.sessionSafe(session, "inactive", "OPERATOR_SESSION_ENDED")
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post("/operator/change-pin", authMiddleware, async (req, res, next) => {
   try {
     const current = await operatorSessionService.currentFromRequest(req, {

@@ -62,6 +62,15 @@ const serializeCompany = (company) => company ? {
 const serializeUser = async (user) => {
   const permissions = await permissionService.getUserPermissionNames(user);
   const roles = await permissionService.getUserRoles(user);
+  const fixedBranch = (user.accountType || "legacy") === "branch_shell" && user.branchId
+    ? await require("../models").Branch.findOne({ where: { id: user.branchId }, attributes: ["id", "name", "code"] })
+    : null;
+  const accountScope = technicalSessions.safeScope(user);
+  if (fixedBranch) {
+    accountScope.branchName = fixedBranch.name || null;
+    accountScope.branchCode = fixedBranch.code || null;
+    accountScope.fixedBranch = { id: fixedBranch.id, name: fixedBranch.name, code: fixedBranch.code };
+  }
   return {
     id: user.id,
     firstName: user.firstName,
@@ -71,7 +80,7 @@ const serializeUser = async (user) => {
     jobTitle: user.jobTitle || "",
     role: user.role,
     accountType: user.accountType || "legacy",
-    accountScope: technicalSessions.safeScope(user),
+    accountScope,
     forcePasswordChange: Boolean(user.forcePasswordChange),
     defaultEmployeeId: user.defaultEmployeeId || null,
     roles: roles.map((role) => ({ id: role.id, name: role.name, slug: role.slug, isAdmin: role.isAdmin })),
@@ -98,7 +107,7 @@ class AuthController {
       }
       const now = new Date();
       if (user.lockedUntil && new Date(user.lockedUntil) > now) {
-        throw genericLoginError();
+        throw new AppError("Account is locked.", 423, "ACCOUNT_LOCKED");
       }
       const passwordMatches = await bcrypt.compare(password, user.password);
       if (!passwordMatches) {
@@ -123,11 +132,31 @@ class AuthController {
         throw genericLoginError();
       }
 
-      if ((user.accountType || "legacy") === "branch_shell" && !user.branchId) {
-        throw new AppError("Branch Shell account is not ready.", 403, "BRANCH_SHELL_NOT_READY");
+      if (user.isActive === false) {
+        throw new AppError("Account is inactive.", 403, "ACCOUNT_INACTIVE");
+      }
+
+      const accountType = user.accountType || "legacy";
+      if (accountType === "branch_shell") {
+        if (!user.branchId) {
+          throw new AppError("Branch Account requires an assigned branch.", 422, "BRANCH_ACCOUNT_BRANCH_REQUIRED");
+        }
+        const branch = await require("../models").Branch.findOne({
+          where: { id: user.branchId, isActive: true },
+          attributes: ["id", "companyId", "name", "code", "isActive"]
+        });
+        if (!branch || branch.isActive === false) {
+          throw new AppError("Branch Account branch is inactive or missing.", 422, "BRANCH_ACCOUNT_BRANCH_INACTIVE");
+        }
+        if (String(branch.companyId) !== String(user.companyId)) {
+          throw new AppError("Branch Account company does not match assigned branch.", 422, "BRANCH_ACCOUNT_COMPANY_MISMATCH");
+        }
       }
 
       const company = await Company.findByPk(user.companyId);
+      if (!company) {
+        throw new AppError("Branch Account company is missing.", 422, "BRANCH_ACCOUNT_COMPANY_MISMATCH");
+      }
       await user.update({ failedLoginCount: 0, lockedUntil: null, lastLoginAt: now });
       const tokens = await technicalSessions.issueTokens(user, req);
 

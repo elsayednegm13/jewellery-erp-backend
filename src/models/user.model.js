@@ -45,6 +45,12 @@ const User = sequelize.define("User", {
     allowNull: false,
     defaultValue: "sales"
   },
+  isActive: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: true,
+    field: "is_active"
+  },
   accountType: {
     type: DataTypes.ENUM("legacy", "super_admin", "branch_shell"),
     allowNull: false,
