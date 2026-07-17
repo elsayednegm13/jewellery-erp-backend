@@ -5,7 +5,7 @@ const auditService = require("./audit.service");
 const permissionService = require("./permission.service");
 const technicalSessions = require("./technical-session.service");
 const { AppError, ValidationError, ForbiddenError, NotFoundError, ConflictError } = require("../utils/errors");
-const { validatePasswordPolicy, generatePolicyCompliantPassword } = require("../utils/password-policy");
+const { validatePasswordPolicy } = require("../utils/password-policy");
 
 const ACCOUNT_TYPES = new Set(["legacy", "super_admin", "branch_shell"]);
 
@@ -367,20 +367,20 @@ async function patchAccount(req) {
     });
     updates.defaultEmployeeId = body.defaultEmployeeId || null;
   }
-  if ((user.accountType || "legacy") === "branch_shell" && Object.prototype.hasOwnProperty.call(body, "branchId")) {
-    const nextBranchId = String(body.branchId || "").trim();
-    if (!nextBranchId) throw stableError("Branch Account requires a branch.", 422, "BRANCH_ACCOUNT_BRANCH_REQUIRED", { branchId: ["Branch Account requires a branch."] });
-    await validateAccountShape({
-      accountType: "branch_shell",
-      companyId: req.companyId,
-      branchId: nextBranchId,
-      defaultEmployeeId: null
-    });
-    await assertNoBranchAccountForBranch(nextBranchId, { excludeId: user.id });
-    updates.branchId = nextBranchId;
-  }
   await models.sequelize.transaction(async (transaction) => {
     const before = user.toJSON();
+    if ((user.accountType || "legacy") === "branch_shell" && Object.prototype.hasOwnProperty.call(body, "branchId")) {
+      const nextBranchId = String(body.branchId || "").trim();
+      if (!nextBranchId) throw stableError("Branch Account requires a branch.", 422, "BRANCH_ACCOUNT_BRANCH_REQUIRED", { branchId: ["Branch Account requires a branch."] });
+      await validateAccountShape({
+        accountType: "branch_shell",
+        companyId: req.companyId,
+        branchId: nextBranchId,
+        defaultEmployeeId: null
+      }, transaction);
+      await assertNoBranchAccountForBranch(nextBranchId, { excludeId: user.id, transaction });
+      updates.branchId = nextBranchId;
+    }
     await user.update(updates, { transaction });
     if (Object.prototype.hasOwnProperty.call(updates, "branchId")) {
       await technicalSessions.bumpSessionVersion(user, "branch_account_branch_changed", transaction);
