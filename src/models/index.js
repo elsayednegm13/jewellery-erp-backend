@@ -54,6 +54,8 @@ const Account = require("./account.model");
 const JournalEntry = require("./journalEntry.model");
 const JournalLine = require("./journalLine.model");
 const CashTransaction = require("./cashTransaction.model");
+const AccountingLock = require("./accountingLock.model");
+const CashRegisterSession = require("./cashRegisterSession.model");
 const Installment = require("./installment.model");
 const GiftVoucher = require("./giftVoucher.model");
 const GoldFixing = require("./goldFixing.model");
@@ -186,6 +188,8 @@ InventoryGoldPool.belongsTo(Company, { foreignKey: "companyId", as: "company" })
 
 Company.hasMany(Account, { foreignKey: "companyId", as: "accounts" });
 Account.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Company.hasOne(AccountingLock, { foreignKey: "companyId", as: "accountingLock" });
+AccountingLock.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
 Company.hasMany(JournalEntry, { foreignKey: "companyId", as: "journalEntries" });
 JournalEntry.belongsTo(Company, { foreignKey: "companyId", as: "company" });
@@ -193,6 +197,10 @@ JournalEntry.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 Company.hasMany(CashTransaction, { foreignKey: "companyId", as: "cashTransactions" });
 CashTransaction.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 CashTransaction.belongsTo(JournalEntry, { foreignKey: "journalEntryId", as: "journalEntry" });
+Company.hasMany(CashRegisterSession, { foreignKey: "companyId", as: "cashRegisterSessions" });
+CashRegisterSession.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(CashRegisterSession, { foreignKey: "branchId", as: "cashRegisterSessions" });
+CashRegisterSession.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
 
 Company.hasMany(Installment, { foreignKey: "companyId", as: "installments" });
 Installment.belongsTo(Company, { foreignKey: "companyId", as: "company" });
@@ -534,6 +542,8 @@ module.exports = {
   JournalEntry,
   JournalLine,
   CashTransaction,
+  AccountingLock,
+  CashRegisterSession,
   Installment,
   GiftVoucher,
   GoldFixing,

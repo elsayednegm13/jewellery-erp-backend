@@ -8,7 +8,8 @@ const PERMISSIONS = [
   "pos.view", "pos.sell", "pos.discount.approve",
   "inventory.view", "inventory.create", "inventory.update", "inventory.delete", "inventory.adjust", "inventory.export", "inventory.print",
   "suppliers.view", "suppliers.create", "suppliers.update", "suppliers.delete", "suppliers.export",
-  "accounting.view", "accounting.post", "accounting.export", "treasury.view", "treasury.update",
+  "accounting.view", "accounting.post", "accounting.export", "accounting.lock.manage", "accounting.reconciliation.view",
+  "treasury.view", "treasury.update", "treasury.register.view", "treasury.register.open", "treasury.register.close",
   "reports.view", "reports.export", "settings.view", "settings.update",
   "reservations.view", "reservations.view_all", "reservations.view_branch", "reservations.view_own",
   "reservations.create", "reservations.record_payment", "reservations.view_payments", "reservations.view_receipts",
@@ -35,10 +36,11 @@ const PERMISSIONS = [
 const ROLE_DEFS = {
   admin: PERMISSIONS,
   owner: PERMISSIONS,
-  manager: PERMISSIONS.filter((p) => !["accounting.post", "users.delete", "roles.manage", "permissions.manage"].includes(p)),
+  manager: PERMISSIONS.filter((p) => !["accounting.post", "accounting.lock.manage", "users.delete", "roles.manage", "permissions.manage"].includes(p)),
   accountant: [
     "dashboard.view", "sales.view", "customers.view", "suppliers.view", "accounting.view", "accounting.post",
-    "treasury.view", "treasury.update", "reports.view", "reports.export", "settings.view",
+    "treasury.view", "treasury.update", "treasury.register.view", "treasury.register.open", "treasury.register.close",
+    "accounting.lock.manage", "accounting.reconciliation.view", "reports.view", "reports.export", "settings.view",
     "notifications.view", "audit.view", "reservations.view", "reservations.view_all", "reservations.view_payments",
     "reservations.view_receipts", "reservations.refund_approve", "reservations.refund_reject",
     "reservations.refund_execute", "reservations.audit_view", "reservations.reports_view", "reservations.reports_export",

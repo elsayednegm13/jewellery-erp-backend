@@ -1,5 +1,6 @@
 const { Account, JournalEntry, JournalLine, sequelize } = require("../models");
 const logger = require("../utils/logger");
+const accountingLockService = require("./accounting-lock.service");
 
 /**
  * Financial Posting Engine
@@ -263,6 +264,10 @@ class PostingService {
       const stamp = Date.now();
       const entryId = opts.id || `JE-${stamp}`;
       const date = opts.date || new Date().toISOString().slice(0, 10);
+      await accountingLockService.assertDateUnlocked(companyId, date, {
+        transaction: t,
+        operation: opts.sourceType || "journal_posting"
+      });
 
       const entry = await JournalEntry.create(
         {

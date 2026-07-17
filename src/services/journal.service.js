@@ -1,5 +1,6 @@
 const { Account, JournalEntry, JournalLine, sequelize } = require("../models");
 const auditService = require("./audit.service");
+const accountingLockService = require("./accounting-lock.service");
 const { ValidationError, NotFoundError, ConflictError } = require("../utils/errors");
 const logger = require("../utils/logger");
 
@@ -151,6 +152,7 @@ async function createManualDraft({ companyId, actor = "System", actorId = null, 
   if (!companyId) throw new Error("createManualDraft requires a companyId from the request.");
 
   const { description, date, reference, lines, totalDebit, totalCredit } = validateManualDraft(input);
+  await accountingLockService.assertDateUnlocked(companyId, date, { transaction, operation: "manual_journal_draft" });
 
   // Validate every distinct account: exists, same company, active.
   const accountById = new Map();
@@ -278,6 +280,7 @@ async function postManualDraft({ id, companyId, actor = "System", actorId = null
   if (entry.sourceType !== "manual") {
     throw new ValidationError(`Only manual entries can be posted here; entry ${id} sourceType is "${entry.sourceType}".`);
   }
+  await accountingLockService.assertDateUnlocked(companyId, entry.date, { transaction, operation: "manual_journal_post" });
 
   // 3. Load the STORED lines (the source of truth — never re-built from input).
   const lines = await JournalLine.findAll({ where: { journalEntryId: id }, transaction });
@@ -414,6 +417,7 @@ async function reverseManualEntry({ id, companyId, actor = "System", actorId = n
   if (original.reversalOf) {
     throw new ValidationError(`Entry ${id} is itself a reversal entry and cannot be reversed.`);
   }
+  await accountingLockService.assertDateUnlocked(companyId, original.date, { transaction, operation: "manual_journal_reverse" });
   // 4. Reject if a reversal already exists for this entry (double-reversal guard).
   const existingReversal = await JournalEntry.findOne({
     where: { companyId, reversalOf: id },
@@ -572,6 +576,7 @@ async function cancelManualDraft({ id, companyId, actor = "System", actorId = nu
   if (entry.reversalOf) {
     throw new ValidationError(`Entry ${id} is a reversal entry and cannot be cancelled.`);
   }
+  await accountingLockService.assertDateUnlocked(companyId, entry.date, { transaction, operation: "manual_journal_cancel" });
 
   // 3. Snapshot (entry + compact line summary) for the audit trail.
   const lines = await JournalLine.findAll({ where: { journalEntryId: id }, transaction });

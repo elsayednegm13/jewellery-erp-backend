@@ -26,6 +26,9 @@ const commandActorContext = require("../services/command-actor-context.service")
 const salesOperatorPolicy = require("../services/sales-operator-policy.service");
 const statementReconciliationService = require("../services/statement-reconciliation.service");
 const sourceAwareStatementService = require("../services/source-aware-statement.service");
+const accountingLockService = require("../services/accounting-lock.service");
+const accountBalanceService = require("../services/account-balance.service");
+const cashRegisterService = require("../services/cash-register.service");
 const logger = require("../utils/logger");
 const { AppError, ValidationError, NotFoundError, ConflictError, ForbiddenError } = require("../utils/errors");
 const uploadMiddleware = require("../middleware/upload.middleware");
@@ -437,6 +440,30 @@ function setupCrud(resourceName, model, searchFields = ["name"]) {
     router.post(`/${resourceName}/:id/deactivate`, authMiddleware, guardFor(resourceName, "update"), blockGenericMutation);
     router.post(`/${resourceName}/:id/reactivate`, authMiddleware, guardFor(resourceName, "update"), blockGenericMutation);
     router.delete(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "delete"), blockGenericMutation);
+    return controller;
+  }
+  if (resourceName === "accounts") {
+    const blockBalanceMutation = (req, res, next) => {
+      const body = req.body || {};
+      if (
+        Object.prototype.hasOwnProperty.call(body, "balance") ||
+        Object.prototype.hasOwnProperty.call(body, "storedBalance") ||
+        Object.prototype.hasOwnProperty.call(body, "calculatedBalance")
+      ) {
+        return stableForbidden(
+          res,
+          "ACCOUNT_BALANCE_DIRECT_MUTATION_FORBIDDEN",
+          "Account balances are derived from posted journal lines; direct balance mutation is disabled."
+        );
+      }
+      return next();
+    };
+    router.post(`/${resourceName}`, authMiddleware, guardFor(resourceName, "create"), blockBalanceMutation, controller.create);
+    router.put(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "update"), blockBalanceMutation, controller.update);
+    router.patch(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "update"), blockBalanceMutation, controller.update);
+    router.post(`/${resourceName}/:id/deactivate`, authMiddleware, guardFor(resourceName, "update"), controller.deactivate);
+    router.post(`/${resourceName}/:id/reactivate`, authMiddleware, guardFor(resourceName, "update"), controller.reactivate);
+    router.delete(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "delete"), controller.delete);
     return controller;
   }
   router.post(`/${resourceName}`, authMiddleware, guardFor(resourceName, "create"), controller.create);
@@ -5442,6 +5469,63 @@ router.post(
 
       emitEntityChanged(req.companyId, { entity: "JournalEntry", action: "delete", id: result.id });
       return res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+router.get(
+  "/accounting/lock",
+  authMiddleware,
+  requirePermission("accounting.view"),
+  async (req, res, next) => {
+    try {
+      const row = await accountingLockService.getLock(req.companyId);
+      const data = row
+        ? row.toJSON()
+        : { companyId: req.companyId, lockedThroughDate: null, reason: null };
+      return res.status(200).json({ success: true, data });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+router.put(
+  "/accounting/lock",
+  authMiddleware,
+  requirePermission("accounting.lock.manage"),
+  async (req, res, next) => {
+    try {
+      const result = await models.sequelize.transaction((transaction) =>
+        accountingLockService.setLock({
+          companyId: req.companyId,
+          lockedThroughDate: req.body?.lockedThroughDate ?? null,
+          reason: req.body?.reason || null,
+          user: req.user,
+          transaction,
+        })
+      );
+      return res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+router.get(
+  "/reports/account-balances/reconciliation",
+  authMiddleware,
+  requireAnyPermission(["accounting.reconciliation.view", "accounting.view"]),
+  async (req, res, next) => {
+    try {
+      const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.query.branch);
+      const data = await accountBalanceService.reconciliationReport({
+        companyId: req.companyId,
+        branchId,
+      });
+      return res.status(200).json({ success: true, ...data, data: { ...data, branchId } });
     } catch (error) {
       next(error);
     }
@@ -12774,93 +12858,89 @@ router.get("/gift-vouchers/:code", authMiddleware, async (req, res, next) => {
   }
 });
 
-// Issue a new gift voucher + auto-post (deferred-revenue liability).
-router.post("/gift-vouchers/issue", authMiddleware, async (req, res, next) => {
-  try {
-    const b = req.body || {};
-    const value = Number(b.value);
-    if (!value || value <= 0) {
-      return res.status(422).json({ success: false, message: "قيمة القسيمة يجب أن تكون أكبر من صفر" });
-    }
-    const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
-    const code = b.code || `GV-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+// Gift voucher write workflows are read-compatible only for launch. Issue/redeem
+// needs a final approved liability/revenue policy, so deny before any mutation.
+router.post("/gift-vouchers/issue", authMiddleware, (req, res) =>
+  stableForbidden(
+    res,
+    "GIFT_VOUCHER_FINANCIAL_WORKFLOW_DISABLED",
+    "Gift voucher issue/redeem financial workflows are disabled until liability accounting is approved."
+  )
+);
 
-    const voucher = await models.GiftVoucher.create({
-      id: `GVID-${Date.now()}`,
-      companyId: req.companyId,
-      code,
-      value,
-      balance: value,
-      customerId: b.customerId || null,
-      customerName: b.customerName || null,
-      status: "active",
-      issueDate: new Date().toISOString().slice(0, 10),
-      expiryDate: b.expiryDate || null,
-      paymentMethod: b.paymentMethod || "Cash",
-      branch: b.branch || req.branchId || "Main Branch"
-    });
-
-    let journalEntry = null;
-    try {
-      journalEntry = await postingService.postVoucherIssueEntry(voucher.toJSON(), actor);
-    } catch (postErr) {
-      logger.error(`[GiftVoucher] Failed to post issue ${voucher.id}: ${postErr.message}`);
-    }
-
-    const out = voucher.toJSON();
-    out.journalEntry = journalEntry;
-    return res.status(201).json({ success: true, ...out, data: out });
-  } catch (error) {
-    next(error);
-  }
-});
-
-// Redeem (spend) part or all of a voucher's balance + auto-post.
-router.post("/gift-vouchers/redeem", authMiddleware, async (req, res, next) => {
-  try {
-    const b = req.body || {};
-    const voucher = await models.GiftVoucher.findOne({
-      where: { code: b.code, companyId: req.companyId }
-    });
-    if (!voucher) return res.status(404).json({ success: false, message: "القسيمة غير موجودة" });
-    if (voucher.status !== "active") {
-      return res.status(409).json({ success: false, message: "القسيمة غير صالحة للاستخدام" });
-    }
-
-    const balance = parseFloat(voucher.balance);
-    const amount = Math.min(Number(b.amount) || balance, balance);
-    if (amount <= 0) {
-      return res.status(422).json({ success: false, message: "لا يوجد رصيد متاح في القسيمة" });
-    }
-    const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
-
-    const newBalance = Math.round((balance - amount) * 100) / 100;
-    await voucher.update({
-      balance: newBalance,
-      status: newBalance <= 0.01 ? "redeemed" : "active"
-    });
-
-    let journalEntry = null;
-    try {
-      journalEntry = await postingService.postVoucherRedeemEntry(voucher.toJSON(), amount, actor);
-    } catch (postErr) {
-      logger.error(`[GiftVoucher] Failed to post redeem ${voucher.id}: ${postErr.message}`);
-    }
-
-    const out = voucher.toJSON();
-    out.redeemedAmount = amount;
-    out.journalEntry = journalEntry;
-    return res.status(200).json({ success: true, ...out, data: out });
-  } catch (error) {
-    next(error);
-  }
-});
+router.post("/gift-vouchers/redeem", authMiddleware, (req, res) =>
+  stableForbidden(
+    res,
+    "GIFT_VOUCHER_FINANCIAL_WORKFLOW_DISABLED",
+    "Gift voucher issue/redeem financial workflows are disabled until liability accounting is approved."
+  )
+);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TREASURY (الخزنة) — cash movements, balances & closing reconciliation
 // ─────────────────────────────────────────────────────────────────────────────
 
 const TREASURY_GL = { cash: "1110", bank: "1120" };
+
+router.get("/treasury/register/current", authMiddleware, requireAnyPermission(["treasury.register.view", "treasury.view"]), async (req, res, next) => {
+  try {
+    const branch = await resolveAuthorizedBranch(req, req.query.branchId || req.query.branch || req.branchId, { required: true });
+    const session = await cashRegisterService.currentOpen({ companyId: req.companyId, branchId: branch.id });
+    const expected = session ? await cashRegisterService.calculateExpected(session) : null;
+    const data = session ? { ...session.toJSON(), expected, branchId: branch.id, branchName: branch.name } : { status: "CLOSED", branchId: branch.id, branchName: branch.name, expected: null };
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/treasury/registers", authMiddleware, requireAnyPermission(["treasury.register.view", "treasury.view"]), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.query.branch);
+    const items = await cashRegisterService.listSessions({
+      companyId: req.companyId,
+      branchId,
+      limit: Math.min(100, Math.max(1, parseInt(req.query.pageSize) || 50)),
+    });
+    return res.status(200).json({ success: true, items, data: { items, branchId } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/treasury/register/open", authMiddleware, requirePermission("treasury.register.open"), async (req, res, next) => {
+  try {
+    const branch = await resolveAuthorizedBranch(req, req.body?.branchId || req.headers["x-branch-id"] || req.branchId, { required: true });
+    const result = await cashRegisterService.openRegister({
+      companyId: req.companyId,
+      branchId: branch.id,
+      openingCountedAmount: req.body?.openingCountedAmount,
+      idempotencyKey: req.headers["idempotency-key"] || req.body?.idempotencyKey || null,
+      actor: cashRegisterService.actorFromRequest(req),
+    });
+    const expected = await cashRegisterService.calculateExpected(result);
+    return res.status(201).json({ success: true, data: { ...result.toJSON(), expected, branchName: branch.name } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/treasury/register/close", authMiddleware, requirePermission("treasury.register.close"), async (req, res, next) => {
+  try {
+    const branch = await resolveAuthorizedBranch(req, req.body?.branchId || req.headers["x-branch-id"] || req.branchId, { required: true });
+    const result = await cashRegisterService.closeRegister({
+      companyId: req.companyId,
+      branchId: branch.id,
+      countedAmount: req.body?.countedAmount,
+      varianceReason: req.body?.varianceReason || req.body?.description || null,
+      idempotencyKey: req.headers["idempotency-key"] || req.body?.idempotencyKey || null,
+      actor: cashRegisterService.actorFromRequest(req),
+    });
+    return res.status(200).json({ success: true, data: { ...result.toJSON(), branchName: branch.name } });
+  } catch (error) {
+    next(error);
+  }
+});
 
 // List treasury transactions (newest first), optional type/branch/account filters.
 router.get("/treasury/transactions", authMiddleware, requirePermission("treasury.view"), async (req, res, next) => {
@@ -12898,15 +12978,12 @@ router.get("/treasury/transactions", authMiddleware, requirePermission("treasury
 router.get("/treasury/summary", authMiddleware, requirePermission("treasury.view"), async (req, res, next) => {
   try {
     const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.query.branch);
-    const accounts = await models.Account.findAll({
-      where: { companyId: req.companyId, code: ["1110", "1120"] }
-    });
-    const balOf = (code) => {
-      const a = accounts.find((x) => x.code === code);
-      return a ? parseFloat(a.balance || 0) : 0;
-    };
-    const cash = balOf("1110");
-    const bank = balOf("1120");
+    const [cashRow, bankRow] = await Promise.all([
+      accountBalanceService.calculateAccountBalance({ companyId: req.companyId, branchId, accountCode: "1110" }),
+      accountBalanceService.calculateAccountBalance({ companyId: req.companyId, branchId, accountCode: "1120" }),
+    ]);
+    const cash = Number(cashRow?.calculatedBalance || 0);
+    const bank = Number(bankRow?.calculatedBalance || 0);
 
     const today = new Date().toISOString().slice(0, 10);
     const txWhere = { companyId: req.companyId, date: today };
@@ -12926,7 +13003,12 @@ router.get("/treasury/summary", authMiddleware, requirePermission("treasury.view
         todayIn: sum("cash_in"),
         todayOut: sum("cash_out"),
         todayTransfers: sum("transfer"),
-        branchId
+        branchId,
+        source: "posted_journal_lines",
+        mirrorDifferences: {
+          cash: Number(cashRow?.difference || 0),
+          bank: Number(bankRow?.difference || 0),
+        }
       }
     });
   } catch (error) {
@@ -12993,6 +13075,13 @@ router.post("/treasury/transactions", authMiddleware, requirePermission("treasur
           throw dup;
         }
         const idemRequest = idemClaim.request;
+        await cashRegisterService.requireOpenForCashMutation({
+          companyId: req.companyId,
+          branchId: branch.id,
+          account,
+          toAccount,
+          transaction: t,
+        });
 
         const tx = await models.CashTransaction.create({
           id,
@@ -13109,9 +13198,14 @@ router.post("/treasury/closing", authMiddleware, requirePermission("treasury.upd
       return res.status(409).json({ success: false, message: "Treasury closing already exists for this account and date" });
     }
 
-    // Expected = current GL balance of the treasury account.
-    const acc = await models.Account.findOne({ where: { companyId: req.companyId, code: glCode } });
-    const expected = acc ? parseFloat(acc.balance || 0) : 0;
+    // Expected = authoritative posted journal-line balance, not the stale
+    // Account.balance mirror.
+    const balanceRow = await accountBalanceService.calculateAccountBalance({
+      companyId: req.companyId,
+      branchId: branch.id,
+      accountCode: glCode,
+    });
+    const expected = balanceRow ? Number(balanceRow.calculatedBalance || 0) : 0;
 
     // Opening = previous closing's actual balance for the same account (else 0).
     // Scoped by account ONLY (not day) so cross-day chaining is preserved.
@@ -13122,6 +13216,9 @@ router.post("/treasury/closing", authMiddleware, requirePermission("treasury.upd
     const opening = prev ? parseFloat(prev.actualBalance || 0) : 0;
 
     const variance = Math.round((actual - expected) * 100) / 100;
+    if (Math.abs(variance) >= 0.01 && !String(b.description || "").trim()) {
+      throw new ValidationError("Variance reason is required when actual balance differs from expected balance.");
+    }
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
 
     const closingId = `CLS-${Date.now()}`;
