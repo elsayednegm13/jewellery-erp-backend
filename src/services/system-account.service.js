@@ -23,10 +23,6 @@ function normalizeEmail(value) {
   return email;
 }
 
-function generateTemporaryPassword() {
-  return generatePolicyCompliantPassword(18);
-}
-
 function maskEmail(email) {
   const text = String(email || "");
   const [name, domain] = text.split("@");
@@ -224,8 +220,9 @@ async function createAccount(req) {
     return createBranchAccount(req);
   }
   const email = normalizeEmail(body.email);
-  const temporaryPassword = body.temporaryPassword || generateTemporaryPassword();
-  validatePasswordPolicy(temporaryPassword, { email, firstName: body.firstName, lastName: body.lastName });
+  const password = body.password || body.newPassword || body.temporaryPassword;
+  if (!password) throw new ValidationError("A new password is required.", { password: ["A new password is required."] });
+  validatePasswordPolicy(password, { email, firstName: body.firstName, lastName: body.lastName });
   await validateAccountShape({
     accountType,
     companyId: req.companyId,
@@ -247,7 +244,7 @@ async function createAccount(req) {
     jobTitle: body.jobTitle || "",
     role: body.role || "sales",
     isActive: body.active !== false,
-    password: await bcrypt.hash(temporaryPassword, 10),
+    password: await bcrypt.hash(password, 10),
     accountType,
     branchId: accountType === "branch_shell" ? body.branchId : null,
     recoveryEmail: body.recoveryEmail ? normalizeEmail(body.recoveryEmail) : null,
@@ -267,13 +264,13 @@ async function createAccount(req) {
     severity: "warning",
     after: JSON.stringify({ targetUserId: user.id, accountType, branchId: user.branchId || null })
   });
-  return { account: safeUser(user), temporaryPassword };
+  return { account: safeUser(user), passwordSet: true };
 }
 
 async function createBranchAccount(req) {
   await requireSensitiveAdminLevel2(req, { permissionName: "system_accounts.manage", operation: "branch-account.create" });
   const body = req.body || {};
-  const allowed = new Set(["branchId", "email", "temporaryPassword", "active", "reason"]);
+  const allowed = new Set(["branchId", "email", "password", "newPassword", "temporaryPassword", "active", "reason"]);
   const forbidden = Object.keys(body).filter((key) => !allowed.has(key));
   if (forbidden.length) {
     throw stableError("Branch Account creation accepts only branch, login email, temporary password, and active status.", 422, "VALIDATION_FAILED", {
@@ -298,8 +295,9 @@ async function createBranchAccount(req) {
     throw stableError("Branch belongs to a different company.", 422, "BRANCH_ACCOUNT_COMPANY_MISMATCH");
   }
   const email = normalizeEmail(body.email);
-  const temporaryPassword = body.temporaryPassword || generateTemporaryPassword();
-  validatePasswordPolicy(temporaryPassword, { email, firstName: "Branch", lastName: "Account" });
+  const password = body.password || body.newPassword || body.temporaryPassword;
+  if (!password) throw new ValidationError("A Branch Account password is required.", { password: ["A password is required."] });
+  validatePasswordPolicy(password, { email, firstName: "Branch", lastName: "Account" });
   return models.sequelize.transaction(async (transaction) => {
     await assertNoBranchAccountForBranch(branch.id, { transaction });
     const exists = await findUserByNormalizedEmail(email, { transaction });
@@ -314,7 +312,7 @@ async function createBranchAccount(req) {
       jobTitle: "Branch Account",
       role: "sales",
       isActive: body.active !== false,
-      password: await bcrypt.hash(temporaryPassword, 10),
+      password: await bcrypt.hash(password, 10),
       accountType: "branch_shell",
       branchId: branch.id,
       defaultEmployeeId: null,
@@ -332,7 +330,7 @@ async function createBranchAccount(req) {
       severity: "warning",
       after: JSON.stringify({ targetUserId: user.id, branchId: branch.id, active: user.isActive !== false })
     }, { transaction });
-    return { account: safeUser(user), temporaryPassword };
+    return { account: safeUser(user), passwordSet: true };
   });
 }
 
@@ -345,12 +343,12 @@ async function getAccountOrThrow(companyId, id, transaction = null) {
 async function patchAccount(req) {
   await requireSensitiveAdminLevel2(req, { permissionName: "system_accounts.manage", operation: "system-account.update" });
   const user = await getAccountOrThrow(req.companyId, req.params.id);
+  const body = req.body || {};
   if ((user.accountType || "legacy") === "branch_shell") {
-    const blocked = ["companyId", "branchId", "accountType", "role", "defaultEmployeeId", "isActive", "active"];
+    const blocked = ["companyId", "accountType", "role", "defaultEmployeeId", "isActive", "active"];
     const found = blocked.filter((key) => Object.prototype.hasOwnProperty.call(req.body || {}, key));
     if (found.length) throw stableError("Branch Account fixed fields cannot be changed.", 403, "BRANCH_ACCOUNT_FIXED_SCOPE");
   }
-  const body = req.body || {};
   const updates = {};
   for (const key of ["firstName", "lastName", "phone", "jobTitle", "recoveryPhone"]) {
     if (Object.prototype.hasOwnProperty.call(body, key)) updates[key] = body[key] || "";
@@ -369,17 +367,36 @@ async function patchAccount(req) {
     });
     updates.defaultEmployeeId = body.defaultEmployeeId || null;
   }
-  await user.update(updates);
-  await auditService.record(req.companyId, {
-    action: "system_account.updated",
-    description: `System account updated for ${user.email}.`,
-    user: actorName(req.user),
-    userId: req.user.id,
-    technicalUserId: req.user.id,
-    place: "System Accounts",
-    sourceDocument: user.id,
-    severity: "warning",
-    after: JSON.stringify({ targetUserId: user.id, fields: Object.keys(updates) })
+  if ((user.accountType || "legacy") === "branch_shell" && Object.prototype.hasOwnProperty.call(body, "branchId")) {
+    const nextBranchId = String(body.branchId || "").trim();
+    if (!nextBranchId) throw stableError("Branch Account requires a branch.", 422, "BRANCH_ACCOUNT_BRANCH_REQUIRED", { branchId: ["Branch Account requires a branch."] });
+    await validateAccountShape({
+      accountType: "branch_shell",
+      companyId: req.companyId,
+      branchId: nextBranchId,
+      defaultEmployeeId: null
+    });
+    await assertNoBranchAccountForBranch(nextBranchId, { excludeId: user.id });
+    updates.branchId = nextBranchId;
+  }
+  await models.sequelize.transaction(async (transaction) => {
+    const before = user.toJSON();
+    await user.update(updates, { transaction });
+    if (Object.prototype.hasOwnProperty.call(updates, "branchId")) {
+      await technicalSessions.bumpSessionVersion(user, "branch_account_branch_changed", transaction);
+    }
+    await auditService.record(req.companyId, {
+      action: "system_account.updated",
+      description: `System account updated for ${user.email}.`,
+      user: actorName(req.user),
+      userId: req.user.id,
+      technicalUserId: req.user.id,
+      place: "System Accounts",
+      sourceDocument: user.id,
+      severity: "warning",
+      before: JSON.stringify({ targetUserId: user.id, branchId: before.branchId || null }),
+      after: JSON.stringify({ targetUserId: user.id, fields: Object.keys(updates), branchId: user.branchId || null })
+    }, { transaction });
   });
   return safeUser(user);
 }
@@ -387,11 +404,12 @@ async function patchAccount(req) {
 async function resetPassword(req) {
   await requireSensitiveAdminLevel2(req, { permissionName: "system_accounts.credentials.reset", operation: "system-account.reset-password" });
   const user = await getAccountOrThrow(req.companyId, req.params.id);
-  const temporaryPassword = req.body?.temporaryPassword || generateTemporaryPassword();
-  validatePasswordPolicy(temporaryPassword, { email: user.email, firstName: user.firstName, lastName: user.lastName });
+  const password = req.body?.password || req.body?.newPassword || req.body?.temporaryPassword;
+  if (!password) throw new ValidationError("A new password is required.", { password: ["A new password is required."] });
+  validatePasswordPolicy(password, { email: user.email, firstName: user.firstName, lastName: user.lastName });
   await models.sequelize.transaction(async (transaction) => {
     await user.update({
-      password: await bcrypt.hash(temporaryPassword, 10),
+      password: await bcrypt.hash(password, 10),
       forcePasswordChange: true,
       failedLoginCount: 0,
       lockedUntil: null
@@ -409,13 +427,19 @@ async function resetPassword(req) {
       after: JSON.stringify({ targetUserId: user.id, forcePasswordChange: true })
     }, { transaction });
   });
-  return { account: safeUser(user), temporaryPassword };
+  return { account: safeUser(user), passwordSet: true };
 }
 
 async function changeEmail(req) {
   await requireSensitiveAdminLevel2(req, { permissionName: "system_accounts.manage", operation: "system-account.change-email" });
   const user = await getAccountOrThrow(req.companyId, req.params.id);
   const email = normalizeEmail(req.body?.email);
+  if (String(user.id) === String(req.user.id)) {
+    const currentPassword = String(req.body?.currentPassword || "");
+    if (!currentPassword) throw new ValidationError("Current password is required.", { currentPassword: ["Current password is required."] });
+    const matches = await bcrypt.compare(currentPassword, user.password);
+    if (!matches) throw new ValidationError("Current password is invalid.", { currentPassword: ["Current password is invalid."] });
+  }
   const exists = await findUserByNormalizedEmail(email, { excludeId: user.id });
   if (exists) throw stableError("Email is already used by another account.", 409, "EMAIL_ALREADY_USED", { email: ["Email is already used."] });
   await models.sequelize.transaction(async (transaction) => {
