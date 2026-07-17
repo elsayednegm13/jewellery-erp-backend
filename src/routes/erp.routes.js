@@ -1708,7 +1708,7 @@ router.post(
 // requires the explicit policy marker saved in the successful idempotency
 // response; unmarked historical rows remain legacy/unknown and are never
 // recalculated under the current tax policy.
-router.get("/invoices/:id/exchange-display", authMiddleware, requirePermission("sales.view"), async (req, res, next) => {
+router.get("/invoices/:id/exchange-display", authMiddleware, requireBusinessPermission("sales.view"), async (req, res, next) => {
   try {
     const invoice = await models.Invoice.findOne({
       where: { id: req.params.id, companyId: req.companyId },
@@ -3148,7 +3148,7 @@ router.post("/manufacturing-orders/process", authMiddleware, requirePermission("
 // ─── Custom Stock Audit Endpoints ───────────────────────────────────────────
 
 // 1. List stock audits
-router.get("/stock-audits", authMiddleware, requirePermission("inventory.view"), async (req, res, next) => {
+router.get("/stock-audits", authMiddleware, requireBusinessPermission("inventory.view"), async (req, res, next) => {
   try {
     const where = { companyId: req.companyId };
     if (req.query.branchId) where.branchId = req.query.branchId;
@@ -3166,7 +3166,7 @@ router.get("/stock-audits", authMiddleware, requirePermission("inventory.view"),
 });
 
 // 2. Create stock audit session
-router.post("/stock-audits", authMiddleware, requirePermission("inventory.adjust"), async (req, res, next) => {
+router.post("/stock-audits", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const branchId = req.headers["x-branch-id"] || req.body.branchId;
@@ -3242,7 +3242,7 @@ router.post("/stock-audits", authMiddleware, requirePermission("inventory.adjust
 });
 
 // 3. Get stock audit session details
-router.get("/stock-audits/:id", authMiddleware, requirePermission("inventory.view"), async (req, res, next) => {
+router.get("/stock-audits/:id", authMiddleware, requireBusinessPermission("inventory.view"), async (req, res, next) => {
   try {
     const audit = await models.StockAudit.findOne({
       where: { id: req.params.id, companyId: req.companyId },
@@ -3264,7 +3264,7 @@ router.get("/stock-audits/:id", authMiddleware, requirePermission("inventory.vie
 });
 
 // 4. Store scanned items in the session (update statuses)
-router.post("/stock-audits/:id/items", authMiddleware, requirePermission("inventory.adjust"), async (req, res, next) => {
+router.post("/stock-audits/:id/items", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const { scannedAssetIds = [] } = req.body || {};
@@ -3348,7 +3348,7 @@ router.post("/stock-audits/:id/items", authMiddleware, requirePermission("invent
 });
 
 // 5. Complete stock audit session (apply inventory adjustments)
-router.post("/stock-audits/:id/complete", authMiddleware, requirePermission("inventory.adjust"), async (req, res, next) => {
+router.post("/stock-audits/:id/complete", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const audit = await models.StockAudit.findOne({
@@ -3534,7 +3534,7 @@ function serializeAssetAttachment(attachment) {
 
 // ─── Custom Customer Attachments & KYC Endpoints ────────────────────────────
 
-router.get("/customers/:id/attachments", authMiddleware, requirePermission("customers.view"), async (req, res, next) => {
+router.get("/customers/:id/attachments", authMiddleware, requireBusinessPermission("customers.view"), async (req, res, next) => {
   try {
     const customer = await models.Customer.findOne({
       where: { id: req.params.id, companyId: req.companyId }
@@ -3552,7 +3552,7 @@ router.get("/customers/:id/attachments", authMiddleware, requirePermission("cust
   }
 });
 
-router.post("/customers/:id/attachments", authMiddleware, requireAnyPermission(["customers.update", "customers.attachments.manage"]), uploadMiddleware.single("file"), async (req, res, next) => {
+router.post("/customers/:id/attachments", authMiddleware, requireAnyBusinessPermission(["customers.update", "customers.attachments.manage"], { touch: true }), uploadMiddleware.single("file"), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   let targetPath = "";
   try {
@@ -3620,7 +3620,7 @@ router.post("/customers/:id/attachments", authMiddleware, requireAnyPermission([
   }
 });
 
-router.delete("/customers/:id/attachments/:attachmentId", authMiddleware, requireAnyPermission(["customers.update", "customers.attachments.manage"]), async (req, res, next) => {
+router.delete("/customers/:id/attachments/:attachmentId", authMiddleware, requireAnyBusinessPermission(["customers.update", "customers.attachments.manage"], { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const customer = await models.Customer.findOne({
@@ -3669,7 +3669,7 @@ router.delete("/customers/:id/attachments/:attachmentId", authMiddleware, requir
   }
 });
 
-router.patch("/customers/:id/kyc", authMiddleware, requireAnyPermission(["customers.update", "customers.kyc.manage"]), async (req, res, next) => {
+router.patch("/customers/:id/kyc", authMiddleware, requireAnyBusinessPermission(["customers.update", "customers.kyc.manage"], { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const customer = await models.Customer.findOne({
@@ -3770,7 +3770,7 @@ router.patch("/customers/:id/kyc", authMiddleware, requireAnyPermission(["custom
 });
 
 // 1. Get attachments list for an asset
-router.get("/assets/:id/attachments", authMiddleware, requirePermission("inventory.view"), async (req, res, next) => {
+router.get("/assets/:id/attachments", authMiddleware, requireBusinessPermission("inventory.view"), async (req, res, next) => {
   try {
     const asset = await models.Asset.findOne({
       where: { id: req.params.id, companyId: req.companyId }
@@ -3790,7 +3790,7 @@ router.get("/assets/:id/attachments", authMiddleware, requirePermission("invento
 });
 
 // 2. Upload an attachment for an asset
-router.post("/assets/:id/attachments", authMiddleware, requireAnyPermission(["inventory.attachments.manage", "inventory.adjust"]), uploadMiddleware.single("file"), async (req, res, next) => {
+router.post("/assets/:id/attachments", authMiddleware, requireAnyBusinessPermission(["inventory.attachments.manage", "inventory.adjust"], { touch: true }), uploadMiddleware.single("file"), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     if (!req.file) {
@@ -3869,7 +3869,7 @@ router.post("/assets/:id/attachments", authMiddleware, requireAnyPermission(["in
 });
 
 // 3. Delete an attachment for an asset
-router.delete("/assets/:id/attachments/:attachmentId", authMiddleware, requireAnyPermission(["inventory.attachments.manage", "inventory.adjust"]), async (req, res, next) => {
+router.delete("/assets/:id/attachments/:attachmentId", authMiddleware, requireAnyBusinessPermission(["inventory.attachments.manage", "inventory.adjust"], { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const asset = await models.Asset.findOne({
@@ -3931,7 +3931,7 @@ router.delete("/assets/:id/attachments/:attachmentId", authMiddleware, requireAn
 });
 
 // ─── Custom Transfers Logic ──────────────────────────────────────────────────
-router.post("/transfers", authMiddleware, requirePermission("inventory.transfer"), async (req, res, next) => {
+router.post("/transfers", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const { assetIds = [], fromBranchId, toBranchId, notes = "" } = req.body || {};
@@ -4026,7 +4026,7 @@ router.post("/transfers", authMiddleware, requirePermission("inventory.transfer"
   }
 });
 
-router.patch("/transfers/:id", authMiddleware, requirePermission("inventory.transfer"), async (req, res, next) => {
+router.patch("/transfers/:id", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const { id } = req.params;
@@ -4150,7 +4150,7 @@ router.patch("/transfers/:id", authMiddleware, requirePermission("inventory.tran
 
 // ─── Safe Customer/Supplier/Branch Delete & Activation Actions ──────────────
 
-router.post("/customers/:id/deactivate", authMiddleware, requirePermission("customers.deactivate"), async (req, res, next) => {
+router.post("/customers/:id/deactivate", authMiddleware, requireBusinessPermission("customers.deactivate", { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const customer = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t });
@@ -4178,7 +4178,7 @@ router.post("/customers/:id/deactivate", authMiddleware, requirePermission("cust
   }
 });
 
-router.post("/customers/:id/reactivate", authMiddleware, requirePermission("customers.reactivate"), async (req, res, next) => {
+router.post("/customers/:id/reactivate", authMiddleware, requireBusinessPermission("customers.reactivate", { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const customer = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t });
@@ -4206,7 +4206,7 @@ router.post("/customers/:id/reactivate", authMiddleware, requirePermission("cust
   }
 });
 
-router.delete("/customers/:id", authMiddleware, requirePermission("customers.delete"), async (req, res, next) => {
+router.delete("/customers/:id", authMiddleware, requireBusinessPermission("customers.delete", { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const customer = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t });
@@ -4245,7 +4245,7 @@ router.delete("/customers/:id", authMiddleware, requirePermission("customers.del
   }
 });
 
-router.post("/suppliers/:id/deactivate", authMiddleware, requirePermission("suppliers.deactivate"), async (req, res, next) => {
+router.post("/suppliers/:id/deactivate", authMiddleware, requireBusinessPermission("suppliers.deactivate", { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const supplier = await models.Supplier.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t });
@@ -4273,7 +4273,7 @@ router.post("/suppliers/:id/deactivate", authMiddleware, requirePermission("supp
   }
 });
 
-router.post("/suppliers/:id/reactivate", authMiddleware, requirePermission("suppliers.reactivate"), async (req, res, next) => {
+router.post("/suppliers/:id/reactivate", authMiddleware, requireBusinessPermission("suppliers.reactivate", { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const supplier = await models.Supplier.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t });
@@ -4301,7 +4301,7 @@ router.post("/suppliers/:id/reactivate", authMiddleware, requirePermission("supp
   }
 });
 
-router.delete("/suppliers/:id", authMiddleware, requirePermission("suppliers.delete"), async (req, res, next) => {
+router.delete("/suppliers/:id", authMiddleware, requireBusinessPermission("suppliers.delete", { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const supplier = await models.Supplier.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t });
@@ -4831,7 +4831,7 @@ setupCrud("purchase-orders", models.PurchaseOrder, ["supplierName", "status", "b
 
 // Phase 31.4-Fix — Unified Invoices Search & Print (read-only GET).
 // This route is intentionally registered before generic /invoices/:id.
-router.get("/invoices/search-print", authMiddleware, requirePermission("sales.view"), async (req, res, next) => {
+router.get("/invoices/search-print", authMiddleware, requireBusinessPermission("sales.view"), async (req, res, next) => {
   try {
     const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
     const pageSize = Math.min(Math.max(Number.parseInt(req.query.pageSize, 10) || 25, 1), 100);
@@ -5035,7 +5035,7 @@ router.post(
 // applied to it (Postgres: "operator does not exist: enum_invoices_status ~~*"),
 // which silently broke invoice search. Search by id / invoiceNumber / customer.
 setupCrud("invoices", models.Invoice, ["customerName", "paymentMethod", "invoiceNumber", "id"]);
-router.get("/reservations", authMiddleware, requireAnyPermission(reservationPerms.view), async (req, res, next) => {
+router.get("/reservations", authMiddleware, requireAnyBusinessPermission(reservationPerms.view), async (req, res, next) => {
   try {
     const result = await reservationService.list({ companyId: req.companyId, query: req.query, user: req.user, branchId: req.branchId });
     return res.status(200).json({ success: true, ...result, data: result.items });
@@ -5044,7 +5044,7 @@ router.get("/reservations", authMiddleware, requireAnyPermission(reservationPerm
   }
 });
 
-router.get("/reservations/:id", authMiddleware, requireAnyPermission(reservationPerms.view), async (req, res, next) => {
+router.get("/reservations/:id", authMiddleware, requireAnyBusinessPermission(reservationPerms.view), async (req, res, next) => {
   try {
     const reservation = await reservationService.getById({ companyId: req.companyId, id: req.params.id, user: req.user, branchId: req.branchId });
     return res.status(200).json({ success: true, data: reservation });
@@ -5082,7 +5082,7 @@ router.get("/reservations/:id/audit-timeline", authMiddleware, requireAnyPermiss
   }
 });
 
-router.post("/reservations", authMiddleware, requireAnyPermission(reservationPerms.create), async (req, res, next) => {
+router.post("/reservations", authMiddleware, requireAnyBusinessPermission(reservationPerms.create, { touch: true }), async (req, res, next) => {
   try {
     const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
     const result = await reservationService.createReservation({
@@ -5099,7 +5099,7 @@ router.post("/reservations", authMiddleware, requireAnyPermission(reservationPer
   }
 });
 
-router.post("/reservations/:id/payments", authMiddleware, requireAnyPermission(reservationPerms.recordPayment), async (req, res, next) => {
+router.post("/reservations/:id/payments", authMiddleware, requireAnyBusinessPermission(reservationPerms.recordPayment, { touch: true }), async (req, res, next) => {
   try {
     const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
     const result = await reservationService.addPayment({
@@ -5117,7 +5117,7 @@ router.post("/reservations/:id/payments", authMiddleware, requireAnyPermission(r
   }
 });
 
-router.post("/reservations/:id/complete-sale", authMiddleware, requireAnyPermission(reservationPerms.completeSale), async (req, res, next) => {
+router.post("/reservations/:id/complete-sale", authMiddleware, requireAnyBusinessPermission(reservationPerms.completeSale, { touch: true }), async (req, res, next) => {
   try {
     const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
     const result = await reservationService.completeSale({
@@ -5135,7 +5135,7 @@ router.post("/reservations/:id/complete-sale", authMiddleware, requireAnyPermiss
   }
 });
 
-router.post("/reservations/:id/cancel", authMiddleware, requireAnyPermission(reservationPerms.cancel), async (req, res, next) => {
+router.post("/reservations/:id/cancel", authMiddleware, requireAnyBusinessPermission(reservationPerms.cancel, { touch: true }), async (req, res, next) => {
   try {
     const result = await reservationService.cancelReservation({
       companyId: req.companyId,
@@ -5151,7 +5151,7 @@ router.post("/reservations/:id/cancel", authMiddleware, requireAnyPermission(res
   }
 });
 
-router.post("/reservations/:id/refunds", authMiddleware, requireAnyPermission(reservationPerms.refundRequest), async (req, res, next) => {
+router.post("/reservations/:id/refunds", authMiddleware, requireAnyBusinessPermission(reservationPerms.refundRequest, { touch: true }), async (req, res, next) => {
   try {
     const result = await reservationService.requestRefund({
       companyId: req.companyId,
@@ -5604,7 +5604,7 @@ setupCrud("accounts", models.Account, ["name", "nameAr", "code"]);
 
 // 2. Custom Sub-Resource Route Handlers
 
-router.get("/inventory/products", authMiddleware, requirePermission("inventory.view"), async (req, res, next) => {
+router.get("/inventory/products", authMiddleware, requireBusinessPermission("inventory.view"), async (req, res, next) => {
   try {
     req.query.pageSize = req.query.pageSize || 10000;
     const controller = new ErpController(models.Product, ["productName", "productCode", "description"]);
@@ -5614,7 +5614,7 @@ router.get("/inventory/products", authMiddleware, requirePermission("inventory.v
   }
 });
 
-router.get("/pos/products", authMiddleware, requireAnyPermission(["pos.view", "pos.sell"]), async (req, res, next) => {
+router.get("/pos/products", authMiddleware, requireAnyBusinessPermission(["pos.view", "pos.sell"]), async (req, res, next) => {
   try {
     req.query.pageSize = req.query.pageSize || 10000;
     req.query.filters = JSON.stringify({ isActive: true });
@@ -5625,7 +5625,7 @@ router.get("/pos/products", authMiddleware, requireAnyPermission(["pos.view", "p
   }
 });
 
-router.get("/products/:id/movements", authMiddleware, requirePermission("inventory.view"), async (req, res, next) => {
+router.get("/products/:id/movements", authMiddleware, requireBusinessPermission("inventory.view"), async (req, res, next) => {
   try {
     const movements = await models.StockMovement.findAll({
       where: { productId: req.params.id, companyId: req.companyId },
@@ -5637,7 +5637,7 @@ router.get("/products/:id/movements", authMiddleware, requirePermission("invento
   }
 });
 
-router.get("/products/:id/sales", authMiddleware, requirePermission("inventory.view"), async (req, res, next) => {
+router.get("/products/:id/sales", authMiddleware, requireBusinessPermission("inventory.view"), async (req, res, next) => {
   try {
     const sales = await models.InvoiceItem.findAll({
       where: { assetId: req.params.id },
@@ -5654,7 +5654,7 @@ router.get("/products/:id/sales", authMiddleware, requirePermission("inventory.v
   }
 });
 
-router.get("/products/:id/purchases", authMiddleware, requirePermission("inventory.view"), async (req, res, next) => {
+router.get("/products/:id/purchases", authMiddleware, requireBusinessPermission("inventory.view"), async (req, res, next) => {
   try {
     const purchases = await models.PurchaseOrderItem.findAll({
       where: { assetId: req.params.id },
@@ -5673,7 +5673,7 @@ router.get("/products/:id/purchases", authMiddleware, requirePermission("invento
 
 // ─── Supplier Purchase Receiving ───────────────────────────────────────────
 
-router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMiddleware, requirePermission("suppliers.create"), async (req, res, next) => {
+router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMiddleware, requireBusinessPermission("suppliers.create", { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const body = req.body || {};
@@ -6364,7 +6364,7 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
 // NEVER touched (it stays reference-only; the supplier statement / closing
 // balance is the source of truth and picks up this payment automatically).
 // ─────────────────────────────────────────────────────────────────────────────
-router.post("/purchase-orders/:id/pay", authMiddleware, requirePermission("treasury.update"), async (req, res, next) => {
+router.post("/purchase-orders/:id/pay", authMiddleware, requireBusinessPermission("treasury.update", { touch: true }), async (req, res, next) => {
   const b = req.body || {};
   const idempotencyKey = req.headers["idempotency-key"] || b.idempotencyKey;
   if (!idempotencyKey || !String(idempotencyKey).trim()) {
@@ -6522,8 +6522,8 @@ router.post("/purchase-orders/:id/pay", authMiddleware, requirePermission("treas
 
 // ─── Phase 32.1-Fix — Editable Barcode Taxonomy Settings ───────────────────
 
-const barcodeSettingsReadGuard = requireAnyPermission(["settings.view", "inventory.view"]);
-const barcodeSettingsWriteGuard = requireAnyPermission(["settings.update", "inventory.manage", "inventory.adjust"]);
+const barcodeSettingsReadGuard = requireAnyBusinessPermission(["settings.view", "inventory.view"]);
+const barcodeSettingsWriteGuard = requireAnyBusinessPermission(["settings.update", "inventory.adjust"], { touch: true });
 const BARCODE_CODE_MUTABLE_WHEN_USED = new Set([
   "displayName", "description", "sortOrder", "isActive", "isClientApproved", "isProvisional",
 ]);
@@ -7547,7 +7547,7 @@ router.get("/customers/:id/statement-v2", authMiddleware, requireAnyPermission(r
 // deposits can create credit through POST /customers/:id/credit/deposit. This
 // still never mutates Customer.balance or Invoice.remainingAmount.
 // ─────────────────────────────────────────────────────────────────────────────
-router.get("/customers/:id/credit", authMiddleware, requirePermission("customers.view"), async (req, res, next) => {
+router.get("/customers/:id/credit", authMiddleware, requireBusinessPermission("customers.view"), async (req, res, next) => {
   try {
     const customer = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId } });
     if (!customer) throw new NotFoundError("Customer not found.");
@@ -7590,7 +7590,7 @@ router.get("/customers/:id/credit", authMiddleware, requirePermission("customers
 // Uncertain settlement (best_effort/unavailable) and legacy/unknown policy are
 // flagged non-authoritative and are never auto-corrected.
 // ─────────────────────────────────────────────────────────────────────────────
-router.get("/customers/:id/credit/reconciliation", authMiddleware, requirePermission("customers.view"), async (req, res, next) => {
+router.get("/customers/:id/credit/reconciliation", authMiddleware, requireBusinessPermission("customers.view"), async (req, res, next) => {
   try {
     const customer = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId } });
     if (!customer) throw new NotFoundError("Customer not found.");
@@ -7710,7 +7710,7 @@ router.get("/customers/:id/credit/reconciliation", authMiddleware, requirePermis
 // Exposes the opt-in source-aware customer statement model (dual-ledger).
 // Never mutates and never changes statement-v2 or any balances.
 // ─────────────────────────────────────────────────────────────────────────────
-router.get("/customers/:id/statement-v3", authMiddleware, requirePermission("customers.view"), async (req, res, next) => {
+router.get("/customers/:id/statement-v3", authMiddleware, requireBusinessPermission("customers.view"), async (req, res, next) => {
   try {
     const customer = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId } });
     if (!customer) throw new NotFoundError("Customer not found.");
@@ -7967,7 +7967,7 @@ function normalizeCustomerCreditApplyPayload(req, defaultCurrency = "AED") {
   };
 }
 
-router.post("/customers/:id/credit/deposit", authMiddleware, requirePermission("treasury.update"), async (req, res, next) => {
+router.post("/customers/:id/credit/deposit", authMiddleware, requireBusinessPermission("treasury.update", { touch: true }), async (req, res, next) => {
   try {
     const settings = await settingsService.getCompanySettings(req.companyId);
     const payload = normalizeCustomerDepositPayload(req, settings.currency || "AED");
@@ -8154,7 +8154,7 @@ router.post("/customers/:id/credit/deposit", authMiddleware, requirePermission("
   }
 });
 
-router.post("/customers/:id/credit/refund", authMiddleware, requirePermission("treasury.update"), async (req, res, next) => {
+router.post("/customers/:id/credit/refund", authMiddleware, requireBusinessPermission("treasury.update", { touch: true }), async (req, res, next) => {
   try {
     const settings = await settingsService.getCompanySettings(req.companyId);
     const payload = normalizeCustomerRefundPayload(req, settings.currency || "AED");
@@ -8354,7 +8354,7 @@ router.post("/customers/:id/credit/refund", authMiddleware, requirePermission("t
   }
 });
 
-router.post("/invoices/:id/apply-customer-credit", authMiddleware, requirePermission("sales.create"), async (req, res, next) => {
+router.post("/invoices/:id/apply-customer-credit", authMiddleware, requireBusinessPermission("sales.create", { touch: true }), async (req, res, next) => {
   try {
     const settings = await settingsService.getCompanySettings(req.companyId);
     const payload = normalizeCustomerCreditApplyPayload(req, settings.currency || "AED");
