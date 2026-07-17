@@ -166,6 +166,48 @@ async function setEmployeePin({ companyId, employeeId, pin, resetRequired = fals
   return transaction ? execute(transaction) : models.sequelize.transaction(execute);
 }
 
+async function createEmployeeCredentialForNewEmployee({ companyId, employeeId, pin, actorUser, transaction }) {
+  validatePin(pin);
+  const execute = async (t) => {
+    const employee = await getEmployeeOrThrow(companyId, employeeId, t);
+    const existing = await models.EmployeeCredential.findOne({
+      where: { companyId, employeeId },
+      transaction: t,
+      lock: t.LOCK.UPDATE
+    });
+    if (existing) throw new ValidationError("Employee credential is already configured.", { pin: ["Employee credential is already configured."] });
+    const now = new Date();
+    const credential = await models.EmployeeCredential.create({
+      id: id("ECRED"),
+      companyId,
+      employeeId,
+      pinHash: await bcrypt.hash(pin, 10),
+      credentialVersion: 1,
+      failedAttemptCount: 0,
+      lockedUntil: null,
+      lastFailedAt: null,
+      pinChangedAt: now,
+      resetAt: now,
+      resetByUserId: actorUser?.id || null,
+      resetRequired: false,
+      active: true
+    }, { transaction: t });
+    await auditService.record(companyId, {
+      action: "employee.credential.created",
+      description: `Employee credential configured for ${employee.employeeCode || employee.id}.`,
+      user: actorName(actorUser),
+      userId: actorUser?.id || null,
+      technicalUserId: actorUser?.id || null,
+      place: "Employees",
+      sourceDocument: employee.id,
+      severity: "warning",
+      after: JSON.stringify({ employeeId: employee.id, credentialVersion: credential.credentialVersion, resetRequired: credential.resetRequired })
+    }, { transaction: t });
+    return { employee, credential };
+  };
+  return transaction ? execute(transaction) : models.sequelize.transaction(execute);
+}
+
 async function resetEmployeePin(args) {
   return setEmployeePin(args);
 }
@@ -575,6 +617,7 @@ async function revokeEmployeeOperatorSessions({ companyId, employeeId, actorUser
 module.exports = {
   normalizeEmployeeCode,
   setEmployeePin,
+  createEmployeeCredentialForNewEmployee,
   resetEmployeePin,
   verifyEmployeeCredential,
   assertEmployeeBranchAccess,

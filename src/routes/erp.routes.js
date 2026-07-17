@@ -392,6 +392,29 @@ function employeeCredentialState(credential) {
   return "active";
 }
 
+function assertEmployeeCreatePin(body) {
+  const status = body.status || "present";
+  const pin = body.pin ?? body.employeePin ?? null;
+  const confirmation = body.pinConfirm ?? body.confirmPin ?? body.confirmation ?? null;
+  const requiresPin = status !== "inactive";
+  if (!requiresPin && !pin && !confirmation) return null;
+  if (pin !== confirmation) {
+    throw new ValidationError("PIN confirmation does not match.", { pinConfirm: ["PIN confirmation does not match."] });
+  }
+  if (typeof pin !== "string" || !/^\d{6}$/.test(pin)) {
+    throw new ValidationError("PIN must be exactly 6 numeric digits.", { pin: ["PIN must be exactly 6 numeric digits."] });
+  }
+  return pin;
+}
+
+async function employeeHasConfiguredCredential(companyId, employeeId, transaction = null) {
+  const credential = await models.EmployeeCredential.findOne({
+    where: { companyId, employeeId, active: true, resetRequired: false },
+    transaction
+  });
+  return Boolean(credential);
+}
+
 function maskEmployeeSessionDevice(value) {
   const text = String(value || "");
   if (!text) return null;
@@ -4503,6 +4526,7 @@ router.post("/employees", authMiddleware, requireAnyPermission(employeeCoreManag
     if (!body.name || !body.role || !body.branch || !body.employeeCode) {
       throw new ValidationError("name, role, branch and employeeCode are required.");
     }
+    const createPin = assertEmployeeCreatePin(body);
     const normalized = employeeAuthorizationService.normalizeEmployeeCode(body.employeeCode);
     const existing = await models.Employee.findOne({
       where: { companyId: req.companyId, employeeCodeNormalized: normalized },
@@ -4529,6 +4553,15 @@ router.post("/employees", authMiddleware, requireAnyPermission(employeeCoreManag
       notes: body.notes || "",
       approvalLimitsDetail: body.approvalLimitsDetail || null
     }, { transaction: t });
+    if (createPin) {
+      await employeeAuthorizationService.createEmployeeCredentialForNewEmployee({
+        companyId: req.companyId,
+        employeeId: employee.id,
+        pin: createPin,
+        actorUser: req.user,
+        transaction: t
+      });
+    }
     if (employee.branchId) {
       const branch = await models.Branch.findOne({ where: { id: employee.branchId, companyId: req.companyId, isActive: true }, transaction: t });
       if (!branch) throw new ValidationError("branchId is invalid for this company.", { branchId: ["Invalid branch."] });
@@ -4572,6 +4605,9 @@ async function updateEmployeeAuthoritative(req, res, next) {
           employeeCode: ["Use POST /employees/:id/change-code with reason and current Employee authorization."]
         });
       }
+    }
+    if (updates.status === "present" && !(await employeeHasConfiguredCredential(req.companyId, employee.id, t))) {
+      throw new ValidationError("Employee PIN must be configured before activation.", { pin: ["Set a six-digit Employee PIN before activating this Employee."] });
     }
     const before = employee.toJSON();
     await employee.update(updates, { transaction: t });
@@ -4620,6 +4656,9 @@ router.post("/employees/:id/reactivate", authMiddleware, requireAnyPermission(em
   try {
     const employee = await models.Employee.findOne({ where: { id: req.params.id, companyId: req.companyId } });
     if (!employee) throw new NotFoundError("Employee not found.");
+    if (!(await employeeHasConfiguredCredential(req.companyId, employee.id))) {
+      throw new ValidationError("Employee PIN must be configured before activation.", { pin: ["Set a six-digit Employee PIN before activating this Employee."] });
+    }
     await employee.update({ status: "present", deactivateReason: null });
     emitEntityChanged(req.companyId, { entity: "Employee", action: "update", id: employee.id });
     return res.status(200).json({ success: true, data: employee });
