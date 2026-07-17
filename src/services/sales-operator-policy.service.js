@@ -12,25 +12,25 @@ const POLICIES = {
   "customers.search": { operatorRequired: false },
   "sales.preview": { operatorRequired: false },
 
-  "sales.draft.create": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create", level: 1 },
-  "sales.draft.update": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create", level: 1 },
-  "sales.draft.cancel": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create", level: 1 },
-  "pos.draft.create": { operatorRequired: true, technicalPermission: "pos.sell", employeePermission: "pos.sell", level: 1 },
-  "pos.draft.update": { operatorRequired: true, technicalPermission: "pos.sell", employeePermission: "pos.sell", level: 1 },
-  "pos.draft.cancel": { operatorRequired: true, technicalPermission: "pos.sell", employeePermission: "pos.sell", level: 1 },
+  "sales.draft.create": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create" },
+  "sales.draft.update": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create" },
+  "sales.draft.cancel": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create" },
+  "pos.draft.create": { operatorRequired: true, technicalPermission: "pos.sell", employeePermission: "pos.sell" },
+  "pos.draft.update": { operatorRequired: true, technicalPermission: "pos.sell", employeePermission: "pos.sell" },
+  "pos.draft.cancel": { operatorRequired: true, technicalPermission: "pos.sell", employeePermission: "pos.sell" },
 
-  "sales.post": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create", level: 2 },
-  "pos.checkout": { operatorRequired: true, technicalPermission: "pos.sell", employeePermission: "pos.sell", level: 2 },
-  "sales.legacy_immediate_post": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create", level: 2 },
-  "sales.official_print": { operatorRequired: true, technicalPermission: "sales.print", employeePermission: "sales.print", level: 2 },
-  "sales.reprint": { operatorRequired: true, technicalPermission: "sales.print", employeePermission: "sales.print", level: 2 },
-  "pos.discount.override": { operatorRequired: true, technicalPermission: "pos.discount.approve", employeePermission: "pos.discount.approve", level: 2 },
+  "sales.post": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create" },
+  "pos.checkout": { operatorRequired: true, technicalPermission: "pos.sell", employeePermission: "pos.sell" },
+  "sales.legacy_immediate_post": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create" },
+  "sales.official_print": { operatorRequired: true, technicalPermission: "sales.print", employeePermission: "sales.print" },
+  "sales.reprint": { operatorRequired: true, technicalPermission: "sales.print", employeePermission: "sales.print" },
+  "pos.discount.override": { operatorRequired: true, technicalPermission: "pos.discount.approve", employeePermission: "pos.discount.approve" },
 
-  "sales.return.preview": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create", level: 1 },
-  "sales.return.execute": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.returns.execute", level: 2 },
-  "sales.exchange.preview": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create", level: 1 },
-  "sales.exchange.execute": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.exchanges.execute", level: 2 },
-  "sales.installment.collect": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.installments.collect", level: 2 }
+  "sales.return.preview": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create" },
+  "sales.return.execute": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.returns.execute" },
+  "sales.exchange.preview": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.create" },
+  "sales.exchange.execute": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.exchanges.execute" },
+  "sales.installment.collect": { operatorRequired: true, technicalPermission: "sales.create", employeePermission: "sales.installments.collect" }
 };
 
 function normalizeMode(value) {
@@ -71,8 +71,6 @@ function mapOperatorReason(reason, accountType = "legacy") {
   }
   if (reason === "DEVICE_SESSION_REQUIRED") return "OPERATOR_SESSION_REQUIRED";
   if (reason === "OPERATOR_SESSION_IDLE_TIMEOUT") return "OPERATOR_SESSION_EXPIRED";
-  if (reason === "OPERATOR_SESSION_STALE_CREDENTIAL") return "OPERATOR_SESSION_STALE";
-  if (reason === "OPERATOR_SESSION_STALE_AUTHORIZATION") return "OPERATOR_SESSION_STALE";
   if (reason === "OPERATOR_SESSION_BRANCH_FORBIDDEN") return "OPERATOR_BRANCH_MISMATCH";
   if (reason === "EMPLOYEE_PERMISSION_DENIED") return "OPERATOR_PERMISSION_DENIED";
   return reason || "OPERATOR_SESSION_REQUIRED";
@@ -100,7 +98,6 @@ async function assertSalesOperatorPolicy(req, operation, options = {}) {
 
   const result = await operatorSessionService.currentFromRequest(req, {
     requiredPermission: policy.employeePermission,
-    requiredLevel: policy.level,
     requestedOperation: operation,
     touch: true
   });

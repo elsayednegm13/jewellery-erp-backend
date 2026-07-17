@@ -11,8 +11,6 @@ function fromRequest(req, extras = {}) {
     branchId: operator?.branchId || req.branchId || null,
     operatorSessionId: operator?.operatorSessionId || null,
     deviceSessionId: operator?.deviceSessionId || null,
-    verificationLevel: operator?.verificationLevel || null,
-    level2VerifiedAt: operator?.level2VerifiedAt || null,
     ...extras
   };
 }

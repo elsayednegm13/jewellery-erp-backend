@@ -81,12 +81,7 @@ function operationalSessionState(row) {
   if (row.revokedAt) return "revoked";
   if (row.absoluteExpiresAt && new Date(row.absoluteExpiresAt) <= now) return "absolute_expired";
   if (row.idleExpiresAt && new Date(row.idleExpiresAt) <= now) return "idle_expired";
-  if (Number(row.verificationLevel || 1) >= 2) {
-    const level2At = row.level2VerifiedAt ? new Date(row.level2VerifiedAt) : null;
-    if (!level2At || now.getTime() - level2At.getTime() > 5 * 60 * 1000) return "level_2_expired";
-    return "active_level_2";
-  }
-  return "active_level_1";
+  return "active";
 }
 
 function operationalSessionSafe(row) {
@@ -100,9 +95,7 @@ function operationalSessionSafe(row) {
       name: `${row.sessionUser.firstName || ""} ${row.sessionUser.lastName || ""}`.trim() || row.sessionUser.email,
       email: row.sessionUser.email
     } : null,
-    verificationLevel: Number(row.verificationLevel || 1),
     verifiedAt: row.verifiedAt,
-    level2VerifiedAt: row.level2VerifiedAt,
     lastActivityAt: row.lastActivityAt,
     idleExpiresAt: row.idleExpiresAt,
     absoluteExpiresAt: row.absoluteExpiresAt,
@@ -139,7 +132,7 @@ router.post("/operator/verify", authMiddleware, async (req, res, next) => {
       data: {
         employee: employeeSafe(result.employee),
         verification: {
-          level: result.verification.level,
+          state: result.verification.state,
           verifiedAt: result.verification.verifiedAt,
           expiresAt: result.verification.expiresAt,
           absoluteExpiresAt: result.verification.absoluteExpiresAt,
@@ -156,29 +149,13 @@ router.post("/operator/verify", authMiddleware, async (req, res, next) => {
 
 router.get("/operator/current", authMiddleware, async (req, res, next) => {
   try {
-    const result = await operatorSessionService.currentFromRequest(req, { touch: true });
+    const result = await operatorSessionService.currentFromRequest(req, { touch: false });
     return res.status(200).json({
       success: true,
       data: {
         operatorSession: operatorSessionService.sessionSafe(result.session, result.active ? "active" : "inactive", result.reason),
         active: result.active,
         reason: result.reason
-      }
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-router.post("/operator/authorize-action", authMiddleware, async (req, res, next) => {
-  try {
-    const result = await operatorSessionService.authorizeAction(req, req.body || {});
-    return res.status(200).json({
-      success: true,
-      data: {
-        operatorSession: operatorSessionService.sessionSafe(result.session),
-        employee: employeeSafe(result.employee),
-        verificationAttemptId: result.verificationAttemptId
       }
     });
   } catch (error) {
@@ -218,7 +195,6 @@ router.post("/operator/change-pin", authMiddleware, async (req, res, next) => {
   try {
     const current = await operatorSessionService.currentFromRequest(req, {
       touch: false,
-      requiredLevel: 2,
       requestedOperation: "employee.pin.self_change"
     });
     if (!current.active) throw operatorSessionService.operatorError(current.reason || "OPERATOR_SESSION_REQUIRED", current.statusCode || 401);

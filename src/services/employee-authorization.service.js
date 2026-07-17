@@ -7,9 +7,7 @@ const { AppError, ValidationError, ForbiddenError, NotFoundError } = require("..
 
 const PIN_RE = /^\d{6}$/;
 const MAX_CODE_LENGTH = 64;
-const MAX_FAILURES = 5;
-const LOCKOUT_MINUTES = 15;
-const LEVEL2_FRESHNESS_MINUTES = 5;
+const FAILED_VERIFY_DELAY_MS = 250;
 const DUMMY_BCRYPT_HASH = "$2a$10$7EqJtq98hPqEX7fNZaFWoOhiHNO7Q8NOq8B4EGKGU9Yh/8q0LJcMK"; // bcrypt("000000")
 
 function id(prefix) {
@@ -32,13 +30,14 @@ function validatePin(pin) {
   if (typeof pin !== "string" || !PIN_RE.test(pin)) {
     throw new ValidationError("PIN must be exactly 6 numeric digits.", { pin: ["PIN must be exactly 6 numeric digits."] });
   }
-  if (/^(\d)\1{5}$/.test(pin) || ["123456", "654321", "000000"].includes(pin)) {
-    throw new ValidationError("PIN is too weak.", { pin: ["Choose a stronger PIN."] });
-  }
 }
 
 function verificationError(code = "EMPLOYEE_VERIFICATION_FAILED", statusCode = 403) {
   return new AppError("Employee verification failed.", statusCode, code);
+}
+
+function delayFailedVerification() {
+  return new Promise((resolve) => setTimeout(resolve, FAILED_VERIFY_DELAY_MS));
 }
 
 async function assertManagerPermission(user, permission) {
@@ -249,7 +248,6 @@ async function verifyEmployeeCredential({
   userAgent = null
 }) {
   validatePin(pin);
-  if (![1, 2].includes(Number(requestedLevel))) throw new ValidationError("requestedLevel must be 1 or 2.", { requestedLevel: ["requestedLevel must be 1 or 2."] });
   if (!branchId) throw new ValidationError("branchId is required.", { branchId: ["branchId is required."] });
   if (requestedOperation && String(requestedOperation).length > 160) throw new ValidationError("requestedOperation is too long.", { requestedOperation: ["requestedOperation is too long."] });
   const normalized = normalizeEmployeeCode(employeeCode);
@@ -266,7 +264,7 @@ async function verifyEmployeeCredential({
       employeeCodeNormalized: normalized,
       requestedPermission,
       requestedOperation,
-      requestedLevel: Number(requestedLevel),
+      requestedLevel: 1,
       ipAddress,
       userAgent,
       transaction: t
@@ -283,12 +281,8 @@ async function verifyEmployeeCredential({
       lock: t.LOCK.UPDATE
     });
     const attemptWithEmployee = { ...baseAttempt, employeeId: employee.id };
-    if (employee.status === "inactive") {
+    if (employee.status !== "present") {
       await recordVerificationAttempt({ ...attemptWithEmployee, result: "failure", failureCode: "EMPLOYEE_INACTIVE" });
-      return { failed: true, code: "EMPLOYEE_VERIFICATION_FAILED", statusCode: 403 };
-    }
-    if (employee.status === "leave" && Number(requestedLevel) === 2) {
-      await recordVerificationAttempt({ ...attemptWithEmployee, result: "failure", failureCode: "EMPLOYEE_STATUS_LEVEL_DENIED" });
       return { failed: true, code: "EMPLOYEE_VERIFICATION_FAILED", statusCode: 403 };
     }
     const branchAllowed = await assertEmployeeBranchAccess({ companyId, employeeId: employee.id, branchId, transaction: t });
@@ -302,21 +296,16 @@ async function verifyEmployeeCredential({
       return { failed: true, code: "EMPLOYEE_CREDENTIAL_REQUIRED", statusCode: 403 };
     }
     const now = new Date();
-    if (credential.lockedUntil && new Date(credential.lockedUntil) > now) {
-      await recordVerificationAttempt({ ...attemptWithEmployee, result: "failure", failureCode: "EMPLOYEE_LOCKED" });
-      return { failed: true, code: "EMPLOYEE_CREDENTIAL_LOCKED", statusCode: 423 };
-    }
     const matches = await bcrypt.compare(pin, credential.pinHash);
     if (!matches) {
       const failedCount = Number(credential.failedAttemptCount || 0) + 1;
-      const lockedUntil = failedCount >= MAX_FAILURES ? new Date(now.getTime() + LOCKOUT_MINUTES * 60 * 1000) : null;
       await credential.update({
         failedAttemptCount: failedCount,
         lastFailedAt: now,
-        lockedUntil
+        lockedUntil: null
       }, { transaction: t });
-      await recordVerificationAttempt({ ...attemptWithEmployee, result: "failure", failureCode: lockedUntil ? "EMPLOYEE_LOCKED" : "EMPLOYEE_VERIFICATION_FAILED" });
-      return { failed: true, code: lockedUntil ? "EMPLOYEE_CREDENTIAL_LOCKED" : "EMPLOYEE_VERIFICATION_FAILED", statusCode: lockedUntil ? 423 : 403 };
+      await recordVerificationAttempt({ ...attemptWithEmployee, result: "failure", failureCode: "EMPLOYEE_VERIFICATION_FAILED" });
+      return { failed: true, code: "EMPLOYEE_VERIFICATION_FAILED", statusCode: 403 };
     }
     let allowed = true;
     let resolved = null;
@@ -335,10 +324,16 @@ async function verifyEmployeeCredential({
       lastVerifiedAt: now
     }, { transaction: t });
     const attempt = await recordVerificationAttempt({ ...attemptWithEmployee, result: "success", failureCode: null });
-    const expiresAt = new Date(now.getTime() + (Number(requestedLevel) === 2 ? LEVEL2_FRESHNESS_MINUTES : 15) * 60 * 1000);
+    const expiresAt = new Date(now.getTime() + 30 * 60 * 1000);
     return { employee, attempt, verifiedAt: now, expiresAt, authorization: { requestedPermission, allowed }, resolved };
   });
-  if (result.failed) throw verificationError(result.code, result.statusCode);
+  if (result.failed) {
+    if (result.code === "EMPLOYEE_VERIFICATION_FAILED" || result.code === "EMPLOYEE_CREDENTIAL_REQUIRED") {
+      await delayFailedVerification();
+      throw verificationError("EMPLOYEE_VERIFICATION_FAILED", result.statusCode);
+    }
+    throw verificationError(result.code, result.statusCode);
+  }
   return result;
 }
 

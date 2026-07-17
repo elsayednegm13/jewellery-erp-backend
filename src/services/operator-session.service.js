@@ -4,9 +4,8 @@ const employeeAuth = require("./employee-authorization.service");
 const auditService = require("./audit.service");
 const { AppError, ValidationError } = require("../utils/errors");
 
-const IDLE_TIMEOUT_MINUTES = 15;
+const IDLE_TIMEOUT_MINUTES = 30;
 const ABSOLUTE_TIMEOUT_HOURS = 8;
-const LEVEL2_FRESHNESS_MINUTES = 5;
 const TOUCH_THROTTLE_SECONDS = 60;
 const DEVICE_SESSION_RE = /^[A-Za-z0-9._:-]{16,128}$/;
 
@@ -53,9 +52,7 @@ function sessionSafe(session, state = "active", reason = null) {
       reason,
       sessionId: null,
       employee: null,
-      verificationLevel: 0,
       verifiedAt: null,
-      level2VerifiedAt: null,
       idleExpiresAt: null,
       absoluteExpiresAt: null
     };
@@ -65,9 +62,7 @@ function sessionSafe(session, state = "active", reason = null) {
     reason,
     sessionId: session.id,
     employee: employeeSafe(session.employee),
-    verificationLevel: Number(session.verificationLevel || 1),
     verifiedAt: session.verifiedAt,
-    level2VerifiedAt: session.level2VerifiedAt,
     lastActivityAt: session.lastActivityAt,
     idleExpiresAt: session.idleExpiresAt,
     absoluteExpiresAt: session.absoluteExpiresAt,
@@ -86,8 +81,6 @@ function contextFromSession(session, req, extras = {}) {
     branchId: session.branchId,
     operatorSessionId: session.id,
     deviceSessionId: session.deviceSessionId,
-    verificationLevel: Number(session.verificationLevel || 1),
-    level2VerifiedAt: session.level2VerifiedAt || null,
     ...extras
   };
 }
@@ -128,7 +121,7 @@ async function assertLiveSession(session, req, options = {}) {
   }
   if (new Date(session.idleExpiresAt) <= now) {
     await revokeSession(session, "idle_timeout");
-    return { active: false, reason: "OPERATOR_SESSION_IDLE_TIMEOUT", statusCode: 401, session };
+    return { active: false, reason: "OPERATOR_SESSION_EXPIRED", statusCode: 401, session };
   }
   const employee = session.employee || await models.Employee.findOne({ where: { id: session.employeeId, companyId: req.companyId } });
   if (!employee) {
@@ -158,15 +151,6 @@ async function assertLiveSession(session, req, options = {}) {
   if (!branchAllowed) {
     await revokeSession(session, "branch_access_changed");
     return { active: false, reason: "OPERATOR_SESSION_BRANCH_FORBIDDEN", statusCode: 403, session };
-  }
-  if (options.requiredLevel && Number(options.requiredLevel) >= 2) {
-    if (employee.status === "leave") {
-      return { active: false, reason: "EMPLOYEE_STATUS_LEVEL_DENIED", statusCode: 403, session };
-    }
-    const level2At = session.level2VerifiedAt ? new Date(session.level2VerifiedAt) : null;
-    if (!level2At || now.getTime() - level2At.getTime() > LEVEL2_FRESHNESS_MINUTES * 60 * 1000) {
-      return { active: false, reason: "OPERATOR_STEP_UP_REQUIRED", statusCode: 403, session };
-    }
   }
   if (requestedPermission) {
     const resolved = await employeeAuth.resolveEmployeePermissions({
@@ -211,7 +195,6 @@ async function currentFromRequest(req, options = {}) {
 }
 
 async function verifyOperator({ req, body }) {
-  const requestedLevel = Number(body.requestedLevel || 1);
   const deviceSessionId = normalizeDeviceSessionId(String(req.headers["x-device-session-id"] || body.deviceSessionId || ""));
   const result = await employeeAuth.verifyEmployeeCredential({
     companyId: req.companyId,
@@ -219,7 +202,7 @@ async function verifyOperator({ req, body }) {
     user: req.user,
     employeeCode: body.employeeCode,
     pin: body.pin,
-    requestedLevel,
+    requestedLevel: 1,
     requestedPermission: body.requestedPermission || null,
     requestedOperation: body.requestedOperation || null,
     ipAddress: req.ip || req.connection?.remoteAddress || null,
@@ -249,9 +232,9 @@ async function verifyOperator({ req, body }) {
       branchId: String(body.branchId || req.branchId),
       sessionUserId: req.user?.id || null,
       employeeId: employee.id,
-      verificationLevel: requestedLevel,
+      verificationLevel: 1,
       verifiedAt: now,
-      level2VerifiedAt: requestedLevel >= 2 ? now : null,
+      level2VerifiedAt: null,
       lastActivityAt: now,
       idleExpiresAt: nowPlus(IDLE_TIMEOUT_MINUTES),
       absoluteExpiresAt: new Date(now.getTime() + ABSOLUTE_TIMEOUT_HOURS * 60 * 60 * 1000),
@@ -270,11 +253,11 @@ async function verifyOperator({ req, body }) {
       place: req.branchId || "Operator",
       branch: req.branchId || null,
       sourceDocument: created.id,
-      severity: requestedLevel >= 2 ? "warning" : "info",
+      severity: "info",
       requestedPermission: body.requestedPermission || null,
       requestedOperation: body.requestedOperation || null,
       authorizationResult: "allowed",
-      after: JSON.stringify({ employeeId: employee.id, verificationLevel: requestedLevel })
+      after: JSON.stringify({ employeeId: employee.id, state: "verified" })
     }, contextFromSession(created, req)), { transaction: t });
     return created;
   });
@@ -283,7 +266,7 @@ async function verifyOperator({ req, body }) {
     employee,
     session,
     verification: {
-      level: requestedLevel,
+      state: "verified",
       verifiedAt: session.verifiedAt,
       expiresAt: session.idleExpiresAt,
       absoluteExpiresAt: session.absoluteExpiresAt,
@@ -291,55 +274,6 @@ async function verifyOperator({ req, body }) {
     },
     authorization: result.authorization
   };
-}
-
-async function authorizeAction(req, body = {}) {
-  const current = await currentFromRequest(req, {
-    touch: false,
-    requiredPermission: body.requiredPermission || null,
-    requestedOperation: body.requestedOperation || null
-  });
-  if (!current.active) throw operatorError(current.reason, current.statusCode);
-  if (!body.pin) throw new ValidationError("PIN is required.", { pin: ["PIN is required."] });
-  const employee = current.session.employee;
-  const result = await employeeAuth.verifyEmployeeCredential({
-    companyId: req.companyId,
-    branchId: req.branchId,
-    user: req.user,
-    employeeCode: employee.employeeCode,
-    pin: body.pin,
-    requestedLevel: 2,
-    requestedPermission: body.requiredPermission || null,
-    requestedOperation: body.requestedOperation || null,
-    ipAddress: req.ip || req.connection?.remoteAddress || null,
-    userAgent: req.headers["user-agent"] || null
-  });
-  const now = new Date();
-  await current.session.update({
-    verificationLevel: 2,
-    level2VerifiedAt: now,
-    lastActivityAt: now,
-    idleExpiresAt: nowPlus(IDLE_TIMEOUT_MINUTES)
-  });
-  current.session.level2VerifiedAt = now;
-  current.session.verificationLevel = 2;
-  await auditService.record(req.companyId, auditService.attachDualAuditActor({
-    action: "operator.step_up.authorized",
-    description: `Operator level 2 authorization for ${body.requestedOperation || "operation"}.`,
-    place: req.branchId || "Operator",
-    branch: req.branchId || null,
-    sourceDocument: current.session.id,
-    severity: "warning",
-    requestedPermission: body.requiredPermission || null,
-    requestedOperation: body.requestedOperation || null,
-    authorizationResult: "allowed",
-    after: JSON.stringify({ verificationAttemptId: result.attempt.id })
-  }, contextFromSession(current.session, req, {
-    requiredPermission: body.requiredPermission || null,
-    requestedOperation: body.requestedOperation || null,
-    authorizationResult: "allowed"
-  })));
-  return { session: current.session, employee, verificationAttemptId: result.attempt.id };
 }
 
 async function lockCurrent(req, reason = "manual_lock") {
@@ -380,7 +314,6 @@ module.exports = {
   sessionSafe,
   currentFromRequest,
   verifyOperator,
-  authorizeAction,
   lockCurrent,
   endCurrent,
   assertLiveSession,

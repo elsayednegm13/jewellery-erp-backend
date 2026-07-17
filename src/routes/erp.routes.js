@@ -303,13 +303,7 @@ function employeeSessionState(row) {
   if (row.revokedAt) return "revoked";
   if (row.absoluteExpiresAt && new Date(row.absoluteExpiresAt) <= now) return "absolute_expired";
   if (row.idleExpiresAt && new Date(row.idleExpiresAt) <= now) return "idle_expired";
-  const level = Number(row.verificationLevel || 1);
-  if (level >= 2) {
-    const level2At = row.level2VerifiedAt ? new Date(row.level2VerifiedAt) : null;
-    if (!level2At || now.getTime() - level2At.getTime() > 5 * 60 * 1000) return "level_2_expired";
-    return "active_level_2";
-  }
-  return "active_level_1";
+  return "active";
 }
 
 /**
@@ -4438,7 +4432,7 @@ async function updateEmployeeAuthoritative(req, res, next) {
       const normalized = employeeAuthorizationService.normalizeEmployeeCode(req.body.employeeCode);
       if (normalized !== employee.employeeCodeNormalized) {
         throw new ValidationError("Employee Code must be changed through the dedicated credential endpoint.", {
-          employeeCode: ["Use POST /employees/:id/change-code with reason and Level 2 authorization."]
+          employeeCode: ["Use POST /employees/:id/change-code with reason and current Employee authorization."]
         });
       }
     }
