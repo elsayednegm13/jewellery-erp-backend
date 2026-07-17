@@ -210,7 +210,8 @@ router.get("/operator/current", authMiddleware, async (req, res, next) => {
       data: {
         operatorSession: operatorSessionService.sessionSafe(result.session, result.active ? "active" : "inactive", result.reason),
         active: result.active,
-        reason: result.reason
+        reason: result.reason,
+        authorization: result.active ? result.authorization : null
       }
     });
   } catch (error) {

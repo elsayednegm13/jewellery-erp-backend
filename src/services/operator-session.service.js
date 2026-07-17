@@ -71,6 +71,26 @@ function sessionSafe(session, state = "active", reason = null) {
   };
 }
 
+function authorizationSafe(resolved, session = null, credential = null) {
+  if (!resolved) return null;
+  const employee = resolved.employee || session?.employee || null;
+  return {
+    employeeId: employee?.id || session?.employeeId || null,
+    companyId: employee?.companyId || session?.companyId || null,
+    branchId: session?.branchId || null,
+    rolePermissions: resolved.rolePermissionNames || [],
+    directGrants: resolved.directGrantNames || [],
+    directDenials: resolved.directDenialNames || [],
+    effectivePermissions: resolved.effectivePermissionNames || [],
+    rolePermissionNames: resolved.rolePermissionNames || [],
+    directGrantNames: resolved.directGrantNames || [],
+    directDenialNames: resolved.directDenialNames || [],
+    effectivePermissionNames: resolved.effectivePermissionNames || [],
+    authorizationVersion: employee?.authorizationVersion || session?.authorizationVersion || 1,
+    credentialVersion: credential?.credentialVersion || session?.credentialVersion || 1
+  };
+}
+
 function contextFromSession(session, req, extras = {}) {
   return {
     technicalUserId: req.user?.id || session.sessionUserId || null,
@@ -109,6 +129,8 @@ async function revokeSession(session, reason, transaction = null) {
 async function assertLiveSession(session, req, options = {}) {
   const requestedPermission = options.requiredPermission || null;
   const requestedOperation = options.requestedOperation || null;
+  let credential = null;
+  let resolved = null;
   if (!session) {
     return { active: false, reason: "OPERATOR_SESSION_REQUIRED", statusCode: 401, session: null };
   }
@@ -132,7 +154,7 @@ async function assertLiveSession(session, req, options = {}) {
     await revokeSession(session, "employee_inactive");
     return { active: false, reason: "EMPLOYEE_INACTIVE", statusCode: 403, session };
   }
-  const credential = await models.EmployeeCredential.findOne({
+  credential = await models.EmployeeCredential.findOne({
     where: { companyId: req.companyId, employeeId: employee.id, active: true }
   });
   if (!credential || Number(credential.credentialVersion || 0) !== Number(session.credentialVersion || 0)) {
@@ -152,12 +174,12 @@ async function assertLiveSession(session, req, options = {}) {
     await revokeSession(session, "branch_access_changed");
     return { active: false, reason: "OPERATOR_SESSION_BRANCH_FORBIDDEN", statusCode: 403, session };
   }
+  resolved = await employeeAuth.resolveEmployeePermissions({
+    companyId: req.companyId,
+    employeeId: employee.id,
+    branchId: req.branchId
+  });
   if (requestedPermission) {
-    const resolved = await employeeAuth.resolveEmployeePermissions({
-      companyId: req.companyId,
-      employeeId: employee.id,
-      branchId: req.branchId
-    });
     if (!resolved.effectivePermissionNames.includes(requestedPermission)) {
       return { active: false, reason: "EMPLOYEE_PERMISSION_DENIED", statusCode: 403, session };
     }
@@ -172,6 +194,7 @@ async function assertLiveSession(session, req, options = {}) {
     reason: null,
     statusCode: 200,
     session,
+    authorization: authorizationSafe(resolved, session, credential),
     context: contextFromSession(session, req, {
       requiredPermission: requestedPermission,
       requestedOperation,
@@ -262,6 +285,11 @@ async function verifyOperator({ req, body }) {
     return created;
   });
   session.employee = employee;
+  const resolved = result.resolved || await employeeAuth.resolveEmployeePermissions({
+    companyId: req.companyId,
+    employeeId: employee.id,
+    branchId: String(body.branchId || req.branchId)
+  });
   return {
     employee,
     session,
@@ -272,7 +300,7 @@ async function verifyOperator({ req, body }) {
       absoluteExpiresAt: session.absoluteExpiresAt,
       verificationAttemptId: result.attempt.id
     },
-    authorization: result.authorization
+    authorization: authorizationSafe(resolved, session, credential)
   };
 }
 
@@ -312,6 +340,7 @@ module.exports = {
   normalizeDeviceSessionId,
   employeeSafe,
   sessionSafe,
+  authorizationSafe,
   currentFromRequest,
   verifyOperator,
   lockCurrent,

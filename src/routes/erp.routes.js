@@ -2,6 +2,7 @@ const express = require("express");
 const bcrypt = require("bcryptjs");
 const { Op } = require("sequelize");
 const { authMiddleware, requirePermission, requireAnyPermission } = require("../middleware/auth.middleware");
+const { requireBusinessPermission, requireAnyBusinessPermission } = require("../middleware/business-permission.middleware");
 const ErpController = require("../controllers/erp.controller");
 const models = require("../models");
 const postingService = require("../services/posting.service");
@@ -244,6 +245,24 @@ const CRUD_PERMISSIONS = {
   branches: "branches",
 };
 
+// CRUD routes in this set are business surfaces. A Branch Account reaches them
+// through the verified Employee operator; technical accounts retain their
+// existing permission checks.
+const EMPLOYEE_BUSINESS_CRUD_RESOURCES = new Set([
+  "customers",
+  "suppliers",
+  "assets",
+  "products",
+  "stock-movements",
+  "invoices",
+  "reservations",
+  "purchase-orders",
+  "approval-requests",
+  "journal-entries",
+  "accounts",
+  "cash-transactions",
+]);
+
 function guardFor(resourceName, action) {
   const permissionModule = CRUD_PERMISSIONS[resourceName];
   if (!permissionModule) return allowAuthenticated;
@@ -257,7 +276,13 @@ function guardFor(resourceName, action) {
     permissionModule === "accounting" && mappedAction !== "view" ? "accounting.post" : null,
     permissionModule === "treasury" && mappedAction !== "view" ? "treasury.update" : null,
   ].filter(Boolean);
-  return candidates.length === 1 ? requirePermission(candidates[0]) : requireAnyPermission(candidates);
+  const one = EMPLOYEE_BUSINESS_CRUD_RESOURCES.has(resourceName)
+    ? requireBusinessPermission
+    : requirePermission;
+  const any = EMPLOYEE_BUSINESS_CRUD_RESOURCES.has(resourceName)
+    ? requireAnyBusinessPermission
+    : requireAnyPermission;
+  return candidates.length === 1 ? one(candidates[0]) : any(candidates);
 }
 
 const employeeViewPermissions = [
