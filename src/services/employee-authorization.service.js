@@ -386,8 +386,6 @@ async function updateEmployeeAuthorization({ companyId, employeeId, actorUser, r
     const roleIdSet = sortedUnique(roleIds);
     const grantSet = sortedUnique(grantPermissionIds);
     const denialSet = sortedUnique(denialPermissionIds);
-    const contradictions = grantSet.filter((id) => denialSet.includes(id));
-    if (contradictions.length) throw new ValidationError("Permission cannot be both granted and denied.", { permissions: ["Grant and denial sets overlap."] });
     const roles = roleIdSet.length ? await models.Role.findAll({ where: { id: roleIdSet, companyId }, transaction: t }) : [];
     if (roles.length !== roleIdSet.length) throw new ValidationError("One or more roles are invalid for this company.", { roleIds: ["Invalid role ID."] });
     const permissionIds = [...new Set([...grantSet, ...denialSet])];

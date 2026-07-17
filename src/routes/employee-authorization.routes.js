@@ -110,7 +110,8 @@ function authorizationSafe(resolved) {
     rolePermissionNames: resolved.rolePermissionNames,
     directGrantNames: resolved.directGrantNames,
     directDenialNames: resolved.directDenialNames,
-    effectivePermissionNames: resolved.effectivePermissionNames
+    effectivePermissionNames: resolved.effectivePermissionNames,
+    authorizationVersion: resolved.employee?.authorizationVersion || 1
   };
 }
 
@@ -118,6 +119,60 @@ async function assertEmployee(companyId, employeeId) {
   const employee = await models.Employee.findOne({ where: { id: employeeId, companyId } });
   if (!employee) throw new NotFoundError("Employee not found.");
   return employee;
+}
+
+function permissionSafe(permission) {
+  if (!permission) return null;
+  return {
+    id: permission.id,
+    name: permission.name,
+    module: permission.module,
+    action: permission.action,
+    description: permission.description || null
+  };
+}
+
+function permissionSourceFor(name, resolved) {
+  const inRole = resolved.rolePermissionNames.includes(name);
+  const inGrant = resolved.directGrantNames.includes(name);
+  const inDenial = resolved.directDenialNames.includes(name);
+  const isEffective = resolved.effectivePermissionNames.includes(name);
+  let source = "NOT_GRANTED";
+  if (inDenial) source = "DENIED";
+  else if (inRole && inGrant) source = "ROLE_AND_DIRECT_GRANT";
+  else if (inRole) source = "ROLE";
+  else if (inGrant) source = "DIRECT_GRANT";
+  return { name, source, effective: isEffective, denied: inDenial, role: inRole, directGrant: inGrant, directDenial: inDenial };
+}
+
+async function employeePermissionResponse(companyId, employeeId, resolvedOverride = null) {
+  const [resolved, roles, grants, denials, catalog] = await Promise.all([
+    resolvedOverride || employeeAuth.resolveEmployeePermissions({ companyId, employeeId }),
+    models.EmployeeRoleAssignment.findAll({ where: { companyId, employeeId, active: true }, include: [{ model: models.Role, as: "role" }] }),
+    models.EmployeePermissionGrant.findAll({ where: { companyId, employeeId, active: true }, include: [{ model: models.Permission, as: "permission" }] }),
+    models.EmployeePermissionDenial.findAll({ where: { companyId, employeeId, active: true }, include: [{ model: models.Permission, as: "permission" }] }),
+    models.Permission.findAll({ order: [["module", "ASC"], ["action", "ASC"], ["name", "ASC"]] })
+  ]);
+  const byName = new Map(catalog.map((permission) => [permission.name, permission]));
+  const fromNames = (names) => names.map((name) => permissionSafe(byName.get(name) || { id: name, name, module: name.split(".")[0] || "general", action: name.split(".").slice(1).join(".") })).filter(Boolean);
+  const effectiveSources = catalog.map((permission) => ({
+    ...permissionSafe(permission),
+    ...permissionSourceFor(permission.name, resolved)
+  }));
+  return {
+    employeeId,
+    assignableCatalog: catalog.map(permissionSafe).filter(Boolean),
+    roles: roles.map((row) => row.role).filter(Boolean),
+    rolePermissions: fromNames(resolved.rolePermissionNames),
+    grants: grants.map((row) => permissionSafe(row.permission)).filter(Boolean),
+    directGrants: grants.map((row) => permissionSafe(row.permission)).filter(Boolean),
+    denials: denials.map((row) => permissionSafe(row.permission)).filter(Boolean),
+    directDenials: denials.map((row) => permissionSafe(row.permission)).filter(Boolean),
+    effectivePermissions: fromNames(resolved.effectivePermissionNames),
+    effectiveSources,
+    authorizationVersion: resolved.employee?.authorizationVersion || 1,
+    authorization: authorizationSafe(resolved)
+  };
 }
 
 router.post("/operator/verify", authMiddleware, async (req, res, next) => {
@@ -364,21 +419,7 @@ router.put("/employees/:id/branches", authMiddleware, requirePermission("employe
 router.get("/employees/:id/permissions", authMiddleware, requirePermission("employees.permissions.manage"), async (req, res, next) => {
   try {
     await assertEmployee(req.companyId, req.params.id);
-    const [resolved, roles, grants, denials] = await Promise.all([
-      employeeAuth.resolveEmployeePermissions({ companyId: req.companyId, employeeId: req.params.id }),
-      models.EmployeeRoleAssignment.findAll({ where: { companyId: req.companyId, employeeId: req.params.id, active: true }, include: [{ model: models.Role, as: "role" }] }),
-      models.EmployeePermissionGrant.findAll({ where: { companyId: req.companyId, employeeId: req.params.id, active: true }, include: [{ model: models.Permission, as: "permission" }] }),
-      models.EmployeePermissionDenial.findAll({ where: { companyId: req.companyId, employeeId: req.params.id, active: true }, include: [{ model: models.Permission, as: "permission" }] })
-    ]);
-    return res.status(200).json({
-      success: true,
-      data: {
-        roles: roles.map((row) => row.role).filter(Boolean),
-        grants: grants.map((row) => row.permission).filter(Boolean),
-        denials: denials.map((row) => row.permission).filter(Boolean),
-        authorization: authorizationSafe(resolved)
-      }
-    });
+    return res.status(200).json({ success: true, data: await employeePermissionResponse(req.companyId, req.params.id) });
   } catch (error) {
     next(error);
   }
@@ -395,7 +436,7 @@ router.put("/employees/:id/permissions", authMiddleware, requirePermission("empl
       denialPermissionIds: Array.isArray(req.body?.denialPermissionIds) ? req.body.denialPermissionIds.map(String) : [],
       reason: req.body?.reason || null
     });
-    return res.status(200).json({ success: true, data: { authorization: authorizationSafe(resolved) } });
+    return res.status(200).json({ success: true, data: await employeePermissionResponse(req.companyId, req.params.id, resolved) });
   } catch (error) {
     next(error);
   }
