@@ -270,6 +270,105 @@ const employeeCoreManagePermissions = [
   "employees.credentials.manage",
 ];
 
+const LIFECYCLE_GENERIC_MUTATION_BLOCKS = {
+  assets: {
+    code: "GENERIC_INVENTORY_MUTATION_FORBIDDEN",
+    message: "Inventory asset mutations must use dedicated inventory lifecycle endpoints."
+  },
+  products: {
+    code: "GENERIC_INVENTORY_MUTATION_FORBIDDEN",
+    message: "Product stock mutations must use dedicated inventory lifecycle endpoints."
+  },
+  "stock-movements": {
+    code: "GENERIC_STOCK_MOVEMENT_MUTATION_FORBIDDEN",
+    message: "Stock movement truth is read-only through generic CRUD."
+  },
+  transfers: {
+    code: "GENERIC_TRANSFER_MUTATION_FORBIDDEN",
+    message: "Inventory transfers must use the dedicated transfer endpoints."
+  },
+  "purchase-orders": {
+    code: "GENERIC_PURCHASE_MUTATION_FORBIDDEN",
+    message: "Purchase lifecycle mutations must use the dedicated purchase receive/payment endpoints."
+  },
+  "cash-transactions": {
+    code: "GENERIC_TREASURY_MUTATION_FORBIDDEN",
+    message: "Treasury movements must use the dedicated treasury endpoints."
+  }
+};
+
+function stableForbidden(res, code, message) {
+  return res.status(403).json({
+    success: false,
+    message,
+    code,
+    errorCode: code
+  });
+}
+
+function normalizeBranchInput(value) {
+  if (value === undefined || value === null || value === "" || value === "all") return null;
+  return String(value);
+}
+
+async function resolveAuthorizedBranchId(req, value, options = {}) {
+  const requested = normalizeBranchInput(value);
+  const fixedBranchId = normalizeBranchInput(req.branchId);
+  if (!requested) {
+    if (fixedBranchId) return fixedBranchId;
+    if (options.required) throw new ValidationError("A valid branch selection is required.");
+    return null;
+  }
+  if (fixedBranchId && String(requested) !== String(fixedBranchId)) {
+    throw new AppError("Selected branch is outside this account scope.", 403, "BRANCH_SCOPE_FORBIDDEN");
+  }
+  const branch = await models.Branch.findOne({
+    where: { id: requested, companyId: req.companyId, isActive: true },
+    transaction: options.transaction || undefined
+  });
+  if (!branch) {
+    throw new AppError("Selected branch is invalid or inactive.", 403, "BRANCH_SCOPE_INVALID");
+  }
+  return branch.id;
+}
+
+async function resolveAuthorizedBranch(req, value, options = {}) {
+  const branchId = await resolveAuthorizedBranchId(req, value, options);
+  if (!branchId) return null;
+  return models.Branch.findOne({
+    where: { id: branchId, companyId: req.companyId, isActive: true },
+    transaction: options.transaction || undefined
+  });
+}
+
+function normalizeTreasuryAccount(value, field = "account") {
+  const account = String(value || "").trim().toLowerCase();
+  if (account !== "cash" && account !== "bank") {
+    throw new ValidationError(`${field} must be 'cash' or 'bank'.`);
+  }
+  return account;
+}
+
+async function assertActiveAccountCode(companyId, code, options = {}) {
+  const normalized = String(code || "").trim();
+  if (!normalized) throw new ValidationError("counterAccountCode is required for manual treasury cash movements.");
+  const account = await models.Account.findOne({
+    where: { companyId, code: normalized, isActive: true },
+    transaction: options.transaction || undefined
+  });
+  if (!account) throw new ValidationError(`Account ${normalized} is inactive, missing, or outside this company.`);
+  return account;
+}
+
+async function assertTreasuryAccountKey(companyId, key, options = {}) {
+  const code = TREASURY_GL[key];
+  const account = await assertActiveAccountCode(companyId, code, options);
+  if (account.type !== "asset" || account.nature !== "debit") {
+    throw new ValidationError(`Treasury account ${code} must be an active debit asset account.`);
+  }
+  return account;
+}
+
 function parsePositiveInt(value, fallback, max = 100) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed < 1) return fallback;
@@ -327,6 +426,17 @@ function setupCrud(resourceName, model, searchFields = ["name"]) {
     router.post(`/${resourceName}/:id/deactivate`, authMiddleware, guardFor(resourceName, "update"), blockInvoiceMutation);
     router.post(`/${resourceName}/:id/reactivate`, authMiddleware, guardFor(resourceName, "update"), blockInvoiceMutation);
     router.delete(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "delete"), blockInvoiceMutation);
+    return controller;
+  }
+  if (LIFECYCLE_GENERIC_MUTATION_BLOCKS[resourceName]) {
+    const { code, message } = LIFECYCLE_GENERIC_MUTATION_BLOCKS[resourceName];
+    const blockGenericMutation = (req, res) => stableForbidden(res, code, message);
+    router.post(`/${resourceName}`, authMiddleware, guardFor(resourceName, "create"), blockGenericMutation);
+    router.put(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "update"), blockGenericMutation);
+    router.patch(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "update"), blockGenericMutation);
+    router.post(`/${resourceName}/:id/deactivate`, authMiddleware, guardFor(resourceName, "update"), blockGenericMutation);
+    router.post(`/${resourceName}/:id/reactivate`, authMiddleware, guardFor(resourceName, "update"), blockGenericMutation);
+    router.delete(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "delete"), blockGenericMutation);
     return controller;
   }
   router.post(`/${resourceName}`, authMiddleware, guardFor(resourceName, "create"), controller.create);
@@ -6153,7 +6263,8 @@ router.post("/purchase-orders/:id/pay", authMiddleware, requirePermission("treas
     if (!Number.isFinite(amount) || amount <= 0) {
       throw new ValidationError("Payment amount must be a finite number greater than zero.");
     }
-    const account = b.account === "bank" ? "bank" : "cash";
+    const account = normalizeTreasuryAccount(b.account, "account");
+    await assertTreasuryAccountKey(req.companyId, account, { transaction: t });
     const date = b.date && isValidYmd(String(b.date)) ? String(b.date) : new Date().toISOString().slice(0, 10);
     if (b.date && !isValidYmd(String(b.date))) {
       throw new ValidationError("Invalid 'date' (expected YYYY-MM-DD).");
@@ -9519,7 +9630,7 @@ router.get("/reports/trial-balance", authMiddleware, requirePermission("accounti
     const asOf = req.query.asOf ? String(req.query.asOf) : null;
     const from = req.query.from ? String(req.query.from) : null;
     const to = req.query.to ? String(req.query.to) : null;
-    const branchId = req.query.branchId ? String(req.query.branchId) : null;
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId);
     if (asOf && !isValidYmd(asOf)) throw new ValidationError("Invalid 'asOf' date (expected YYYY-MM-DD).");
     if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
     if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
@@ -9758,7 +9869,7 @@ router.get("/reports/ledger/account", authMiddleware, requirePermission("account
     const accountCode = req.query.accountCode ? String(req.query.accountCode) : null;
     const from = req.query.from ? String(req.query.from) : null;
     const to = req.query.to ? String(req.query.to) : null;
-    const branchId = req.query.branchId ? String(req.query.branchId) : null;
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId);
     if (!accountId && !accountCode) throw new ValidationError("accountId or accountCode is required.");
     if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
     if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
@@ -9884,7 +9995,7 @@ router.get("/reports/ledger/cash-reconciliation", authMiddleware, requirePermiss
   try {
     const from = req.query.from ? String(req.query.from) : null;
     const to = req.query.to ? String(req.query.to) : null;
-    const branchId = req.query.branchId ? String(req.query.branchId) : null;
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId);
     if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
     if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
     if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
@@ -10004,7 +10115,7 @@ router.get("/reports/ledger/cash-reconciliation", authMiddleware, requirePermiss
 router.get("/reports/ledger/ar-ap-reconciliation", authMiddleware, requirePermission("accounting.view"), async (req, res, next) => {
   try {
     const asOf = req.query.asOf ? String(req.query.asOf) : null;
-    const branchId = req.query.branchId ? String(req.query.branchId) : null;
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId);
     if (asOf && !isValidYmd(asOf)) throw new ValidationError("Invalid 'asOf' date (expected YYYY-MM-DD).");
 
     const accountCodes = ["1300", "2100", "2300"];
@@ -10123,7 +10234,7 @@ router.get("/reports/inventory-valuation", authMiddleware, requirePermission("re
     const companyId = req.companyId;
     const settings = await settingsService.getCompanySettings(companyId);
     const currency = settings.currency || "AED";
-    const branchId = req.query.branchId && req.query.branchId !== "all" ? req.query.branchId : null;
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId);
     const karatFilter = req.query.karat && req.query.karat !== "all" ? String(req.query.karat) : null;
 
     // Current per-gram price per gold karat (manual fixing wins over live).
@@ -10234,7 +10345,7 @@ const REPORT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const reportNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 const reportRound2 = (v) => Math.round(v * 100) / 100;
 
-function buildInvoiceReportWhere(req) {
+async function buildInvoiceReportWhere(req) {
   const where = { companyId: req.companyId, postingStatus: "posted" };
   const filters = {
     companyId: req.companyId,
@@ -10245,7 +10356,7 @@ function buildInvoiceReportWhere(req) {
     dateFilterApplied: false,
     dateFilterRejected: false,
   };
-  const branchId = req.query.branchId && req.query.branchId !== "all" ? String(req.query.branchId) : null;
+  const branchId = await resolveAuthorizedBranchId(req, req.query.branchId);
   if (branchId) { where.branchId = branchId; filters.branchId = branchId; }
 
   const from = req.query.from;
@@ -10265,7 +10376,7 @@ function buildInvoiceReportWhere(req) {
 // GET /reports/tax-summary — posted invoices; returns net via negative totals.
 router.get("/reports/tax-summary", authMiddleware, requirePermission("reports.view"), async (req, res, next) => {
   try {
-    const { where, filters } = buildInvoiceReportWhere(req);
+    const { where, filters } = await buildInvoiceReportWhere(req);
     const invoices = await models.Invoice.findAll({ where });
     let salesTotal = 0, vatTotal = 0, netSubtotal = 0;
     for (const inv of invoices) {
@@ -10368,7 +10479,7 @@ router.get("/reports/tax-summary", authMiddleware, requirePermission("reports.vi
 // GET /reports/financial-summary — invoice-based (ledger-based is a future variant).
 router.get("/reports/financial-summary", authMiddleware, requirePermission("reports.view"), async (req, res, next) => {
   try {
-    const { where, filters } = buildInvoiceReportWhere(req);
+    const { where, filters } = await buildInvoiceReportWhere(req);
     const invoices = await models.Invoice.findAll({ where });
     let revenue = 0, vat = 0, receivables = 0;
     for (const inv of invoices) {
@@ -10404,7 +10515,7 @@ router.get("/reports/financial-summary", authMiddleware, requirePermission("repo
 // GET /reports/profit-summary — realized gross profit from posted SALE items.
 router.get("/reports/profit-summary", authMiddleware, requirePermission("reports.view"), async (req, res, next) => {
   try {
-    const { where, filters } = buildInvoiceReportWhere(req);
+    const { where, filters } = await buildInvoiceReportWhere(req);
     // Scope to type="sale": return/exchange ITEM-level signing is unverified in
     // the data, so they are EXCLUDED rather than risk mis-signing realized
     // profit. This is surfaced in `returnsExchanges` below.
@@ -10458,7 +10569,7 @@ router.get("/reports/profit-summary", authMiddleware, requirePermission("reports
 });
 
 // Employee Session Management
-router.get("/employees/:id/sessions", authMiddleware, async (req, res, next) => {
+router.get("/employees/:id/sessions", authMiddleware, requirePermission("employees.verification.view"), async (req, res, next) => {
   try {
     const employeeId = req.params.id;
     const employee = await models.Employee.findOne({
@@ -10474,7 +10585,7 @@ router.get("/employees/:id/sessions", authMiddleware, async (req, res, next) => 
   }
 });
 
-router.delete("/employees/:id/sessions/:sessionId", authMiddleware, async (req, res, next) => {
+router.delete("/employees/:id/sessions/:sessionId", authMiddleware, requirePermission("employees.credentials.manage"), async (req, res, next) => {
   try {
     const { id, sessionId } = req.params;
     const employee = await models.Employee.findOne({
@@ -10491,7 +10602,7 @@ router.delete("/employees/:id/sessions/:sessionId", authMiddleware, async (req, 
 });
 
 // Supplier Purchase Orders, Consignments, and Documents
-router.get("/suppliers/:id/purchase-orders", authMiddleware, async (req, res, next) => {
+router.get("/suppliers/:id/purchase-orders", authMiddleware, requirePermission("suppliers.view"), async (req, res, next) => {
   try {
     const supplierId = req.params.id;
     const pos = await models.PurchaseOrder.findAll({
@@ -10690,9 +10801,11 @@ router.get("/suppliers/:id/statement", authMiddleware, requirePermission("suppli
   }
 });
 
-router.get("/suppliers/:id/consignments", authMiddleware, async (req, res, next) => {
+router.get("/suppliers/:id/consignments", authMiddleware, requirePermission("suppliers.view"), async (req, res, next) => {
   try {
     const supplierId = req.params.id;
+    const supplier = await models.Supplier.findOne({ where: { id: supplierId, companyId: req.companyId } });
+    if (!supplier) throw new NotFoundError("Supplier not found.");
     const consignments = await models.SupplierConsignment.findAll({ where: { supplierId } });
     return res.status(200).json({ success: true, data: consignments });
   } catch (error) {
@@ -10700,9 +10813,11 @@ router.get("/suppliers/:id/consignments", authMiddleware, async (req, res, next)
   }
 });
 
-router.get("/suppliers/:id/documents", authMiddleware, async (req, res, next) => {
+router.get("/suppliers/:id/documents", authMiddleware, requirePermission("suppliers.view"), async (req, res, next) => {
   try {
     const supplierId = req.params.id;
+    const supplier = await models.Supplier.findOne({ where: { id: supplierId, companyId: req.companyId } });
+    if (!supplier) throw new NotFoundError("Supplier not found.");
     const docs = await models.SupplierDocument.findAll({ where: { supplierId } });
     return res.status(200).json({ success: true, data: docs });
   } catch (error) {
@@ -10710,7 +10825,7 @@ router.get("/suppliers/:id/documents", authMiddleware, async (req, res, next) =>
   }
 });
 
-router.post("/suppliers/:id/documents", authMiddleware, uploadMiddleware.single("file"), async (req, res, next) => {
+router.post("/suppliers/:id/documents", authMiddleware, requireAnyPermission(["suppliers.update", "suppliers.documents.manage"]), uploadMiddleware.single("file"), async (req, res, next) => {
   try {
     const supplierId = req.params.id;
     const file = req.file;
@@ -10805,7 +10920,7 @@ router.post("/suppliers/:id/documents", authMiddleware, uploadMiddleware.single(
   }
 });
 
-router.delete("/suppliers/:id/documents/:docId", authMiddleware, async (req, res, next) => {
+router.delete("/suppliers/:id/documents/:docId", authMiddleware, requireAnyPermission(["suppliers.update", "suppliers.documents.manage"]), async (req, res, next) => {
   try {
     const supplierId = req.params.id;
     const docId = req.params.docId;
@@ -12018,7 +12133,7 @@ router.post("/customers/:id/loyalty/redeem", authMiddleware, async (req, res, ne
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Attendance list (filter by employee / date).
-router.get("/attendance", authMiddleware, async (req, res, next) => {
+router.get("/attendance", authMiddleware, requirePermission("payroll.view"), async (req, res, next) => {
   try {
     const where = { companyId: req.companyId };
     if (req.query.employeeId) where.employeeId = req.query.employeeId;
@@ -12033,7 +12148,7 @@ router.get("/attendance", authMiddleware, async (req, res, next) => {
 });
 
 // Check-in: create today's attendance row for an employee.
-router.post("/attendance/check-in", authMiddleware, async (req, res, next) => {
+router.post("/attendance/check-in", authMiddleware, requirePermission("payroll.manage"), async (req, res, next) => {
   try {
     const emp = await models.Employee.findOne({ where: { id: req.body.employeeId, companyId: req.companyId } });
     if (!emp) return res.status(404).json({ success: false, message: "الموظف غير موجود" });
@@ -12058,7 +12173,7 @@ router.post("/attendance/check-in", authMiddleware, async (req, res, next) => {
 });
 
 // Check-out: stamp check-out and compute hours worked.
-router.post("/attendance/check-out", authMiddleware, async (req, res, next) => {
+router.post("/attendance/check-out", authMiddleware, requirePermission("payroll.manage"), async (req, res, next) => {
   try {
     const today = new Date().toISOString().slice(0, 10);
     const row = await models.Attendance.findOne({ where: { companyId: req.companyId, employeeId: req.body.employeeId, date: today } });
@@ -12073,7 +12188,7 @@ router.post("/attendance/check-out", authMiddleware, async (req, res, next) => {
 });
 
 // Payslips list (filter by period / status / employee).
-router.get("/payslips", authMiddleware, async (req, res, next) => {
+router.get("/payslips", authMiddleware, requirePermission("payroll.view"), async (req, res, next) => {
   try {
     const where = { companyId: req.companyId };
     if (req.query.period) where.period = req.query.period;
@@ -12089,7 +12204,7 @@ router.get("/payslips", authMiddleware, async (req, res, next) => {
 });
 
 // Generate draft payslips for all active employees for a period (YYYY-MM).
-router.post("/payroll/generate", authMiddleware, async (req, res, next) => {
+router.post("/payroll/generate", authMiddleware, requirePermission("payroll.manage"), async (req, res, next) => {
   try {
     const period = req.body.period || new Date().toISOString().slice(0, 7);
     const employees = await models.Employee.findAll({ where: { companyId: req.companyId, status: ["present", "leave"] } });
@@ -12114,7 +12229,7 @@ router.post("/payroll/generate", authMiddleware, async (req, res, next) => {
 });
 
 // Pay a payslip + auto-post the salary journal entry.
-router.post("/payslips/:id/pay", authMiddleware, async (req, res, next) => {
+router.post("/payslips/:id/pay", authMiddleware, requirePermission("payroll.manage"), async (req, res, next) => {
   try {
     const slip = await models.Payslip.findOne({ where: { id: req.params.id, companyId: req.companyId } });
     if (!slip) return res.status(404).json({ success: false, message: "كشف الراتب غير موجود" });
@@ -12752,8 +12867,9 @@ router.get("/treasury/transactions", authMiddleware, requirePermission("treasury
   try {
     const where = { companyId: req.companyId };
     if (req.query.type) where.type = req.query.type;
-    if (req.query.account) where.account = req.query.account;
-    if (req.query.branch) where.branch = req.query.branch;
+    if (req.query.account) where.account = normalizeTreasuryAccount(req.query.account);
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.query.branch);
+    if (branchId) where.branchId = branchId;
 
     // Phase 6B: real server-side pagination (offset + total). page/pageSize are
     // optional and clamped; pageSize defaults to 20 and is capped at 100 (the
@@ -12781,6 +12897,7 @@ router.get("/treasury/transactions", authMiddleware, requirePermission("treasury
 // Current treasury balances + today's movement totals.
 router.get("/treasury/summary", authMiddleware, requirePermission("treasury.view"), async (req, res, next) => {
   try {
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.query.branch);
     const accounts = await models.Account.findAll({
       where: { companyId: req.companyId, code: ["1110", "1120"] }
     });
@@ -12792,8 +12909,10 @@ router.get("/treasury/summary", authMiddleware, requirePermission("treasury.view
     const bank = balOf("1120");
 
     const today = new Date().toISOString().slice(0, 10);
+    const txWhere = { companyId: req.companyId, date: today };
+    if (branchId) txWhere.branchId = branchId;
     const todays = await models.CashTransaction.findAll({
-      where: { companyId: req.companyId, date: today }
+      where: txWhere
     });
     const sum = (type) =>
       todays.filter((t) => t.type === type).reduce((s, t) => s + parseFloat(t.amount || 0), 0);
@@ -12806,7 +12925,8 @@ router.get("/treasury/summary", authMiddleware, requirePermission("treasury.view
         total: cash + bank,
         todayIn: sum("cash_in"),
         todayOut: sum("cash_out"),
-        todayTransfers: sum("transfer")
+        todayTransfers: sum("transfer"),
+        branchId
       }
     });
   } catch (error) {
@@ -12826,7 +12946,27 @@ router.post("/treasury/transactions", authMiddleware, requirePermission("treasur
     if (!Number.isFinite(amount) || amount <= 0) {
       return res.status(422).json({ success: false, message: "المبلغ يجب أن يكون أكبر من صفر" });
     }
-    const type = ["cash_in", "cash_out", "transfer"].includes(b.type) ? b.type : "cash_in";
+    if (!["cash_in", "cash_out", "transfer"].includes(b.type)) {
+      throw new ValidationError("type must be one of cash_in, cash_out, or transfer.");
+    }
+    const type = b.type;
+    const account = normalizeTreasuryAccount(b.account, "account");
+    const toAccount = type === "transfer" ? normalizeTreasuryAccount(b.toAccount, "toAccount") : null;
+    if (type === "transfer" && account === toAccount) {
+      throw new ValidationError("Transfer source and destination treasury accounts must be different.");
+    }
+    await assertTreasuryAccountKey(req.companyId, account);
+    if (toAccount) await assertTreasuryAccountKey(req.companyId, toAccount);
+    if (type !== "transfer") {
+      const counterAccount = await assertActiveAccountCode(req.companyId, b.counterAccountCode);
+      if (["1110", "1120"].includes(counterAccount.code)) {
+        throw new ValidationError("counterAccountCode must not be a treasury cash/bank account.");
+      }
+    }
+    const branch = await resolveAuthorizedBranch(req, b.branchId || req.headers["x-branch-id"] || req.branchId, { required: true });
+    if (b.date && !isValidYmd(String(b.date))) {
+      throw new ValidationError("Invalid 'date' (expected YYYY-MM-DD).");
+    }
     const id = `CT-${Date.now()}`;
     const now = new Date().toISOString().slice(0, 16).replace("T", " ");
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
@@ -12858,14 +12998,15 @@ router.post("/treasury/transactions", authMiddleware, requirePermission("treasur
           id,
           companyId: req.companyId,
           type,
-          account: b.account || "cash",
-          toAccount: b.toAccount || null,
+          account,
+          toAccount,
           amount,
           category: b.category || null,
           counterAccountCode: b.counterAccountCode || null,
           description: b.description || null,
           reference: b.reference || null,
-          branch: b.branch || req.branchId || "Main Branch",
+          branch: branch.name,
+          branchId: branch.id,
           date: b.date || now.slice(0, 10),
           createdBy: actor,
           status: "posted",
@@ -12879,7 +13020,7 @@ router.post("/treasury/transactions", authMiddleware, requirePermission("treasur
 
         await auditService.record(req.companyId, {
           action: "treasury_transaction_created",
-          description: `Treasury ${type} ${amount} (${b.account || "cash"})${b.category ? " — " + b.category : ""}`,
+          description: `Treasury ${type} ${amount} (${account})${b.category ? " — " + b.category : ""}`,
           user: actor,
           userId: req.user ? req.user.id : null,
           place: tx.branch,
@@ -12918,13 +13059,10 @@ router.post("/treasury/closing", authMiddleware, requirePermission("treasury.upd
   try {
     const b = req.body || {};
 
-    // Phase 11F: strict account validation — only the two treasury accounts are
-    // valid. An unknown account must NOT fall back to cash (1110) silently.
-    const account = b.account;
-    if (account !== "cash" && account !== "bank") {
-      return res.status(422).json({ success: false, message: "Account must be 'cash' or 'bank'" });
-    }
+    const account = normalizeTreasuryAccount(b.account, "account");
+    await assertTreasuryAccountKey(req.companyId, account);
     const glCode = TREASURY_GL[account];
+    const branch = await resolveAuthorizedBranch(req, b.branchId || req.headers["x-branch-id"] || req.branchId, { required: true });
 
     // Idempotency: a retried/double-clicked closing returns the original closing
     // record instead of recording a second one. Checked BEFORE the duplicate
@@ -12995,7 +13133,8 @@ router.post("/treasury/closing", authMiddleware, requirePermission("treasury.upd
         account,
         amount: actual,
         description: b.description || `إغلاق خزينة ${account === "bank" ? "البنك" : "النقدية"}`,
-        branch: b.branch || req.branchId || "Main Branch",
+        branch: branch.name,
+        branchId: branch.id,
         date: closingDate,
         createdBy: actor,
         status: "approved",
@@ -13035,8 +13174,11 @@ router.post("/treasury/closing", authMiddleware, requirePermission("treasury.upd
 // List closing records.
 router.get("/treasury/closings", authMiddleware, requirePermission("treasury.view"), async (req, res, next) => {
   try {
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.query.branch);
+    const where = { companyId: req.companyId, type: "closing" };
+    if (branchId) where.branchId = branchId;
     const rows = await models.CashTransaction.findAll({
-      where: { companyId: req.companyId, type: "closing" },
+      where,
       order: [["created_at", "DESC"]],
       limit: 50
     });
