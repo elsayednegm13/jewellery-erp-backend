@@ -75,6 +75,7 @@ function authorizationSafe(resolved, session = null, credential = null) {
   if (!resolved) return null;
   const employee = resolved.employee || session?.employee || null;
   return {
+    allowed: true,
     employeeId: employee?.id || session?.employeeId || null,
     companyId: employee?.companyId || session?.companyId || null,
     branchId: session?.branchId || null,

@@ -5418,7 +5418,7 @@ setupCrud("approval-requests", models.ApprovalRequest, ["description", "status",
 router.post(
   "/journal-entries/manual-draft",
   authMiddleware,
-  requirePermission("accounting.post"),
+  requireBusinessPermission("accounting.post", { touch: true }),
   async (req, res, next) => {
     try {
       // companyId ALWAYS from the authenticated request — never the body. Only a
@@ -5456,7 +5456,7 @@ router.post(
 router.post(
   "/journal-entries/:id/post",
   authMiddleware,
-  requirePermission("accounting.post"),
+  requireBusinessPermission("accounting.post", { touch: true }),
   async (req, res, next) => {
     try {
       const result = await models.sequelize.transaction((t) =>
@@ -5486,7 +5486,7 @@ router.post(
 router.post(
   "/journal-entries/:id/reverse",
   authMiddleware,
-  requirePermission("accounting.post"),
+  requireBusinessPermission("accounting.post", { touch: true }),
   async (req, res, next) => {
     try {
       const result = await models.sequelize.transaction((t) =>
@@ -5518,7 +5518,7 @@ router.post(
 router.post(
   "/journal-entries/:id/cancel",
   authMiddleware,
-  requirePermission("accounting.post"),
+  requireBusinessPermission("accounting.post", { touch: true }),
   async (req, res, next) => {
     try {
       const result = await models.sequelize.transaction((t) =>
@@ -5542,7 +5542,7 @@ router.post(
 router.get(
   "/accounting/lock",
   authMiddleware,
-  requirePermission("accounting.view"),
+  requireBusinessPermission("accounting.view"),
   async (req, res, next) => {
     try {
       const row = await accountingLockService.getLock(req.companyId);
@@ -5581,7 +5581,7 @@ router.put(
 router.get(
   "/reports/account-balances/reconciliation",
   authMiddleware,
-  requireAnyPermission(["accounting.reconciliation.view", "accounting.view"]),
+  requireAnyBusinessPermission(["accounting.reconciliation.view", "accounting.view"]),
   async (req, res, next) => {
     try {
       const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.query.branch);
@@ -9772,7 +9772,7 @@ router.get("/reports/reservations/reconciliation", authMiddleware, requireAnyPer
   }
 });
 
-router.get("/reports/trial-balance", authMiddleware, requirePermission("accounting.view"), async (req, res, next) => {
+router.get("/reports/trial-balance", authMiddleware, requireBusinessPermission("accounting.view"), async (req, res, next) => {
   try {
     // 1. Validate query. `asOf` optional date, `includeZero` optional bool.
     const asOf = req.query.asOf ? String(req.query.asOf) : null;
@@ -9904,7 +9904,7 @@ router.get("/reports/trial-balance", authMiddleware, requirePermission("accounti
 // signal), independent of the includeZero / onlyDifferences display filters;
 // accountCount reflects the rows actually returned after those filters.
 // ─────────────────────────────────────────────────────────────────────────────
-router.get("/reports/ledger-reconciliation", authMiddleware, requirePermission("accounting.view"), async (req, res, next) => {
+router.get("/reports/ledger-reconciliation", authMiddleware, requireBusinessPermission("accounting.view"), async (req, res, next) => {
   try {
     // 1. Validate query.
     const asOf = req.query.asOf ? String(req.query.asOf) : null;
@@ -10011,7 +10011,7 @@ router.get("/reports/ledger-reconciliation", authMiddleware, requirePermission("
 
 // Ledger account report by accountCode/accountId. This complements
 // /accounts/:id/statement without replacing it, and keeps the GL as the source.
-router.get("/reports/ledger/account", authMiddleware, requirePermission("accounting.view"), async (req, res, next) => {
+router.get("/reports/ledger/account", authMiddleware, requireBusinessPermission("accounting.view"), async (req, res, next) => {
   try {
     const accountId = req.query.accountId ? String(req.query.accountId) : null;
     const accountCode = req.query.accountCode ? String(req.query.accountCode) : null;
@@ -10139,7 +10139,7 @@ router.get("/reports/ledger/account", authMiddleware, requirePermission("account
 
 // Cash/bank reconciliation compares GL activity against operational treasury
 // CashTransaction rows. It is read-only and reports differences only.
-router.get("/reports/ledger/cash-reconciliation", authMiddleware, requirePermission("accounting.view"), async (req, res, next) => {
+router.get("/reports/ledger/cash-reconciliation", authMiddleware, requireBusinessPermission("accounting.view"), async (req, res, next) => {
   try {
     const from = req.query.from ? String(req.query.from) : null;
     const to = req.query.to ? String(req.query.to) : null;
@@ -10260,7 +10260,7 @@ router.get("/reports/ledger/cash-reconciliation", authMiddleware, requirePermiss
 // AR/AP reconciliation compares account-level GL balances against operational
 // mirrors. Party-level reconciliation is deferred because journal lines do not
 // store customerId/supplierId dimensions.
-router.get("/reports/ledger/ar-ap-reconciliation", authMiddleware, requirePermission("accounting.view"), async (req, res, next) => {
+router.get("/reports/ledger/ar-ap-reconciliation", authMiddleware, requireBusinessPermission("accounting.view"), async (req, res, next) => {
   try {
     const asOf = req.query.asOf ? String(req.query.asOf) : null;
     const branchId = await resolveAuthorizedBranchId(req, req.query.branchId);
@@ -10377,7 +10377,7 @@ router.get("/reports/ledger/ar-ap-reconciliation", authMiddleware, requirePermis
 // ─────────────────────────────────────────────────────────────────────────────
 const VALUATION_ASSET_STATUSES = ["available", "reserved", "pending_transfer", "in_workshop", "repair", "pending_tag", "returned"];
 
-router.get("/reports/inventory-valuation", authMiddleware, requirePermission("reports.view"), async (req, res, next) => {
+router.get("/reports/inventory-valuation", authMiddleware, requireBusinessPermission("reports.view"), async (req, res, next) => {
   try {
     const companyId = req.companyId;
     const settings = await settingsService.getCompanySettings(companyId);
@@ -10522,7 +10522,7 @@ async function buildInvoiceReportWhere(req) {
 }
 
 // GET /reports/tax-summary — posted invoices; returns net via negative totals.
-router.get("/reports/tax-summary", authMiddleware, requirePermission("reports.view"), async (req, res, next) => {
+router.get("/reports/tax-summary", authMiddleware, requireBusinessPermission("reports.view"), async (req, res, next) => {
   try {
     const { where, filters } = await buildInvoiceReportWhere(req);
     const invoices = await models.Invoice.findAll({ where });
@@ -10625,7 +10625,7 @@ router.get("/reports/tax-summary", authMiddleware, requirePermission("reports.vi
 });
 
 // GET /reports/financial-summary — invoice-based (ledger-based is a future variant).
-router.get("/reports/financial-summary", authMiddleware, requirePermission("reports.view"), async (req, res, next) => {
+router.get("/reports/financial-summary", authMiddleware, requireBusinessPermission("reports.view"), async (req, res, next) => {
   try {
     const { where, filters } = await buildInvoiceReportWhere(req);
     const invoices = await models.Invoice.findAll({ where });
@@ -10661,7 +10661,7 @@ router.get("/reports/financial-summary", authMiddleware, requirePermission("repo
 });
 
 // GET /reports/profit-summary — realized gross profit from posted SALE items.
-router.get("/reports/profit-summary", authMiddleware, requirePermission("reports.view"), async (req, res, next) => {
+router.get("/reports/profit-summary", authMiddleware, requireBusinessPermission("reports.view"), async (req, res, next) => {
   try {
     const { where, filters } = await buildInvoiceReportWhere(req);
     // Scope to type="sale": return/exchange ITEM-level signing is unverified in
@@ -10750,7 +10750,7 @@ router.delete("/employees/:id/sessions/:sessionId", authMiddleware, requirePermi
 });
 
 // Supplier Purchase Orders, Consignments, and Documents
-router.get("/suppliers/:id/purchase-orders", authMiddleware, requirePermission("suppliers.view"), async (req, res, next) => {
+router.get("/suppliers/:id/purchase-orders", authMiddleware, requireBusinessPermission("suppliers.view"), async (req, res, next) => {
   try {
     const supplierId = req.params.id;
     const pos = await models.PurchaseOrder.findAll({
@@ -10789,7 +10789,7 @@ router.get("/suppliers/:id/purchase-orders", authMiddleware, requirePermission("
 // dueReferenceReliable:false); it is never written. opening/closing come from a
 // full document scan, never from a page.
 // ─────────────────────────────────────────────────────────────────────────────
-router.get("/suppliers/:id/statement", authMiddleware, requirePermission("suppliers.view"), async (req, res, next) => {
+router.get("/suppliers/:id/statement", authMiddleware, requireBusinessPermission("suppliers.view"), async (req, res, next) => {
   try {
     // 1. Supplier must exist within the tenant. Never modified.
     const supplier = await models.Supplier.findOne({ where: { id: req.params.id, companyId: req.companyId } });
@@ -10949,7 +10949,7 @@ router.get("/suppliers/:id/statement", authMiddleware, requirePermission("suppli
   }
 });
 
-router.get("/suppliers/:id/consignments", authMiddleware, requirePermission("suppliers.view"), async (req, res, next) => {
+router.get("/suppliers/:id/consignments", authMiddleware, requireBusinessPermission("suppliers.view"), async (req, res, next) => {
   try {
     const supplierId = req.params.id;
     const supplier = await models.Supplier.findOne({ where: { id: supplierId, companyId: req.companyId } });
@@ -10961,7 +10961,7 @@ router.get("/suppliers/:id/consignments", authMiddleware, requirePermission("sup
   }
 });
 
-router.get("/suppliers/:id/documents", authMiddleware, requirePermission("suppliers.view"), async (req, res, next) => {
+router.get("/suppliers/:id/documents", authMiddleware, requireBusinessPermission("suppliers.view"), async (req, res, next) => {
   try {
     const supplierId = req.params.id;
     const supplier = await models.Supplier.findOne({ where: { id: supplierId, companyId: req.companyId } });
@@ -10973,7 +10973,7 @@ router.get("/suppliers/:id/documents", authMiddleware, requirePermission("suppli
   }
 });
 
-router.post("/suppliers/:id/documents", authMiddleware, requireAnyPermission(["suppliers.update", "suppliers.documents.manage"]), uploadMiddleware.single("file"), async (req, res, next) => {
+router.post("/suppliers/:id/documents", authMiddleware, requireAnyBusinessPermission(["suppliers.update", "suppliers.documents.manage"], { touch: true }), uploadMiddleware.single("file"), async (req, res, next) => {
   try {
     const supplierId = req.params.id;
     const file = req.file;
@@ -11068,7 +11068,7 @@ router.post("/suppliers/:id/documents", authMiddleware, requireAnyPermission(["s
   }
 });
 
-router.delete("/suppliers/:id/documents/:docId", authMiddleware, requireAnyPermission(["suppliers.update", "suppliers.documents.manage"]), async (req, res, next) => {
+router.delete("/suppliers/:id/documents/:docId", authMiddleware, requireAnyBusinessPermission(["suppliers.update", "suppliers.documents.manage"], { touch: true }), async (req, res, next) => {
   try {
     const supplierId = req.params.id;
     const docId = req.params.docId;
@@ -12946,7 +12946,7 @@ router.post("/gift-vouchers/redeem", authMiddleware, (req, res) =>
 
 const TREASURY_GL = { cash: "1110", bank: "1120" };
 
-router.get("/treasury/register/current", authMiddleware, requireAnyPermission(["treasury.register.view", "treasury.view"]), async (req, res, next) => {
+router.get("/treasury/register/current", authMiddleware, requireAnyBusinessPermission(["treasury.register.view", "treasury.view"]), async (req, res, next) => {
   try {
     const branch = await resolveAuthorizedBranch(req, req.query.branchId || req.query.branch || req.branchId, { required: true });
     const session = await cashRegisterService.currentOpen({ companyId: req.companyId, branchId: branch.id });
@@ -12958,7 +12958,7 @@ router.get("/treasury/register/current", authMiddleware, requireAnyPermission(["
   }
 });
 
-router.get("/treasury/registers", authMiddleware, requireAnyPermission(["treasury.register.view", "treasury.view"]), async (req, res, next) => {
+router.get("/treasury/registers", authMiddleware, requireAnyBusinessPermission(["treasury.register.view", "treasury.view"]), async (req, res, next) => {
   try {
     const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.query.branch);
     const items = await cashRegisterService.listSessions({
@@ -12972,7 +12972,7 @@ router.get("/treasury/registers", authMiddleware, requireAnyPermission(["treasur
   }
 });
 
-router.post("/treasury/register/open", authMiddleware, requirePermission("treasury.register.open"), async (req, res, next) => {
+router.post("/treasury/register/open", authMiddleware, requireBusinessPermission("treasury.register.open", { touch: true }), async (req, res, next) => {
   try {
     const branch = await resolveAuthorizedBranch(req, req.body?.branchId || req.headers["x-branch-id"] || req.branchId, { required: true });
     const result = await cashRegisterService.openRegister({
@@ -12989,7 +12989,7 @@ router.post("/treasury/register/open", authMiddleware, requirePermission("treasu
   }
 });
 
-router.post("/treasury/register/close", authMiddleware, requirePermission("treasury.register.close"), async (req, res, next) => {
+router.post("/treasury/register/close", authMiddleware, requireBusinessPermission("treasury.register.close", { touch: true }), async (req, res, next) => {
   try {
     const branch = await resolveAuthorizedBranch(req, req.body?.branchId || req.headers["x-branch-id"] || req.branchId, { required: true });
     const result = await cashRegisterService.closeRegister({
@@ -13007,7 +13007,7 @@ router.post("/treasury/register/close", authMiddleware, requirePermission("treas
 });
 
 // List treasury transactions (newest first), optional type/branch/account filters.
-router.get("/treasury/transactions", authMiddleware, requirePermission("treasury.view"), async (req, res, next) => {
+router.get("/treasury/transactions", authMiddleware, requireBusinessPermission("treasury.view"), async (req, res, next) => {
   try {
     const where = { companyId: req.companyId };
     if (req.query.type) where.type = req.query.type;
@@ -13039,7 +13039,7 @@ router.get("/treasury/transactions", authMiddleware, requirePermission("treasury
 });
 
 // Current treasury balances + today's movement totals.
-router.get("/treasury/summary", authMiddleware, requirePermission("treasury.view"), async (req, res, next) => {
+router.get("/treasury/summary", authMiddleware, requireBusinessPermission("treasury.view"), async (req, res, next) => {
   try {
     const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.query.branch);
     const [cashRow, bankRow] = await Promise.all([
@@ -13085,7 +13085,7 @@ router.get("/treasury/summary", authMiddleware, requirePermission("treasury.view
 // GL posting (postCashEntry), the journalEntryId back-link, and the audit row are
 // created in ONE DB transaction. If posting fails, everything rolls back so no
 // orphan CashTransaction (without a journal) is ever left behind.
-router.post("/treasury/transactions", authMiddleware, requirePermission("treasury.update"), async (req, res, next) => {
+router.post("/treasury/transactions", authMiddleware, requireBusinessPermission("treasury.update", { touch: true }), async (req, res, next) => {
   try {
     const b = req.body || {};
     const amount = Number(b.amount);
@@ -13208,7 +13208,7 @@ router.post("/treasury/transactions", authMiddleware, requirePermission("treasur
 });
 
 // Treasury closing — reconcile expected vs actual and record variance.
-router.post("/treasury/closing", authMiddleware, requirePermission("treasury.update"), async (req, res, next) => {
+router.post("/treasury/closing", authMiddleware, requireBusinessPermission("treasury.update", { touch: true }), async (req, res, next) => {
   try {
     const b = req.body || {};
 
@@ -13333,7 +13333,7 @@ router.post("/treasury/closing", authMiddleware, requirePermission("treasury.upd
 });
 
 // List closing records.
-router.get("/treasury/closings", authMiddleware, requirePermission("treasury.view"), async (req, res, next) => {
+router.get("/treasury/closings", authMiddleware, requireBusinessPermission("treasury.view"), async (req, res, next) => {
   try {
     const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.query.branch);
     const where = { companyId: req.companyId, type: "closing" };
