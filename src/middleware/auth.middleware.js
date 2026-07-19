@@ -34,6 +34,7 @@ const authMiddleware = async (req, res, next) => {
 
     req.user = user;
     req.technicalSession = session;
+    req.accessTokenPayload = decoded;
     req.accountScope = technicalSessions.safeScope(user);
 
     const accountType = user.accountType || "legacy";

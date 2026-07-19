@@ -1,7 +1,7 @@
 const express = require("express");
 const { authMiddleware } = require("../middleware/auth.middleware");
 const eventsService = require("../services/events.service");
-const logger = require("../utils/logger");
+const technicalSessions = require("../services/technical-session.service");
 
 const router = express.Router();
 
@@ -22,19 +22,32 @@ router.get("/stream", authMiddleware, async (req, res) => {
 
   const id = eventsService.addClient(companyId, res);
 
-  // Heartbeat to keep proxies/load-balancers from closing the idle connection.
-  const heartbeat = setInterval(() => {
+  let closed = false;
+  let validationInFlight = false;
+
+  const closeStream = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(heartbeat);
+    eventsService.removeClient(id);
+    if (!res.writableEnded) res.end();
+  };
+
+  // Keep the stream aligned with persisted technical-session revocation/version state.
+  const heartbeat = setInterval(async () => {
+    if (closed || validationInFlight) return;
+    validationInFlight = true;
     try {
-      res.write(`: ping\n\n`);
+      await technicalSessions.assertAccessSession(req.accessTokenPayload);
+      if (!closed) res.write(`: ping\n\n`);
     } catch {
-      /* connection gone — cleanup handled by close handler */
+      closeStream();
+    } finally {
+      validationInFlight = false;
     }
   }, 25000);
 
-  req.on("close", () => {
-    clearInterval(heartbeat);
-    eventsService.removeClient(id);
-  });
+  req.on("close", closeStream);
 });
 
 module.exports = router;
