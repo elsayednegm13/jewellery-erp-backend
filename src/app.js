@@ -47,8 +47,26 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization", "X-Company-ID", "X-Branch-ID", "X-Correlation-ID", "X-Device-Session-ID", "Idempotency-Key"]
 }));
 
-// Setup Morgan request logger mapped to Winston
-const morganFormat = process.env.NODE_ENV === "production" ? "combined" : "dev";
+const SENSITIVE_QUERY_KEYS = new Set(["token", "access_token", "accesstoken", "refreshtoken", "refresh_token", "authorization", "apikey", "key", "secret"]);
+function sanitizedRequestUrl(originalUrl) {
+  try {
+    const url = new URL(originalUrl, "http://localhost");
+    for (const key of [...url.searchParams.keys()]) {
+      if (SENSITIVE_QUERY_KEYS.has(key.toLowerCase())) url.searchParams.set(key, "[REDACTED]");
+    }
+    return `${url.pathname}${url.search}`;
+  } catch {
+    return String(originalUrl || "").split("?")[0];
+  }
+}
+
+const morganFormat = (tokens, req, res) => [
+  tokens.method(req, res),
+  sanitizedRequestUrl(req.originalUrl || req.url),
+  tokens.status(req, res),
+  `${tokens["response-time"](req, res)}ms`,
+  `corr=${req.headers["x-correlation-id"] || req.id || "-"}`,
+].join(" ");
 app.use(morgan(morganFormat, {
   stream: {
     write: (message) => logger.info(message.trim())
