@@ -20,7 +20,7 @@ const { JWT_SECRET } = require("../src/config/security");
 const models = require("../src/models");
 const journalService = require("../src/services/journal.service");
 
-const { sequelize, Account, JournalEntry, JournalLine, AuditLog, Company } = models;
+const { sequelize, Account, JournalEntry, JournalLine, AuditLog, Company, TechnicalAccountSession, User } = models;
 
 const COMPANY = "CMP-DEMO";
 const stamp = Date.now();
@@ -47,6 +47,7 @@ function check(condition, message) {
 
 let base;
 let token;
+let technicalSessionId;
 async function request(pathname, options = {}) {
   const response = await fetch(`${base}${pathname}`, {
     ...options,
@@ -82,7 +83,27 @@ async function makeEntry(id, { status, sourceType, reversalOf = null, companyId 
   const server = app.listen(0);
   await new Promise((resolve) => server.on("listening", resolve));
   base = `http://127.0.0.1:${server.address().port}/api/v1`;
-  token = jwt.sign({ userId: "USR-ADMIN" }, JWT_SECRET, { expiresIn: "1h" });
+  const user = await User.findByPk("USR-ADMIN");
+  if (!user) throw new Error("USR-ADMIN is required for this local verifier");
+  technicalSessionId = `TAS-VREV-${stamp}`;
+  await TechnicalAccountSession.create({
+    id: technicalSessionId,
+    userId: user.id,
+    companyId: user.companyId,
+    branchId: user.branchId || null,
+    refreshTokenHash: `verify-${stamp}`,
+    deviceSessionId: `DS-VREV-${stamp}`,
+    passwordVersion: Number(user.passwordVersion || 1),
+    sessionVersion: Number(user.sessionVersion || 1),
+    expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+    lastUsedAt: new Date(),
+  });
+  token = jwt.sign({
+    userId: user.id,
+    passwordVersion: Number(user.passwordVersion || 1),
+    sessionVersion: Number(user.sessionVersion || 1),
+    technicalSessionId,
+  }, JWT_SECRET, { expiresIn: "1h" });
 
   try {
     // ── Throwaway fixtures (committed). All removed in finally. ───────────────
@@ -215,6 +236,7 @@ async function makeEntry(id, { status, sourceType, reversalOf = null, companyId 
     await safe("other-company accounts", () => Account.destroy({ where: { companyId: OTHER_COMPANY } }));
     await safe("other-company entries", () => JournalEntry.destroy({ where: { companyId: OTHER_COMPANY } }));
     await safe("temp company", () => Company.destroy({ where: { id: OTHER_COMPANY } }));
+    await safe("technical session", () => TechnicalAccountSession.destroy({ where: { id: technicalSessionId } }));
     console.log("cleanup done — fixtures removed; no journal/balance/audit residue from the success path");
     server.close();
     await sequelize.close();

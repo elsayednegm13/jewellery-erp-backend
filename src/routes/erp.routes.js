@@ -30,6 +30,7 @@ const sourceAwareStatementService = require("../services/source-aware-statement.
 const accountingLockService = require("../services/accounting-lock.service");
 const accountBalanceService = require("../services/account-balance.service");
 const cashRegisterService = require("../services/cash-register.service");
+const ledgerReportingService = require("../services/ledger-reporting.service");
 const logger = require("../utils/logger");
 const { AppError, ValidationError, NotFoundError, ConflictError, ForbiddenError } = require("../utils/errors");
 const uploadMiddleware = require("../middleware/upload.middleware");
@@ -5596,6 +5597,38 @@ router.get(
   }
 );
 
+// Read-only accounting landing-page summary. All financial values are derived
+// from reportable journal lines; Account.balance is deliberately not a source here.
+router.get(
+  "/accounting/dashboard-summary",
+  authMiddleware,
+  requireBusinessPermission("accounting.view"),
+  async (req, res, next) => {
+    try {
+      const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.query.branch);
+      const [summary, settings] = await Promise.all([
+        accountBalanceService.calculateTreasuryLedgerSummary({ companyId: req.companyId, branchId }),
+        settingsService.getCompanySettings(req.companyId),
+      ]);
+
+      res.set("Cache-Control", "private, no-store");
+      return res.status(200).json({
+        success: true,
+        data: {
+          currency: settings.currency,
+          scope: { companyId: req.companyId, branchId },
+          period: { mode: "all_time", from: null, to: null },
+          balances: { cash: summary.cash, bank: summary.bank },
+          activity: { receipts: summary.receipts, payments: summary.payments, semantics: summary.activitySemantics },
+          source: "reportable_ledger_journal_lines",
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
 setupCrud("journal-entries", models.JournalEntry, ["id", "description", "date"]);
 setupCrud("accounts", models.Account, ["name", "nameAr", "code"]);
 // NOTE: audit-logs is intentionally NOT a full CRUD resource — it is
@@ -8625,7 +8658,7 @@ const safeJson = (value) => {
 };
 const ledgerMeta = {
   ledgerBased: true,
-  source: "journal_lines",
+  source: "reportable_ledger_journal_lines",
   readOnly: true,
 };
 
@@ -8639,7 +8672,7 @@ function ledgerDateWhere({ from, to, asOf, before }) {
 }
 
 function ledgerEntryWhere({ companyId, from, to, asOf, branchId, before }) {
-  const where = { companyId, status: "posted" };
+  const where = { companyId, status: { [Op.in]: ledgerReportingService.REPORTABLE_LEDGER_STATUSES } };
   const date = ledgerDateWhere({ from, to, asOf, before });
   if (date) where.date = date;
   if (branchId) where.branchId = branchId;
@@ -8653,6 +8686,7 @@ function accountSignedBalance(account, debit, credit) {
 }
 
 async function ledgerTotalsByAccountCode({ companyId, accountCodes, from, to, asOf, branchId, before }) {
+  await ledgerReportingService.assertReportableLedgerIntegrity({ companyId, branchId });
   const rows = await models.JournalLine.findAll({
     attributes: [
       "accountCode",
@@ -8696,6 +8730,7 @@ router.get("/accounts/:id/statement", authMiddleware, requirePermission("account
     if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
     if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
     if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
+    await ledgerReportingService.assertReportableLedgerIntegrity({ companyId: req.companyId, branchId });
 
     // 3. Pagination (rows only; capped).
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
@@ -8810,10 +8845,9 @@ router.get("/accounts/:id/statement", authMiddleware, requirePermission("account
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TRIAL BALANCE (ميزان المراجعة) — Phase 9D — READ-ONLY.
-// Computes debit/credit totals from POSTED journal lines only, never from
-// Account.balance. A reversal's ORIGINAL is flipped to status "reversed" (so it
-// is excluded), while the reversal entry itself is "posted" (so it is included,
-// which is the correct financial effect). Account.balance is surfaced purely as
+// Computes debit/credit totals from reportable journal lines, never from
+// Account.balance. A reversed original remains financial history alongside its
+// separately posted reversal, so the pair nets correctly. Account.balance is surfaced purely as
 // a reference, plus a `difference` against the ledger-derived calculated balance.
 // No rows are created, updated, or deleted.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -9784,6 +9818,7 @@ router.get("/reports/trial-balance", authMiddleware, requireBusinessPermission("
     if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
     if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
     const includeZero = String(req.query.includeZero ?? "false").toLowerCase() === "true";
+    await ledgerReportingService.assertReportableLedgerIntegrity({ companyId: req.companyId, branchId });
 
     // 2. All accounts in the tenant — sorted for deterministic output.
     const accounts = await models.Account.findAll({
@@ -9792,8 +9827,7 @@ router.get("/reports/trial-balance", authMiddleware, requireBusinessPermission("
       raw: true,
     });
 
-    // 3. Aggregate posted journal lines per account, optionally up to `asOf`.
-    //    status="posted" alone excludes drafts/pending/balanced/reversed.
+    // 3. Aggregate reportable journal lines per account, optionally up to `asOf`.
     const entryWhere = ledgerEntryWhere({ companyId: req.companyId, from, to, asOf, branchId });
     const rows = await models.JournalLine.findAll({
       attributes: [
@@ -9895,11 +9929,10 @@ router.get("/reports/trial-balance", authMiddleware, requireBusinessPermission("
 // ─────────────────────────────────────────────────────────────────────────────
 // LEDGER RECONCILIATION (تسوية دفتر الأستاذ) — Phase 9F. READ-ONLY.
 // Compares each account's STORED Account.balance against the balance CALCULATED
-// from posted journal lines, surfacing any drift. It NEVER writes, NEVER fixes,
+// from reportable journal lines, surfacing any drift. It NEVER writes, NEVER fixes,
 // and NEVER uses Account.balance to derive the calculated value (that is built
-// only from the lines). status="posted" alone excludes drafts/pending/balanced
-// and reversed originals; the reversal entry (status posted) is included, which
-// is the correct net effect. differenceCount / totalAbsoluteDifference are
+// only from the lines). Reportable entries include both a reversed original and
+// its posted reversal, which is the correct net effect. differenceCount / totalAbsoluteDifference are
 // computed over EVERY account with drift in the tenant (the true reconciliation
 // signal), independent of the includeZero / onlyDifferences display filters;
 // accountCount reflects the rows actually returned after those filters.
@@ -9911,6 +9944,7 @@ router.get("/reports/ledger-reconciliation", authMiddleware, requireBusinessPerm
     if (asOf && !isValidYmd(asOf)) throw new ValidationError("Invalid 'asOf' date (expected YYYY-MM-DD).");
     const includeZero = String(req.query.includeZero ?? "false").toLowerCase() === "true";
     const onlyDifferences = String(req.query.onlyDifferences ?? "true").toLowerCase() === "true";
+    await ledgerReportingService.assertReportableLedgerIntegrity({ companyId: req.companyId });
 
     // 2. All accounts in the tenant — deterministic order.
     const accounts = await models.Account.findAll({
@@ -9919,8 +9953,8 @@ router.get("/reports/ledger-reconciliation", authMiddleware, requireBusinessPerm
       raw: true,
     });
 
-    // 3. Aggregate POSTED journal lines per account, optionally up to `asOf`.
-    const entryWhere = { companyId: req.companyId, status: "posted" };
+    // 3. Aggregate reportable journal lines per account, optionally up to `asOf`.
+    const entryWhere = { companyId: req.companyId, status: { [Op.in]: ledgerReportingService.REPORTABLE_LEDGER_STATUSES } };
     if (asOf) entryWhere.date = { [Op.lte]: asOf };
     const rows = await models.JournalLine.findAll({
       attributes: [
@@ -10022,6 +10056,7 @@ router.get("/reports/ledger/account", authMiddleware, requireBusinessPermission(
     if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
     if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
     if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
+    await ledgerReportingService.assertReportableLedgerIntegrity({ companyId: req.companyId, branchId });
 
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 50, 1), 200);
@@ -10147,6 +10182,7 @@ router.get("/reports/ledger/cash-reconciliation", authMiddleware, requireBusines
     if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
     if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
     if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
+    await ledgerReportingService.assertReportableLedgerIntegrity({ companyId: req.companyId, branchId });
 
     const accountSpecs = [
       { key: "cash", code: "1110", label: "Cash on Hand" },
@@ -13042,12 +13078,9 @@ router.get("/treasury/transactions", authMiddleware, requireBusinessPermission("
 router.get("/treasury/summary", authMiddleware, requireBusinessPermission("treasury.view"), async (req, res, next) => {
   try {
     const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.query.branch);
-    const [cashRow, bankRow] = await Promise.all([
-      accountBalanceService.calculateAccountBalance({ companyId: req.companyId, branchId, accountCode: "1110" }),
-      accountBalanceService.calculateAccountBalance({ companyId: req.companyId, branchId, accountCode: "1120" }),
-    ]);
-    const cash = Number(cashRow?.calculatedBalance || 0);
-    const bank = Number(bankRow?.calculatedBalance || 0);
+    const ledgerSummary = await accountBalanceService.calculateTreasuryLedgerSummary({ companyId: req.companyId, branchId });
+    const cash = ledgerSummary.cash;
+    const bank = ledgerSummary.bank;
 
     const today = new Date().toISOString().slice(0, 10);
     const txWhere = { companyId: req.companyId, date: today };
@@ -13068,11 +13101,8 @@ router.get("/treasury/summary", authMiddleware, requireBusinessPermission("treas
         todayOut: sum("cash_out"),
         todayTransfers: sum("transfer"),
         branchId,
-        source: "posted_journal_lines",
-        mirrorDifferences: {
-          cash: Number(cashRow?.difference || 0),
-          bank: Number(bankRow?.difference || 0),
-        }
+        source: "reportable_ledger_journal_lines",
+        mirrorDifferences: ledgerSummary.mirrorDifferences,
       }
     });
   } catch (error) {
