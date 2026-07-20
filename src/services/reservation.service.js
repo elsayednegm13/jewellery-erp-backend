@@ -6,6 +6,7 @@ const idempotencyService = require("./idempotency.service");
 const settingsService = require("./settings.service");
 const permissionService = require("./permission.service");
 const notificationService = require("./notification.service");
+const { SYSTEM_ACCOUNT_ROLES, resolveSystemAccountRole } = require("./company-bootstrap.service");
 const { AppError, ValidationError, NotFoundError, ConflictError } = require("../utils/errors");
 
 // Bilingual, stable-coded errors for reservation deposit configuration and the
@@ -168,32 +169,9 @@ function normalizeInitialPayment(body) {
 }
 
 async function getReservationAdvancesAccount(companyId, transaction) {
-  const setting = await models.Setting.findOne({
-    where: { companyId, key: "reservationAdvancesAccountId" },
-    transaction
-  });
-  const configured = setting?.value;
-  const accountId = typeof configured === "string" ? configured : configured?.accountId || configured?.id;
-  if (!accountId) {
-    throw reservationConfigError(
-      "RESERVATION_ADVANCES_ACCOUNT_NOT_CONFIGURED",
-      "لا يمكن تسجيل دفعة الحجز لأن حساب دفعات مقدمة العملاء للحجوزات غير محدد. يرجى ضبطه من الإعدادات المحاسبية.",
-      "Reservation advances account is not configured. Configure it in Accounting Settings before recording a reservation payment."
-    );
-  }
-  const account = await models.Account.findOne({
-    where: { companyId, id: accountId, isActive: true },
-    transaction,
-    lock: true
-  });
-  const invalid = () => reservationConfigError(
-    "RESERVATION_ADVANCES_ACCOUNT_INVALID",
-    "حساب دفعات الحجوزات المحدد غير صالح أو غير نشط أو لا يتبع الشركة الحالية.",
-    "The configured reservation advances account is invalid, inactive, or does not belong to the current company."
-  );
-  if (!account) throw invalid();
-  if (account.type !== "liability" || account.nature !== "credit") throw invalid();
-  return account;
+  // Posting never accepts or selects a liability account from the request.
+  // The protected company mapping is resolved before any reservation write.
+  return resolveSystemAccountRole(companyId, SYSTEM_ACCOUNT_ROLES.CUSTOMER_DEPOSIT_LIABILITY, transaction);
 }
 
 function reservationStatusForTotals(paidUnits, agreedUnits) {

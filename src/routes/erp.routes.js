@@ -30,6 +30,7 @@ const sourceAwareStatementService = require("../services/source-aware-statement.
 const accountingLockService = require("../services/accounting-lock.service");
 const accountBalanceService = require("../services/account-balance.service");
 const cashRegisterService = require("../services/cash-register.service");
+const companyBootstrapService = require("../services/company-bootstrap.service");
 const ledgerReportingService = require("../services/ledger-reporting.service");
 const logger = require("../utils/logger");
 const { AppError, ValidationError, NotFoundError, ConflictError, ForbiddenError } = require("../utils/errors");
@@ -57,6 +58,25 @@ const reservationPerms = {
   reportsExport: ["reservations.reports_export", "reports.export"],
   statementView: ["reservations.statement_view", "customers.view"],
 };
+
+// Bounded, company-scoped readiness. It deliberately reports only the proven
+// RESET-1 dependencies and never blocks unrelated application areas.
+router.get("/readiness/operations", authMiddleware, async (req, res, next) => {
+  try {
+    return res.status(200).json({ success: true, data: await companyBootstrapService.companyReadiness(req.companyId) });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+router.post("/bootstrap/company-accounts", authMiddleware, requireAnyPermission(["settings.update", "reservations.configure_account"]), async (req, res, next) => {
+  try {
+    const report = await companyBootstrapService.bootstrapCompanyAccounts(req.companyId);
+    return res.status(report.blocking.length ? 422 : 200).json({ success: report.blocking.length === 0, data: report });
+  } catch (error) {
+    return next(error);
+  }
+});
 
 // Restrict an invoice where-clause to POSTED invoices only — the single source
 // of truth for every financial aggregate (sales totals, customer purchases,

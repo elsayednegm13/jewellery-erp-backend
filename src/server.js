@@ -13,11 +13,17 @@ const startServer = async () => {
     await sequelize.authenticate();
     logger.info("Database connection established successfully.");
 
-    // First-run admin bootstrap (no-op if an admin already exists).
-    try {
-      await ensureAdmin();
-    } catch (bootErr) {
-      logger.error(`[Bootstrap] ensureAdmin failed: ${bootErr.message}`);
+    // RESET-1: startup must not be a hidden data-bootstrap/seed channel. An
+    // operator may opt in for a local first-run workflow, but normal startup
+    // (including Production) performs no company/admin/demo mutation.
+    if (process.env.ALLOW_RUNTIME_ADMIN_BOOTSTRAP === "true" && process.env.NODE_ENV !== "production") {
+      try {
+        await ensureAdmin();
+      } catch (bootErr) {
+        logger.error(`[Bootstrap] ensureAdmin failed: ${bootErr.message}`);
+      }
+    } else {
+      logger.info("[Bootstrap] Runtime admin bootstrap skipped; use an explicit local setup command.");
     }
 
     // Phase 32.6-Fix C — start the reservation automatic-expiry scheduler

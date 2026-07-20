@@ -82,6 +82,7 @@ const TechnicalAccountSession = require("./technicalAccountSession.model");
 const PasswordResetToken = require("./passwordResetToken.model");
 const EmailChangeToken = require("./emailChangeToken.model");
 const EmployeeCodeHistory = require("./employeeCodeHistory.model");
+const SystemAccountRole = require("./systemAccountRole.model");
 
 // Define Associations
 
@@ -188,6 +189,10 @@ InventoryGoldPool.belongsTo(Company, { foreignKey: "companyId", as: "company" })
 
 Company.hasMany(Account, { foreignKey: "companyId", as: "accounts" });
 Account.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Company.hasMany(SystemAccountRole, { foreignKey: "companyId", as: "systemAccountRoles" });
+SystemAccountRole.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Account.hasMany(SystemAccountRole, { foreignKey: "accountId", as: "systemRoles" });
+SystemAccountRole.belongsTo(Account, { foreignKey: "accountId", as: "account" });
 Company.hasOne(AccountingLock, { foreignKey: "companyId", as: "accountingLock" });
 AccountingLock.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
@@ -569,5 +574,6 @@ module.exports = {
   TechnicalAccountSession,
   PasswordResetToken,
   EmailChangeToken,
-  EmployeeCodeHistory
+  EmployeeCodeHistory,
+  SystemAccountRole
 };
