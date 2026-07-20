@@ -21,6 +21,7 @@ const AssetEvent = require("./assetEvent.model");
 const AssetCertificate = require("./assetCertificate.model");
 const AssetAttachment = require("./assetAttachment.model");
 const Customer = require("./customer.model");
+const BranchCustomer = require("./branchCustomer.model");
 const CustomerAttachment = require("./customerAttachment.model");
 const Supplier = require("./supplier.model");
 const SupplierDocument = require("./supplierDocument.model");
@@ -132,6 +133,12 @@ StockMovement.belongsTo(Asset, { foreignKey: "assetId", as: "asset" });
 
 Branch.hasMany(Asset, { foreignKey: "branchId", as: "assets" });
 Asset.belongsTo(Branch, { foreignKey: "branchId", as: "branchDetail" });
+Company.hasMany(BranchCustomer, { foreignKey: "companyId", as: "branchCustomers" });
+BranchCustomer.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(BranchCustomer, { foreignKey: "branchId", as: "customerRelations" });
+BranchCustomer.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+Customer.hasMany(BranchCustomer, { foreignKey: "customerId", as: "branchRelations" });
+BranchCustomer.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
 User.belongsToMany(Role, { through: UserRole, foreignKey: "userId", otherKey: "roleId", as: "roles" });
 Role.belongsToMany(User, { through: UserRole, foreignKey: "roleId", otherKey: "userId", as: "users" });
 Role.belongsToMany(Permission, { through: RolePermission, foreignKey: "roleId", otherKey: "permissionId", as: "permissions" });
@@ -514,6 +521,7 @@ module.exports = {
   AssetCertificate,
   AssetAttachment,
   Customer,
+  BranchCustomer,
   CustomerAttachment,
   Supplier,
   SupplierDocument,

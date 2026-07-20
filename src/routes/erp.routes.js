@@ -59,23 +59,31 @@ const reservationPerms = {
   statementView: ["reservations.statement_view", "customers.view"],
 };
 
-// Bounded, company-scoped readiness. It deliberately reports only the proven
-// RESET-1 dependencies and never blocks unrelated application areas.
+// Branch operational readiness is server-scoped. A company-level actor must
+// provide an explicit branch; a Branch Account already has a fixed branch.
 router.get("/readiness/operations", authMiddleware, async (req, res, next) => {
   try {
-    return res.status(200).json({ success: true, data: await companyBootstrapService.companyReadiness(req.companyId) });
+    const branch = await resolveAuthorizedBranch(req, req.query.branchId || req.branchId, { required: true });
+    return res.status(200).json({ success: true, data: await companyBootstrapService.branchReadiness(req.companyId, branch.id) });
   } catch (error) {
     return next(error);
   }
 });
 
-router.post("/bootstrap/company-accounts", authMiddleware, requireAnyPermission(["settings.update", "reservations.configure_account"]), async (req, res, next) => {
+router.post("/bootstrap/branch-accounts", authMiddleware, requirePermission("settings.update"), async (req, res, next) => {
   try {
-    const report = await companyBootstrapService.bootstrapCompanyAccounts(req.companyId);
-    return res.status(report.blocking.length ? 422 : 200).json({ success: report.blocking.length === 0, data: report });
+    const branch = await resolveAuthorizedBranch(req, req.body?.branchId || req.branchId, { required: true });
+    const report = await companyBootstrapService.bootstrapBranchAccounts(req.companyId, branch.id);
+    return res.status(report.blockers.length ? 422 : 200).json({ success: report.blockers.length === 0, data: report });
   } catch (error) {
     return next(error);
   }
+});
+
+router.get("/readiness/branches", authMiddleware, requirePermission("settings.update"), async (req, res, next) => {
+  try {
+    return res.status(200).json({ success: true, data: await companyBootstrapService.branchReadinessReport(req.companyId) });
+  } catch (error) { return next(error); }
 });
 
 // Restrict an invoice where-clause to POSTED invoices only — the single source
@@ -586,16 +594,10 @@ router.post("/pos/checkout",
     const idemRequest = idemClaim.request;
 
     // 2. Extract active branch
-    const branchId = req.headers["x-branch-id"] || body.branchId;
-    if (!branchId) {
-      throw new ValidationError("الفرع النشط مطلوب");
-    }
+    const branchId = await resolveAuthorizedBranchId(req, body.branchId || req.headers["x-branch-id"] || req.branchId, { required: true });
 
     // Validate Branch belongs to same company, is active
-    const branchRecord = await models.Branch.findOne({
-      where: { id: branchId, companyId: req.companyId, isActive: true },
-      transaction: t
-    });
+    const branchRecord = await models.Branch.findOne({ where: { id: branchId, companyId: req.companyId, isActive: true }, transaction: t });
     if (!branchRecord) {
       throw new ValidationError("الفرع المحدد غير موجود أو غير نشط");
     }

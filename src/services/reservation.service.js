@@ -7,6 +7,7 @@ const settingsService = require("./settings.service");
 const permissionService = require("./permission.service");
 const notificationService = require("./notification.service");
 const { SYSTEM_ACCOUNT_ROLES, resolveSystemAccountRole } = require("./company-bootstrap.service");
+const { requireOperationalBranch, assertBranchCustomer, assertSameBranch } = require("./branch-isolation.service");
 const { AppError, ValidationError, NotFoundError, ConflictError } = require("../utils/errors");
 
 // Bilingual, stable-coded errors for reservation deposit configuration and the
@@ -33,6 +34,10 @@ function actorName(user) {
 
 async function reservationVisibilityWhere(companyId, user, branchId) {
   const where = { companyId };
+  if (user?.accountType === "branch_shell") {
+    where.branchId = branchId || user.branchId || "__NO_VISIBLE_RESERVATION_SCOPE__";
+    return where;
+  }
   if (!user || ["admin", "owner"].includes(user.role)) return where;
   if (await permissionService.userHasPermission(user, "reservations.view_all")) return where;
   if (await permissionService.userHasPermission(user, "sales.view")) return where;
@@ -168,10 +173,9 @@ function normalizeInitialPayment(body) {
   };
 }
 
-async function getReservationAdvancesAccount(companyId, transaction) {
+async function getReservationAdvancesAccount(companyId, branchId, transaction) {
   // Posting never accepts or selects a liability account from the request.
-  // The protected company mapping is resolved before any reservation write.
-  return resolveSystemAccountRole(companyId, SYSTEM_ACCOUNT_ROLES.CUSTOMER_DEPOSIT_LIABILITY, transaction);
+  return resolveSystemAccountRole(companyId, branchId, SYSTEM_ACCOUNT_ROLES.CUSTOMER_DEPOSIT_LIABILITY, transaction);
 }
 
 function reservationStatusForTotals(paidUnits, agreedUnits) {
@@ -380,17 +384,16 @@ class ReservationService {
   }
 
   async _createReservationInTransaction({ companyId, branchId, user, body, idempotencyKey, transaction }) {
+    const effectiveBranch = await requireOperationalBranch({ companyId, branchId, transaction });
     const customer = await models.Customer.findOne({
       where: { id: body.customerId, companyId },
       transaction,
       lock: true
     });
     if (!customer) throw new NotFoundError("Customer not found");
+    await assertBranchCustomer({ companyId, branchId: effectiveBranch.id, customerId: customer.id, transaction, lock: true });
 
-    const branch = branchId
-      ? await models.Branch.findOne({ where: { id: branchId, companyId, isActive: true }, transaction, lock: true })
-      : null;
-    if (branchId && !branch) throw new ValidationError("Selected branch is not active or not found");
+    const branch = effectiveBranch;
 
     const itemInputs = normalizeItems(body);
     const assetIds = itemInputs.map((item) => item.assetId).sort();
@@ -407,7 +410,7 @@ class ReservationService {
     for (const input of itemInputs) {
       const asset = assetsById.get(input.assetId);
       if (asset.status !== "available") throw new ConflictError(`Asset ${asset.id} is not available for reservation`);
-      if (branchId && asset.branchId && asset.branchId !== branchId) throw new ConflictError(`Asset ${asset.id} belongs to another branch`);
+      assertSameBranch(asset, branch.id, "Asset");
       const agreedPriceUnits = parseMoneyUnits(input.agreedPrice !== undefined && input.agreedPrice !== null ? input.agreedPrice : asset.price, "agreed price");
       if (agreedPriceUnits <= 0n) throw new ValidationError("Reservation item agreed price must be greater than zero");
       agreedTotalUnits += agreedPriceUnits;
@@ -438,7 +441,7 @@ class ReservationService {
     if (compareMoney(initialPayment.amountUnits, agreedTotalUnits) > 0) {
       throw new ValidationError("Initial reservation payment cannot exceed the reservation total | دفعة الحجز الأولى لا يمكن أن تتجاوز إجمالي الحجز");
     }
-    const advancesAccount = initialPayment ? await getReservationAdvancesAccount(companyId, transaction) : null;
+    const advancesAccount = initialPayment ? await getReservationAdvancesAccount(companyId, branch.id, transaction) : null;
     const paidUnits = initialPayment ? initialPayment.amountUnits : 0n;
     const remainingUnits = agreedTotalUnits - paidUnits;
     const status = reservationStatusForTotals(paidUnits, agreedTotalUnits);
@@ -455,7 +458,7 @@ class ReservationService {
       customerId: customer.id,
       customerName: customer.name,
       branch: branch?.name || body.branch || firstAsset.branch || "Main Branch",
-      branchId: branch?.id || branchId || firstAsset.branchId || null,
+      branchId: branch.id,
       currency: body.currency || "AED",
       deposit: 0,
       agreedTotal: formatMoney(agreedTotalUnits),
@@ -586,9 +589,9 @@ class ReservationService {
       if (INELIGIBLE_RESERVATION_STATUSES.has(reservation.status)) {
         throw new ConflictError("Reservation is not eligible for payment");
       }
-      if (branchId && reservation.branchId && reservation.branchId !== branchId) {
-        throw new ConflictError("Reservation belongs to another branch");
-      }
+      await requireOperationalBranch({ companyId, branchId, transaction: t });
+      assertSameBranch(reservation, branchId, "Reservation");
+      await assertBranchCustomer({ companyId, branchId, customerId: reservation.customerId, transaction: t, lock: true });
 
       const amountUnits = parseMoneyUnits(body.amount, "payment amount");
       if (amountUnits <= 0n) throw new ValidationError("Reservation payment amount must be greater than zero");
@@ -598,7 +601,7 @@ class ReservationService {
       if (remainingBeforeUnits <= 0n) throw new ConflictError("Reservation is already fully paid");
       if (amountUnits > remainingBeforeUnits) throw new ValidationError("Reservation payment cannot exceed remaining amount");
 
-      const advancesAccount = await getReservationAdvancesAccount(companyId, t);
+      const advancesAccount = await getReservationAdvancesAccount(companyId, branchId, t);
       const payment = await this._createPaymentInTransaction({
         companyId,
         reservation,
@@ -699,9 +702,8 @@ class ReservationService {
     if (["cancelled", "cancelled_refund_pending", "refunded", "expired"].includes(reservation.status)) {
       throw new ConflictError("Cancelled, refunded, or expired reservations cannot be completed");
     }
-    if (branchId && reservation.branchId && reservation.branchId !== branchId) {
-      throw new ConflictError("Reservation belongs to another branch");
-    }
+    await requireOperationalBranch({ companyId, branchId, transaction });
+    assertSameBranch(reservation, branchId, "Reservation");
 
     const customer = await models.Customer.findOne({ where: { id: reservation.customerId, companyId }, transaction, lock: true });
     if (!customer) throw new NotFoundError("Reservation customer not found");
@@ -742,9 +744,7 @@ class ReservationService {
       const asset = await models.Asset.findOne({ where: { id: item.assetId, companyId }, transaction, lock: true });
       if (!asset) throw new NotFoundError(`Reserved asset ${item.assetId} was not found`);
       if (asset.status !== "reserved") throw new ConflictError(`Reserved asset ${asset.id} is not in reserved status`);
-      if (reservation.branchId && asset.branchId && asset.branchId !== reservation.branchId) {
-        throw new ConflictError(`Reserved asset ${asset.id} belongs to another branch`);
-      }
+      assertSameBranch(asset, reservation.branchId, "Reserved asset");
       const price = toNumber(parseMoneyUnits(item.agreedPrice, "item agreed price"));
       subtotal += price;
       assetRows.push({ item, asset, price });
@@ -757,7 +757,7 @@ class ReservationService {
       throw new ConflictError("Reservation total no longer matches final invoice total; reprice/item-change workflow is required before completion");
     }
 
-    const advancesAccount = await getReservationAdvancesAccount(companyId, transaction);
+    const advancesAccount = await getReservationAdvancesAccount(companyId, reservation.branchId, transaction);
     const now = new Date();
     const nowStr = now.toISOString().slice(0, 16).replace("T", " ");
     const prefix = settings.invoicePrefix || "INV-2026";
@@ -1145,13 +1145,14 @@ class ReservationService {
     if (!reservation) throw new NotFoundError("Reservation not found");
     if (reservation.status !== "cancelled_refund_pending") throw new ConflictError("Reservation is not awaiting refund execution");
     if (reservation.finalInvoiceId) throw new ConflictError("Completed reservations cannot be refunded");
-    if (branchId && reservation.branchId && reservation.branchId !== branchId) throw new ConflictError("Reservation belongs to another branch");
+    await requireOperationalBranch({ companyId, branchId, transaction });
+    assertSameBranch(reservation, branchId, "Reservation");
 
     const payments = await models.ReservationPayment.findAll({ where: { reservationId: reservation.id, companyId, status: "posted" }, transaction, lock: true });
     const refundUnits = parseMoneyUnits(refund.amount, "refund amount");
     const paidUnits = payments.reduce((sum, payment) => sum + parseMoneyUnits(payment.amount, "posted payment amount"), 0n);
     if (refundUnits !== paidUnits) throw new ValidationError("Reservation refund must equal all posted reservation payments");
-    const advancesAccount = await getReservationAdvancesAccount(companyId, transaction);
+    const advancesAccount = await getReservationAdvancesAccount(companyId, reservation.branchId, transaction);
     const treasuryCode = body.treasuryAccountCode || refund.treasuryAccountCode || treasuryAccountCode(refund.requestedRefundMethod);
     const now = new Date();
     await refund.update({
@@ -1934,14 +1935,14 @@ class ReservationService {
     for (const aid of successorAssetIds) {
       const asset = assetsById.get(aid);
       if (asset.status !== "available") throw new ConflictError(`Asset ${aid} is not available for the successor reservation`);
-      if (source.branchId && asset.branchId && asset.branchId !== source.branchId) throw new ConflictError(`Asset ${aid} belongs to another branch`);
+      assertSameBranch(asset, source.branchId, "Asset");
       const priceUnits = currentAssetPriceUnits(asset);
       successorTotalUnits += priceUnits;
       priceEvidence.push({ assetId: aid, price: formatMoney(priceUnits), resolvedAt: now.toISOString() });
     }
 
     const { units: transferableUnits } = await calculateTransferableUnits(source.id, companyId, transaction);
-    const advancesAccount = await getReservationAdvancesAccount(companyId, transaction);
+    const advancesAccount = await getReservationAdvancesAccount(companyId, source.branchId, transaction);
 
     // Create successor reservation + items (assets reserved).
     const successorId = body.successorId || uid("RES");
@@ -2263,10 +2264,11 @@ class ReservationService {
     const source = await models.Reservation.findOne({ where: { id: renewal.sourceReservationId, companyId }, transaction, lock: true });
     const successor = await models.Reservation.findOne({ where: { id: renewal.successorReservationId, companyId }, transaction, lock: true });
     if (!source || !successor) throw new NotFoundError("Renewal reservations not found");
-    if (branchId && source.branchId && source.branchId !== branchId) throw new ConflictError("Reservation belongs to another branch");
+    await requireOperationalBranch({ companyId, branchId, transaction });
+    assertSameBranch(source, branchId, "Reservation");
 
     const now = new Date();
-    const advancesAccount = await getReservationAdvancesAccount(companyId, transaction);
+    const advancesAccount = await getReservationAdvancesAccount(companyId, source.branchId, transaction);
     const treasuryCode = body.treasuryAccountCode || refund.treasuryAccountCode || treasuryAccountCode(refund.requestedRefundMethod);
     const excessUnits = parseMoneyUnits(refund.amount, "excess refund amount");
     const successorTotalUnits = parseMoneyUnits(renewal.successorTotal, "successor total");

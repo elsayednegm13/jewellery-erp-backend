@@ -11,6 +11,11 @@ const Account = sequelize.define("Account", {
     allowNull: false,
     field: "company_id"
   },
+  branchId: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    field: "branch_id"
+  },
   code: {
     type: DataTypes.STRING,
     allowNull: false

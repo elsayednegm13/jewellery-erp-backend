@@ -2,6 +2,8 @@ const { Op } = require("sequelize");
 const logger = require("../utils/logger");
 const { NotFoundError, ValidationError } = require("../utils/errors");
 const { emitEntityChanged } = require("../services/realtime-helper.service");
+const models = require("../models");
+const { AppError } = require("../utils/errors");
 
 // Sentinel values used by front-end filter dropdowns to mean "no filter"
 // (e.g. an "All" option, or an empty selection). They must never reach the
@@ -133,6 +135,33 @@ const GENERATED_ID_FORMATS = {
 };
 
 const GENERATED_ID_CREATE_ATTEMPTS = 3;
+const BRANCH_OPERATIONAL_MODELS = new Set(["Customer", "Asset", "Product", "StockMovement", "Invoice", "Payment", "CashTransaction", "JournalEntry", "Reservation"]);
+
+function branchScopeError(message) {
+  return new AppError(message, 403, "BRANCH_SCOPE_FORBIDDEN");
+}
+
+async function applyBranchReadScope(model, req, whereClause) {
+  if (!req.branchId) return;
+  if (model.rawAttributes.branchId) {
+    whereClause.branchId = req.branchId;
+    return;
+  }
+  if (model.name === "Customer") {
+    const rows = await models.BranchCustomer.findAll({ where: { companyId: req.companyId, branchId: req.branchId, isActive: true }, attributes: ["customerId"] });
+    whereClause.id = { [Op.in]: rows.map((row) => row.customerId) };
+  }
+}
+
+function applyBranchWriteScope(model, req, payload) {
+  if (!BRANCH_OPERATIONAL_MODELS.has(model.name)) return null;
+  if (!req.branchId) throw new ValidationError("An explicit active branch is required for operational writes.", { branchId: ["Branch context is required."] });
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, "branchId") && String(req.body.branchId) !== String(req.branchId)) {
+    throw branchScopeError("Client branch scope does not match the authenticated effective branch.");
+  }
+  if (model.rawAttributes.branchId) payload.branchId = req.branchId;
+  return req.branchId;
+}
 
 function isUniqueConstraintError(error) {
   return error?.name === "SequelizeUniqueConstraintError";
@@ -222,12 +251,11 @@ class ErpController {
         companyId: req.companyId
       } : {};
 
-      // Branch scope filtering — only when EXPLICITLY requested via ?branch=.
-      // The active-branch header/default is context (used for create & audit),
-      // not a hard list filter, otherwise lists silently hide all other branches.
-      const branchVal = req.query.branch;
-      if (branchVal && this.model.rawAttributes.branch) {
-        whereClause.branch = branchVal;
+      await applyBranchReadScope(this.model, req, whereClause);
+      const branchVal = req.query.branchId || req.query.branch;
+      if (branchVal && this.model.rawAttributes.branchId) {
+        if (req.branchId && String(branchVal) !== String(req.branchId)) throw branchScopeError("Requested branch is outside the authenticated scope.");
+        whereClause.branchId = branchVal;
       }
 
       // Apply search term across configured search fields
@@ -383,12 +411,12 @@ class ErpController {
 
   getById = async (req, res, next) => {
     try {
-      const queryOptions = {
-        where: {
+      const where = {
           id: req.params.id,
           ...(this.model.rawAttributes.companyId ? { companyId: req.companyId } : {})
-        }
       };
+      await applyBranchReadScope(this.model, req, where);
+      const queryOptions = { where };
 
       if (this.model.name === "Invoice" && this.model.associations.items) {
         queryOptions.include = [{ association: "items" }];
@@ -438,6 +466,7 @@ class ErpController {
         ...req.body,
         ...(this.model.rawAttributes.companyId ? { companyId: req.companyId } : {})
       };
+      const effectiveBranchId = applyBranchWriteScope(this.model, req, payload);
 
       // Phase 10M: Supplier.due is system-managed (frozen) and must never be set
       // from a request body. Strip it so a new supplier starts at the column
@@ -473,6 +502,13 @@ class ErpController {
 
         try {
           newItem = await this.model.create(payload);
+          if (this.model.name === "Customer") {
+            await models.BranchCustomer.create({
+              id: `BCR-${req.companyId}-${effectiveBranchId}-${newItem.id}`,
+              companyId: req.companyId, branchId: effectiveBranchId, customerId: newItem.id,
+              balance: 0, purchases: 0, loyaltyPoints: 0, isActive: true,
+            });
+          }
           break;
         } catch (error) {
           if (!shouldGenerateStringId || !isUniqueConstraintError(error)) {
@@ -515,12 +551,12 @@ class ErpController {
 
   update = async (req, res, next) => {
     try {
-      const item = await this.model.findOne({
-        where: {
+      const where = {
           id: req.params.id,
           ...(this.model.rawAttributes.companyId ? { companyId: req.companyId } : {})
-        }
-      });
+      };
+      await applyBranchReadScope(this.model, req, where);
+      const item = await this.model.findOne({ where });
 
       if (!item) {
         throw new NotFoundError(`${this.model.name} record not found.`);
@@ -565,6 +601,7 @@ class ErpController {
       // Phase 10R: Customer.balance is likewise maintained only by business
       // flows — silently ignore any `balance` in the body.
       let updateBody = req.body;
+      applyBranchWriteScope(this.model, req, updateBody);
       if (this.model.name === "Supplier" && Object.prototype.hasOwnProperty.call(req.body || {}, "due")) {
         updateBody = { ...updateBody };
         delete updateBody.due;
@@ -642,12 +679,13 @@ class ErpController {
 
   deactivate = async (req, res, next) => {
     try {
-      const item = await this.model.findOne({
-        where: {
+      const where = {
           id: req.params.id,
           ...(this.model.rawAttributes.companyId ? { companyId: req.companyId } : {})
-        }
-      });
+      };
+      await applyBranchReadScope(this.model, req, where);
+      const item = await this.model.findOne({ where });
+      applyBranchWriteScope(this.model, req, {});
 
       if (!item) {
         throw new NotFoundError(`${this.model.name} record not found.`);
@@ -715,12 +753,13 @@ class ErpController {
 
   reactivate = async (req, res, next) => {
     try {
-      const item = await this.model.findOne({
-        where: {
+      const where = {
           id: req.params.id,
           ...(this.model.rawAttributes.companyId ? { companyId: req.companyId } : {})
-        }
-      });
+      };
+      await applyBranchReadScope(this.model, req, where);
+      const item = await this.model.findOne({ where });
+      applyBranchWriteScope(this.model, req, {});
 
       if (!item) {
         throw new NotFoundError(`${this.model.name} record not found.`);
@@ -793,12 +832,12 @@ class ErpController {
         );
       }
 
-      const item = await this.model.findOne({
-        where: {
+      const where = {
           id: req.params.id,
           ...(this.model.rawAttributes.companyId ? { companyId: req.companyId } : {})
-        }
-      });
+      };
+      await applyBranchReadScope(this.model, req, where);
+      const item = await this.model.findOne({ where });
 
       if (!item) {
         throw new NotFoundError(`${this.model.name} record not found.`);
