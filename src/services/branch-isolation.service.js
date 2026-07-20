@@ -32,6 +32,18 @@ async function assertBranchCustomer({ companyId, branchId, customerId, transacti
   return row;
 }
 
+async function requireBranchCustomerResource({ companyId, branchId, customerId, transaction = null, lock = false }) {
+  await requireOperationalBranch({ companyId, branchId, transaction });
+  await assertBranchCustomer({ companyId, branchId, customerId, transaction, lock });
+  const customer = await models.Customer.findOne({
+    where: { id: customerId, companyId },
+    transaction,
+    lock: lock && transaction ? transaction.LOCK.UPDATE : undefined,
+  });
+  if (!customer) throw new NotFoundError("Customer is not available in the effective branch.");
+  return customer;
+}
+
 function assertSameBranch(resource, branchId, resourceName = "Resource") {
   if (!resource || !resource.branchId) {
     throw new ValidationError(`${resourceName} requires a branch attribution before it can be used operationally.`);
@@ -57,6 +69,7 @@ module.exports = {
   requireOperationalBranch,
   assertRequestedBranchMatches,
   assertBranchCustomer,
+  requireBranchCustomerResource,
   assertSameBranch,
   createBranchCustomer,
 };

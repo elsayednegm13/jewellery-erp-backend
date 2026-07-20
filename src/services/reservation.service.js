@@ -34,6 +34,13 @@ function actorName(user) {
 
 async function reservationVisibilityWhere(companyId, user, branchId) {
   const where = { companyId };
+  // A supplied branch is server-authenticated context, not a client filter.
+  // It must scope every operational reservation read, including users who can
+  // otherwise read company-wide reservation lists.
+  if (branchId) {
+    where.branchId = branchId;
+    return where;
+  }
   if (user?.accountType === "branch_shell") {
     where.branchId = branchId || user.branchId || "__NO_VISIBLE_RESERVATION_SCOPE__";
     return where;
@@ -54,6 +61,17 @@ async function reservationVisibilityWhere(companyId, user, branchId) {
   }
   where.id = "__NO_VISIBLE_RESERVATION_SCOPE__";
   return where;
+}
+
+async function requireReservationInBranch({ companyId, branchId, reservationId, transaction = null, lock = false }) {
+  const branch = await requireOperationalBranch({ companyId, branchId, transaction });
+  const reservation = await models.Reservation.findOne({
+    where: { id: reservationId, companyId, branchId: branch.id },
+    transaction,
+    lock: lock && transaction ? transaction.LOCK.UPDATE : undefined,
+  });
+  if (!reservation) throw new NotFoundError("Reservation not found");
+  return reservation;
 }
 
 function parseMoneyUnits(value, fieldName = "amount") {
@@ -906,14 +924,12 @@ class ReservationService {
     const t = await models.sequelize.transaction();
     try {
       const actor = actorName(user);
-      const reservation = await models.Reservation.findOne({ where: { id: reservationId, companyId }, transaction: t, lock: true });
-      if (!reservation) throw new NotFoundError("Reservation not found");
+      const reservation = await requireReservationInBranch({ companyId, branchId, reservationId, transaction: t, lock: true });
       if (reservation.isLegacy || Number(reservation.workflowVersion || 1) < 2) {
         throw new ConflictError("Legacy reservations cannot be cancelled through the new workflow");
       }
       if (reservation.finalInvoiceId || reservation.status === "completed") throw new ConflictError("Completed reservations cannot be cancelled");
       if (reservation.status === "refunded") throw new ConflictError("Refunded reservations cannot be cancelled again");
-      if (branchId && reservation.branchId && reservation.branchId !== branchId) throw new ConflictError("Reservation belongs to another branch");
       const reason = String(body.reason || body.cancellationReason || "").trim();
       if (!reason) throw new ValidationError("Cancellation reason is required");
 
@@ -959,12 +975,10 @@ class ReservationService {
     const t = await models.sequelize.transaction();
     try {
       const actor = actorName(user);
-      const reservation = await models.Reservation.findOne({ where: { id: reservationId, companyId }, transaction: t, lock: true });
-      if (!reservation) throw new NotFoundError("Reservation not found");
+      const reservation = await requireReservationInBranch({ companyId, branchId, reservationId, transaction: t, lock: true });
       if (reservation.isLegacy || Number(reservation.workflowVersion || 1) < 2) throw new ConflictError("Legacy reservations cannot be refunded through the new workflow");
       if (reservation.status !== "cancelled_refund_pending") throw new ConflictError("Reservation must be cancelled with refund pending before refund request");
       if (reservation.finalInvoiceId) throw new ConflictError("Completed reservations cannot be refunded through reservation refund");
-      if (branchId && reservation.branchId && reservation.branchId !== branchId) throw new ConflictError("Reservation belongs to another branch");
       const activeRenewal = await models.ReservationRenewal.findOne({ where: { companyId, sourceReservationId: reservation.id, status: ["requested", "pending_excess_refund", "ready_to_activate", "activated"] }, transaction: t, lock: true });
       if (activeRenewal) throw new ConflictError("A renewal is in progress for this reservation; full refund is not available");
       const existing = await models.ReservationRefund.findOne({ where: { companyId, reservationId: reservation.id, refundType: "reservation_full", status: ["requested", "approved", "executed"] }, transaction: t, lock: true });
@@ -1035,9 +1049,7 @@ class ReservationService {
       if (!refund) throw new NotFoundError("Reservation refund not found");
       if (refund.refundType && refund.refundType !== "reservation_full") throw new ConflictError("Renewal excess refunds use the dedicated renewal excess refund workflow");
       if (refund.status !== "requested") throw new ConflictError("Only requested refunds can be approved");
-      const reservation = await models.Reservation.findOne({ where: { id: refund.reservationId, companyId }, transaction: t, lock: true });
-      if (!reservation) throw new NotFoundError("Reservation not found");
-      if (branchId && reservation.branchId && reservation.branchId !== branchId) throw new ConflictError("Reservation belongs to another branch");
+      const reservation = await requireReservationInBranch({ companyId, branchId, reservationId: refund.reservationId, transaction: t, lock: true });
       if (reservation.status !== "cancelled_refund_pending") throw new ConflictError("Reservation is not awaiting refund");
       const now = new Date();
       await refund.update({
@@ -1079,8 +1091,7 @@ class ReservationService {
       if (refund.status !== "requested") throw new ConflictError("Only requested refunds can be rejected");
       const reason = String(body.reason || body.rejectionReason || "").trim();
       if (!reason) throw new ValidationError("Rejection reason is required");
-      const reservation = await models.Reservation.findOne({ where: { id: refund.reservationId, companyId }, transaction: t, lock: true });
-      if (branchId && reservation?.branchId && reservation.branchId !== branchId) throw new ConflictError("Reservation belongs to another branch");
+      const reservation = await requireReservationInBranch({ companyId, branchId, reservationId: refund.reservationId, transaction: t, lock: true });
       const now = new Date();
       await refund.update({ status: "rejected", rejectedBy: actor, rejectedAt: now, rejectionReason: reason, version: Number(refund.version || 0) + 1 }, { transaction: t });
       if (reservation) await reservation.update({ refundStatus: "rejected", updatedBy: actor, version: Number(reservation.version || 0) + 1 }, { transaction: t });
@@ -1892,14 +1903,12 @@ class ReservationService {
     const reason = String(body.reason || "").trim();
     if (!reason) throw new ValidationError("Renewal reason is required");
 
-    const source = await models.Reservation.findOne({ where: { id: reservationId, companyId }, transaction, lock: true });
-    if (!source) throw new NotFoundError("Reservation not found");
+    const source = await requireReservationInBranch({ companyId, branchId, reservationId, transaction, lock: true });
     if (source.isLegacy || Number(source.workflowVersion || 1) < 2) throw new ConflictError("Legacy reservations cannot be renewed through the new workflow");
     if (!source.expiredBySystem) throw new ConflictError("Only automatically expired reservations can be renewed");
     if (source.status === "renewed" || source.successorReservationId) throw new ConflictError("Reservation has already been renewed");
     if (!["cancelled_refund_pending", "cancelled"].includes(source.status)) throw new ConflictError("Reservation is not in an expired renewable state");
     if (source.finalInvoiceId) throw new ConflictError("Completed reservations cannot be renewed");
-    if (branchId && source.branchId && source.branchId !== branchId) throw new ConflictError("Reservation belongs to another branch");
 
     const activeRefund = await models.ReservationRefund.findOne({
       where: { companyId, reservationId: source.id, refundType: "reservation_full", status: ["requested", "approved"] },

@@ -32,6 +32,7 @@ const accountBalanceService = require("../services/account-balance.service");
 const cashRegisterService = require("../services/cash-register.service");
 const companyBootstrapService = require("../services/company-bootstrap.service");
 const ledgerReportingService = require("../services/ledger-reporting.service");
+const { requireBranchCustomerResource } = require("../services/branch-isolation.service");
 const logger = require("../utils/logger");
 const { AppError, ValidationError, NotFoundError, ConflictError, ForbiddenError } = require("../utils/errors");
 const uploadMiddleware = require("../middleware/upload.middleware");
@@ -5321,6 +5322,7 @@ router.post("/reservations/:id/renew", authMiddleware, requireAnyPermission(rese
 
 router.get("/reservations/:id/amendments", authMiddleware, requireAnyPermission(reservationPerms.view), async (req, res, next) => {
   try {
+    await reservationService.getById({ companyId: req.companyId, id: req.params.id, user: req.user, branchId: req.branchId });
     const amendments = await models.ReservationAmendment.findAll({
       where: { reservationId: req.params.id, companyId: req.companyId },
       include: [{ model: models.ReservationAmendmentItem, as: "items", required: false }],
@@ -5334,6 +5336,7 @@ router.get("/reservations/:id/amendments", authMiddleware, requireAnyPermission(
 
 router.get("/reservations/:id/extensions", authMiddleware, requireAnyPermission(reservationPerms.view), async (req, res, next) => {
   try {
+    await reservationService.getById({ companyId: req.companyId, id: req.params.id, user: req.user, branchId: req.branchId });
     const extensions = await models.ReservationExpiryExtension.findAll({
       where: { reservationId: req.params.id, companyId: req.companyId },
       order: [["extendedAt", "DESC"]]
@@ -5346,6 +5349,7 @@ router.get("/reservations/:id/extensions", authMiddleware, requireAnyPermission(
 
 router.get("/reservations/:id/renewal", authMiddleware, requireAnyPermission(reservationPerms.view), async (req, res, next) => {
   try {
+    await reservationService.getById({ companyId: req.companyId, id: req.params.id, user: req.user, branchId: req.branchId });
     const renewals = await models.ReservationRenewal.findAll({
       where: { companyId: req.companyId, [Op.or]: [{ sourceReservationId: req.params.id }, { successorReservationId: req.params.id }] },
       include: [{ model: models.ReservationPaymentTransfer, as: "transfers", required: false }],
@@ -5399,8 +5403,7 @@ router.patch("/reservations/:id", authMiddleware, guardFor("reservations", "upda
     return next(new ForbiddenError("Reservation financial, item, status, asset, and invoice fields are immutable through generic update"));
   }
   try {
-    const reservation = await models.Reservation.findOne({ where: { id: req.params.id, companyId: req.companyId } });
-    if (!reservation) throw new NotFoundError("Reservation not found");
+    const reservation = await reservationService.getById({ companyId: req.companyId, id: req.params.id, user: req.user, branchId: req.branchId });
     const before = { notes: reservation.notes };
     await reservation.update({ notes: body.notes ?? null, updatedBy: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System" });
     await auditService.record(req.companyId, {
@@ -7205,10 +7208,7 @@ router.delete("/users/:id", authMiddleware, requirePermission("users.delete"), a
 router.get("/customers/:id/invoices", authMiddleware, async (req, res, next) => {
   try {
     const customerId = req.params.id;
-    const customer = await models.Customer.findOne({ where: { id: customerId, companyId: req.companyId } });
-    if (!customer) {
-      return res.status(404).json({ success: false, message: "العميل غير موجود" });
-    }
+    const customer = await requireBranchCustomerResource({ companyId: req.companyId, branchId: req.branchId, customerId });
 
     const invoices = await models.Invoice.findAll({
       where: postedInvoiceWhere({ customerId, companyId: req.companyId }),
@@ -7234,10 +7234,7 @@ router.get("/customers/:id/invoices", authMiddleware, async (req, res, next) => 
 router.get("/customers/:id/statement", authMiddleware, async (req, res, next) => {
   try {
     const customerId = req.params.id;
-    const customer = await models.Customer.findOne({ where: { id: customerId, companyId: req.companyId } });
-    if (!customer) {
-      return res.status(404).json({ success: false, message: "العميل غير موجود" });
-    }
+    const customer = await requireBranchCustomerResource({ companyId: req.companyId, branchId: req.branchId, customerId });
 
     const invoices = await models.Invoice.findAll({
       where: postedInvoiceWhere({ customerId, companyId: req.companyId }),
@@ -7283,9 +7280,8 @@ router.get("/customers/:id/statement", authMiddleware, async (req, res, next) =>
 // ─────────────────────────────────────────────────────────────────────────────
 router.get("/customers/:id/statement-v2", authMiddleware, requireAnyPermission(reservationPerms.statementView), async (req, res, next) => {
   try {
-    // 1. Customer must exist within the tenant. Never modified.
-    const customer = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId } });
-    if (!customer) throw new NotFoundError("Customer not found.");
+    // 1. Customer must be available in the authenticated effective branch. Never modified.
+    const customer = await requireBranchCustomerResource({ companyId: req.companyId, branchId: req.branchId, customerId: req.params.id });
 
     // 2. Validate the optional date window.
     const from = req.query.from ? String(req.query.from) : null;
@@ -7604,8 +7600,7 @@ router.get("/customers/:id/statement-v2", authMiddleware, requireAnyPermission(r
 // ─────────────────────────────────────────────────────────────────────────────
 router.get("/customers/:id/credit", authMiddleware, requireBusinessPermission("customers.view"), async (req, res, next) => {
   try {
-    const customer = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId } });
-    if (!customer) throw new NotFoundError("Customer not found.");
+    const customer = await requireBranchCustomerResource({ companyId: req.companyId, branchId: req.branchId, customerId: req.params.id });
 
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 50, 1), 200);
@@ -7647,8 +7642,7 @@ router.get("/customers/:id/credit", authMiddleware, requireBusinessPermission("c
 // ─────────────────────────────────────────────────────────────────────────────
 router.get("/customers/:id/credit/reconciliation", authMiddleware, requireBusinessPermission("customers.view"), async (req, res, next) => {
   try {
-    const customer = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId } });
-    if (!customer) throw new NotFoundError("Customer not found.");
+    const customer = await requireBranchCustomerResource({ companyId: req.companyId, branchId: req.branchId, customerId: req.params.id });
 
     // Source documents (READ-ONLY) — same sources statement-v2 uses, plus the
     // settlement/credit records statement-v2 ignores (for diagnosis only).
@@ -7767,8 +7761,7 @@ router.get("/customers/:id/credit/reconciliation", authMiddleware, requireBusine
 // ─────────────────────────────────────────────────────────────────────────────
 router.get("/customers/:id/statement-v3", authMiddleware, requireBusinessPermission("customers.view"), async (req, res, next) => {
   try {
-    const customer = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId } });
-    if (!customer) throw new NotFoundError("Customer not found.");
+    const customer = await requireBranchCustomerResource({ companyId: req.companyId, branchId: req.branchId, customerId: req.params.id });
 
     const from = req.query.from ? String(req.query.from) : null;
     const to = req.query.to ? String(req.query.to) : null;
@@ -7917,16 +7910,8 @@ function normalizeCustomerDepositPayload(req, defaultCurrency = "AED") {
     throw new ValidationError("طريقة الدفع يجب أن تكون cash أو bank");
   }
 
-  const accountCode = String(body.accountCode || (paymentMethod === "bank" ? "1120" : "1110")).trim();
-  if (!["1110", "1120"].includes(accountCode)) {
-    throw new ValidationError("حساب الإيداع يجب أن يكون 1110 للنقد أو 1120 للبنك");
-  }
-  if (paymentMethod === "cash" && accountCode !== "1110") {
-    throw new ValidationError("الإيداع النقدي يجب أن يستخدم الحساب 1110");
-  }
-  if (paymentMethod === "bank" && accountCode !== "1120") {
-    throw new ValidationError("الإيداع البنكي يجب أن يستخدم الحساب 1120");
-  }
+  if (Object.prototype.hasOwnProperty.call(body, "accountCode")) throw new ValidationError("حساب الإيداع يحدده الخادم حسب طريقة الدفع.");
+  const accountCode = paymentMethod === "bank" ? "1120" : "1110";
 
   const currency = String(body.currency || defaultCurrency || "AED").trim().toUpperCase().slice(0, 8) || "AED";
   const date = body.date ? String(body.date).trim() : new Date().toISOString().slice(0, 10);
@@ -7936,15 +7921,11 @@ function normalizeCustomerDepositPayload(req, defaultCurrency = "AED") {
 
   const description = String(body.description || "Customer deposit").trim().slice(0, 255);
   const reference = body.reference == null ? null : String(body.reference).trim().slice(0, 120) || null;
-  const branchCandidate = body.branchId || req.headers["x-branch-id"] || req.branchId;
-  const branchId = typeof branchCandidate === "string" && branchCandidate.startsWith("BR-") ? branchCandidate : null;
-
   return {
     amount,
     currency,
     paymentMethod,
     accountCode,
-    branchId,
     date,
     description,
     reference,
@@ -7963,16 +7944,8 @@ function normalizeCustomerRefundPayload(req, defaultCurrency = "AED") {
     throw new ValidationError("طريقة رد الرصيد يجب أن تكون cash أو bank");
   }
 
-  const accountCode = String(body.accountCode || (paymentMethod === "bank" ? "1120" : "1110")).trim();
-  if (!["1110", "1120"].includes(accountCode)) {
-    throw new ValidationError("حساب رد الرصيد يجب أن يكون 1110 للنقد أو 1120 للبنك");
-  }
-  if (paymentMethod === "cash" && accountCode !== "1110") {
-    throw new ValidationError("رد الرصيد النقدي يجب أن يستخدم الحساب 1110");
-  }
-  if (paymentMethod === "bank" && accountCode !== "1120") {
-    throw new ValidationError("رد الرصيد البنكي يجب أن يستخدم الحساب 1120");
-  }
+  if (Object.prototype.hasOwnProperty.call(body, "accountCode")) throw new ValidationError("حساب رد الرصيد يحدده الخادم حسب طريقة الدفع.");
+  const accountCode = paymentMethod === "bank" ? "1120" : "1110";
 
   const currency = String(body.currency || defaultCurrency || "AED").trim().toUpperCase().slice(0, 8) || "AED";
   const date = body.date ? String(body.date).trim() : new Date().toISOString().slice(0, 10);
@@ -7982,15 +7955,11 @@ function normalizeCustomerRefundPayload(req, defaultCurrency = "AED") {
 
   const description = String(body.description || "Customer credit refund").trim().slice(0, 255);
   const reference = body.reference == null ? null : String(body.reference).trim().slice(0, 120) || null;
-  const branchCandidate = body.branchId || req.headers["x-branch-id"] || req.branchId;
-  const branchId = typeof branchCandidate === "string" && branchCandidate.startsWith("BR-") ? branchCandidate : null;
-
   return {
     amount,
     currency,
     paymentMethod,
     accountCode,
-    branchId,
     date,
     description,
     reference,
@@ -8026,6 +7995,7 @@ router.post("/customers/:id/credit/deposit", authMiddleware, requireBusinessPerm
   try {
     const settings = await settingsService.getCompanySettings(req.companyId);
     const payload = normalizeCustomerDepositPayload(req, settings.currency || "AED");
+    const effectiveBranchId = await resolveAuthorizedBranchId(req, req.body?.branchId || req.headers["x-branch-id"] || req.branchId, { required: true });
     const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
     if (!idempotencyKey || !String(idempotencyKey).trim()) {
       return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لإيداع رصيد دائن للعميل" });
@@ -8035,6 +8005,7 @@ router.post("/customers/:id/credit/deposit", authMiddleware, requireBusinessPerm
     const idemRequestHash = idempotencyService.hashRequest(idemScope, {
       customerId: req.params.id,
       companyId: req.companyId,
+      branchId: effectiveBranchId,
       ...payload,
     }, req.params);
 
@@ -8059,23 +8030,12 @@ router.post("/customers/:id/credit/deposit", authMiddleware, requireBusinessPerm
         }
         const idemRequest = idemClaim.request;
 
-        const customer = await models.Customer.findOne({
-          where: { id: req.params.id, companyId: req.companyId },
-          transaction: t,
-          lock: { level: t.LOCK.UPDATE, of: models.Customer },
-        });
-        if (!customer) throw new NotFoundError("Customer not found.");
+        const branch = await resolveAuthorizedBranch(req, effectiveBranchId, { required: true, transaction: t });
+        const customer = await requireBranchCustomerResource({ companyId: req.companyId, branchId: branch.id, customerId: req.params.id, transaction: t, lock: true });
+        const depositAccount = await companyBootstrapService.resolveSystemAccountRole(req.companyId, branch.id, companyBootstrapService.SYSTEM_ACCOUNT_ROLES.CUSTOMER_DEPOSIT_LIABILITY, t);
+        await assertTreasuryAccountKey(req.companyId, payload.paymentMethod, { transaction: t });
         if (customer.status && customer.status !== "active") {
           throw new ValidationError("لا يمكن تسجيل إيداع لعميل غير نشط");
-        }
-
-        let branch = null;
-        if (payload.branchId) {
-          branch = await models.Branch.findOne({
-            where: { id: payload.branchId, companyId: req.companyId, isActive: true },
-            transaction: t,
-          });
-          if (!branch) throw new ValidationError("الفرع المحدد غير موجود أو غير نشط");
         }
 
         const cashTransaction = await models.CashTransaction.create({
@@ -8085,11 +8045,11 @@ router.post("/customers/:id/credit/deposit", authMiddleware, requireBusinessPerm
           account: payload.paymentMethod,
           amount: payload.amount,
           category: "customer_credit_deposit",
-          counterAccountCode: "2300",
+          counterAccountCode: depositAccount.code,
           description: payload.description,
           reference: payload.reference || customer.id,
-          branch: branch ? branch.name : (payload.branchId || "Main Branch"),
-          branchId: payload.branchId,
+          branch: branch.name,
+          branchId: branch.id,
           date: payload.date,
           createdBy: actorId,
           status: "posted",
@@ -8100,7 +8060,7 @@ router.post("/customers/:id/credit/deposit", authMiddleware, requireBusinessPerm
           models,
           companyId: req.companyId,
           customerId: customer.id,
-          branchId: payload.branchId,
+          branchId: branch.id,
           amount: payload.amount,
           currency: payload.currency,
           sourceType: "manual_deposit",
@@ -8112,12 +8072,14 @@ router.post("/customers/:id/credit/deposit", authMiddleware, requireBusinessPerm
             reference: payload.reference,
             paymentMethod: payload.paymentMethod,
             accountCode: payload.accountCode,
+            depositAccountId: depositAccount.id,
           },
           transaction: t,
           glPosting: {
             enabled: true,
             debitAccountCode: payload.accountCode,
-            creditAccountCode: "2300",
+            creditAccountCode: depositAccount.code,
+            customerDepositAccountCode: depositAccount.code,
             description: payload.description,
             date: payload.date,
             postedBy: actorName,
@@ -8144,8 +8106,8 @@ router.post("/customers/:id/credit/deposit", authMiddleware, requireBusinessPerm
           description: `Customer credit deposit ${payload.amount} ${payload.currency} for ${customer.name}`,
           user: actorName,
           userId: req.user ? req.user.id : null,
-          place: branch ? branch.name : payload.branchId || null,
-          branch: branch ? branch.name : payload.branchId || null,
+          place: branch.name,
+          branch: branch.name,
           sourceDocument: cashTransaction.id,
           severity: "info",
           after: JSON.stringify({
@@ -8192,14 +8154,14 @@ router.post("/customers/:id/credit/deposit", authMiddleware, requireBusinessPerm
       entity: "CustomerCreditTransaction",
       action: "deposit",
       id: idemResponseBody?.data?.customerCreditTransaction?.id,
-      branchId: payload.branchId,
+      branchId: effectiveBranchId,
       related: { customerId: req.params.id },
     });
     emitEntityChanged(req.companyId, {
       entity: "CashTransaction",
       action: "customer-credit-deposit",
       id: idemResponseBody?.data?.cashTransaction?.id,
-      branchId: payload.branchId,
+      branchId: effectiveBranchId,
       related: { customerId: req.params.id },
     });
 
@@ -8213,6 +8175,7 @@ router.post("/customers/:id/credit/refund", authMiddleware, requireBusinessPermi
   try {
     const settings = await settingsService.getCompanySettings(req.companyId);
     const payload = normalizeCustomerRefundPayload(req, settings.currency || "AED");
+    const effectiveBranchId = await resolveAuthorizedBranchId(req, req.body?.branchId || req.headers["x-branch-id"] || req.branchId, { required: true });
     const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
     if (!idempotencyKey || !String(idempotencyKey).trim()) {
       return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لرد الرصيد الدائن للعميل" });
@@ -8222,6 +8185,7 @@ router.post("/customers/:id/credit/refund", authMiddleware, requireBusinessPermi
     const idemRequestHash = idempotencyService.hashRequest(idemScope, {
       customerId: req.params.id,
       companyId: req.companyId,
+      branchId: effectiveBranchId,
       ...payload,
     }, req.params);
 
@@ -8246,23 +8210,12 @@ router.post("/customers/:id/credit/refund", authMiddleware, requireBusinessPermi
         }
         const idemRequest = idemClaim.request;
 
-        const customer = await models.Customer.findOne({
-          where: { id: req.params.id, companyId: req.companyId },
-          transaction: t,
-          lock: { level: t.LOCK.UPDATE, of: models.Customer },
-        });
-        if (!customer) throw new NotFoundError("Customer not found.");
+        const branch = await resolveAuthorizedBranch(req, effectiveBranchId, { required: true, transaction: t });
+        const customer = await requireBranchCustomerResource({ companyId: req.companyId, branchId: branch.id, customerId: req.params.id, transaction: t, lock: true });
+        const depositAccount = await companyBootstrapService.resolveSystemAccountRole(req.companyId, branch.id, companyBootstrapService.SYSTEM_ACCOUNT_ROLES.CUSTOMER_DEPOSIT_LIABILITY, t);
+        await assertTreasuryAccountKey(req.companyId, payload.paymentMethod, { transaction: t });
         if (customer.status && customer.status !== "active") {
           throw new ValidationError("لا يمكن رد رصيد لعميل غير نشط");
-        }
-
-        let branch = null;
-        if (payload.branchId) {
-          branch = await models.Branch.findOne({
-            where: { id: payload.branchId, companyId: req.companyId, isActive: true },
-            transaction: t,
-          });
-          if (!branch) throw new ValidationError("الفرع المحدد غير موجود أو غير نشط");
         }
 
         const beforeSummary = await customerCreditService.getCustomerCreditSummary({
@@ -8283,11 +8236,11 @@ router.post("/customers/:id/credit/refund", authMiddleware, requireBusinessPermi
           account: payload.paymentMethod,
           amount: payload.amount,
           category: "customer_credit_refund",
-          counterAccountCode: "2300",
+          counterAccountCode: depositAccount.code,
           description: payload.description,
           reference: payload.reference || customer.id,
-          branch: branch ? branch.name : (payload.branchId || "Main Branch"),
-          branchId: payload.branchId,
+          branch: branch.name,
+          branchId: branch.id,
           date: payload.date,
           createdBy: actorId,
           status: "posted",
@@ -8298,7 +8251,7 @@ router.post("/customers/:id/credit/refund", authMiddleware, requireBusinessPermi
           models,
           companyId: req.companyId,
           customerId: customer.id,
-          branchId: payload.branchId,
+          branchId: branch.id,
           amount: payload.amount,
           currency: payload.currency,
           sourceType: "credit_refund",
@@ -8310,12 +8263,14 @@ router.post("/customers/:id/credit/refund", authMiddleware, requireBusinessPermi
             reference: payload.reference,
             paymentMethod: payload.paymentMethod,
             accountCode: payload.accountCode,
+            depositAccountId: depositAccount.id,
           },
           transaction: t,
           glPosting: {
             enabled: true,
-            debitAccountCode: "2300",
+            debitAccountCode: depositAccount.code,
             creditAccountCode: payload.accountCode,
+            customerDepositAccountCode: depositAccount.code,
             description: payload.description,
             date: payload.date,
             postedBy: actorName,
@@ -8342,8 +8297,8 @@ router.post("/customers/:id/credit/refund", authMiddleware, requireBusinessPermi
           description: `Customer credit refund ${payload.amount} ${payload.currency} for ${customer.name}`,
           user: actorName,
           userId: req.user ? req.user.id : null,
-          place: branch ? branch.name : payload.branchId || null,
-          branch: branch ? branch.name : payload.branchId || null,
+          place: branch.name,
+          branch: branch.name,
           sourceDocument: cashTransaction.id,
           severity: "info",
           after: JSON.stringify({
@@ -8392,14 +8347,14 @@ router.post("/customers/:id/credit/refund", authMiddleware, requireBusinessPermi
       entity: "CustomerCreditTransaction",
       action: "refund",
       id: idemResponseBody?.data?.customerCreditTransaction?.id,
-      branchId: payload.branchId,
+      branchId: effectiveBranchId,
       related: { customerId: req.params.id },
     });
     emitEntityChanged(req.companyId, {
       entity: "CashTransaction",
       action: "customer-credit-refund",
       id: idemResponseBody?.data?.cashTransaction?.id,
-      branchId: payload.branchId,
+      branchId: effectiveBranchId,
       related: { customerId: req.params.id },
     });
 
@@ -12271,8 +12226,7 @@ router.get("/loyalty/transactions", authMiddleware, async (req, res, next) => {
 // A customer's loyalty summary + recent ledger.
 router.get("/customers/:id/loyalty", authMiddleware, async (req, res, next) => {
   try {
-    const c = await models.Customer.findOne({ where: { id: req.params.id, companyId: req.companyId } });
-    if (!c) return res.status(404).json({ success: false, message: "العميل غير موجود" });
+    const c = await requireBranchCustomerResource({ companyId: req.companyId, branchId: req.branchId, customerId: req.params.id });
     const ledger = await models.LoyaltyTransaction.findAll({
       where: { companyId: req.companyId, customerId: c.id }, order: [["created_at", "DESC"]], limit: 50
     });

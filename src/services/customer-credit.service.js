@@ -77,14 +77,15 @@ function validatePostingContext(direction, opts) {
   const gl = opts.glPosting || {};
   const debitAccountCode = String(gl.debitAccountCode || "").trim();
   const creditAccountCode = String(gl.creditAccountCode || "").trim();
+  const customerDepositAccountCode = String(gl.customerDepositAccountCode || CUSTOMER_DEPOSITS_ACCOUNT).trim();
   if (!debitAccountCode || !creditAccountCode) {
     throw new Error("customer-credit: glPosting requires debitAccountCode and creditAccountCode");
   }
 
-  if (direction === "credit_in" && creditAccountCode !== CUSTOMER_DEPOSITS_ACCOUNT) {
+  if (direction === "credit_in" && creditAccountCode !== customerDepositAccountCode) {
     throw new Error("customer-credit: credit_in GL bridge must credit account 2300");
   }
-  if (direction === "credit_out" && debitAccountCode !== CUSTOMER_DEPOSITS_ACCOUNT) {
+  if (direction === "credit_out" && debitAccountCode !== customerDepositAccountCode) {
     throw new Error("customer-credit: credit_out GL bridge must debit account 2300");
   }
 

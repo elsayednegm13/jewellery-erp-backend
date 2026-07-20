@@ -149,7 +149,25 @@ async function applyBranchReadScope(model, req, whereClause) {
   }
   if (model.name === "Customer") {
     const rows = await models.BranchCustomer.findAll({ where: { companyId: req.companyId, branchId: req.branchId, isActive: true }, attributes: ["customerId"] });
-    whereClause.id = { [Op.in]: rows.map((row) => row.customerId) };
+    const branchCustomerScope = { id: { [Op.in]: rows.map((row) => row.customerId) } };
+
+    // List queries have no requested id, so the BranchCustomer set is their
+    // complete scope. By-id CRUD queries already carry an exact id. Keep that
+    // predicate independent and intersect it with the branch relationship;
+    // overwriting whereClause.id here used to let findOne return the first
+    // permitted customer instead of the requested resource.
+    if (Object.prototype.hasOwnProperty.call(whereClause, "id")) {
+      const requestedIdScope = { id: whereClause.id };
+      delete whereClause.id;
+      whereClause[Op.and] = [
+        ...(whereClause[Op.and] || []),
+        requestedIdScope,
+        branchCustomerScope,
+      ];
+      return;
+    }
+
+    whereClause.id = branchCustomerScope.id;
   }
 }
 
