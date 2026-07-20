@@ -595,20 +595,19 @@ class ReservationService {
         throw new ConflictError(prior.message);
       }
 
-      const reservation = await models.Reservation.findOne({
-        where: { id: reservationId, companyId },
+      const reservation = await requireReservationInBranch({
+        companyId,
+        branchId,
+        reservationId,
         transaction: t,
         lock: true
       });
-      if (!reservation) throw new NotFoundError("Reservation not found");
       if (reservation.isLegacy || Number(reservation.workflowVersion || 1) < 2) {
         throw new ConflictError("Legacy reservations cannot receive new ledger payments");
       }
       if (INELIGIBLE_RESERVATION_STATUSES.has(reservation.status)) {
         throw new ConflictError("Reservation is not eligible for payment");
       }
-      await requireOperationalBranch({ companyId, branchId, transaction: t });
-      assertSameBranch(reservation, branchId, "Reservation");
       await assertBranchCustomer({ companyId, branchId, customerId: reservation.customerId, transaction: t, lock: true });
 
       const amountUnits = parseMoneyUnits(body.amount, "payment amount");
@@ -705,12 +704,13 @@ class ReservationService {
 
   async _completeSaleInTransaction({ companyId, branchId, user, reservationId, body = {}, transaction }) {
     const actor = actorName(user);
-    const reservation = await models.Reservation.findOne({
-      where: { id: reservationId, companyId },
+    const reservation = await requireReservationInBranch({
+      companyId,
+      branchId,
+      reservationId,
       transaction,
       lock: true
     });
-    if (!reservation) throw new NotFoundError("Reservation not found");
     if (reservation.isLegacy || Number(reservation.workflowVersion || 1) < 2) {
       throw new ConflictError("Legacy reservations cannot be completed through the new workflow");
     }
@@ -720,9 +720,6 @@ class ReservationService {
     if (["cancelled", "cancelled_refund_pending", "refunded", "expired"].includes(reservation.status)) {
       throw new ConflictError("Cancelled, refunded, or expired reservations cannot be completed");
     }
-    await requireOperationalBranch({ companyId, branchId, transaction });
-    assertSameBranch(reservation, branchId, "Reservation");
-
     const customer = await models.Customer.findOne({ where: { id: reservation.customerId, companyId }, transaction, lock: true });
     if (!customer) throw new NotFoundError("Reservation customer not found");
     const branch = reservation.branchId
@@ -1152,13 +1149,15 @@ class ReservationService {
     if (refund.methodDiffersFromOriginal && !refund.methodOverrideApproved) {
       throw new ConflictError("Different refund method requires approval before execution");
     }
-    const reservation = await models.Reservation.findOne({ where: { id: refund.reservationId, companyId }, transaction, lock: true });
-    if (!reservation) throw new NotFoundError("Reservation not found");
+    const reservation = await requireReservationInBranch({
+      companyId,
+      branchId,
+      reservationId: refund.reservationId,
+      transaction,
+      lock: true
+    });
     if (reservation.status !== "cancelled_refund_pending") throw new ConflictError("Reservation is not awaiting refund execution");
     if (reservation.finalInvoiceId) throw new ConflictError("Completed reservations cannot be refunded");
-    await requireOperationalBranch({ companyId, branchId, transaction });
-    assertSameBranch(reservation, branchId, "Reservation");
-
     const payments = await models.ReservationPayment.findAll({ where: { reservationId: reservation.id, companyId, status: "posted" }, transaction, lock: true });
     const refundUnits = parseMoneyUnits(refund.amount, "refund amount");
     const paidUnits = payments.reduce((sum, payment) => sum + parseMoneyUnits(payment.amount, "posted payment amount"), 0n);
@@ -1265,8 +1264,13 @@ class ReservationService {
     const reason = String(body.reason || "").trim();
     if (!reason) throw new ValidationError("Amendment reason is required");
 
-    const reservation = await models.Reservation.findOne({ where: { id: reservationId, companyId }, transaction, lock: true });
-    if (!reservation) throw new NotFoundError("Reservation not found");
+    const reservation = await requireReservationInBranch({
+      companyId,
+      branchId,
+      reservationId,
+      transaction,
+      lock: true
+    });
     if (reservation.isLegacy || Number(reservation.workflowVersion || 1) < 2) {
       throw new ConflictError("Legacy reservations cannot be amended through the new workflow");
     }
@@ -1274,10 +1278,6 @@ class ReservationService {
       throw new ConflictError("Only active reservations before completion can be amended");
     }
     if (reservation.finalInvoiceId) throw new ConflictError("Completed reservations cannot be amended");
-    if (branchId && reservation.branchId && reservation.branchId !== branchId) {
-      throw new ConflictError("Reservation belongs to another branch");
-    }
-
     const addAssetIds = Array.isArray(body.addAssetIds) ? body.addAssetIds.map((v) => String(v).trim()).filter(Boolean) : [];
     const removeItemIds = Array.isArray(body.removeItemIds) ? body.removeItemIds.map((v) => String(v).trim()).filter(Boolean) : [];
     const repriceItemIds = Array.isArray(body.repriceItemIds) ? body.repriceItemIds.map((v) => String(v).trim()).filter(Boolean) : [];
@@ -1617,11 +1617,15 @@ class ReservationService {
       }
 
       const actor = actorName(user);
-      const reservation = await models.Reservation.findOne({ where: { id: reservationId, companyId }, transaction: t, lock: true });
-      if (!reservation) throw new NotFoundError("Reservation not found");
+      const reservation = await requireReservationInBranch({
+        companyId,
+        branchId,
+        reservationId,
+        transaction: t,
+        lock: true
+      });
       if (reservation.isLegacy || Number(reservation.workflowVersion || 1) < 2) throw new ConflictError("Legacy reservations cannot be extended through the new workflow");
       if (!["active", "partially_paid", "fully_paid"].includes(reservation.status)) throw new ConflictError("Only active reservations before completion can have their expiry extended");
-      if (branchId && reservation.branchId && reservation.branchId !== branchId) throw new ConflictError("Reservation belongs to another branch");
       const reason = String(body.reason || "").trim();
       if (!reason) throw new ValidationError("Extension reason is required");
 
@@ -2214,6 +2218,13 @@ class ReservationService {
       const actor = actorName(user);
       const refund = await models.ReservationRefund.findOne({ where: { id: refundId, companyId, refundType: "renewal_excess" }, transaction: t, lock: true });
       if (!refund) throw new NotFoundError("Renewal excess refund not found");
+      await requireReservationInBranch({
+        companyId,
+        branchId,
+        reservationId: refund.reservationId,
+        transaction: t,
+        lock: true
+      });
       if (refund.status !== "requested") throw new ConflictError("Only requested renewal excess refunds can be approved");
       const now = new Date();
       await refund.update({
@@ -2270,11 +2281,16 @@ class ReservationService {
     const renewal = await models.ReservationRenewal.findOne({ where: { id: refund.renewalId, companyId }, transaction, lock: true });
     if (!renewal) throw new NotFoundError("Renewal not found");
     if (renewal.status !== "pending_excess_refund") throw new ConflictError("Renewal is not awaiting excess refund");
-    const source = await models.Reservation.findOne({ where: { id: renewal.sourceReservationId, companyId }, transaction, lock: true });
+    const source = await requireReservationInBranch({
+      companyId,
+      branchId,
+      reservationId: renewal.sourceReservationId,
+      transaction,
+      lock: true
+    });
     const successor = await models.Reservation.findOne({ where: { id: renewal.successorReservationId, companyId }, transaction, lock: true });
-    if (!source || !successor) throw new NotFoundError("Renewal reservations not found");
-    await requireOperationalBranch({ companyId, branchId, transaction });
-    assertSameBranch(source, branchId, "Reservation");
+    if (!successor) throw new NotFoundError("Renewal reservations not found");
+    assertSameBranch(successor, branchId, "Renewal successor");
 
     const now = new Date();
     const advancesAccount = await getReservationAdvancesAccount(companyId, source.branchId, transaction);
