@@ -1,5 +1,6 @@
 const { Sequelize } = require("sequelize");
 require("dotenv").config();
+const { resolveDatabaseEnv } = require("./database-env");
 
 // Postgres returns NUMERIC/DECIMAL as strings and Sequelize's postgres dialect
 // preserves that (its DECIMAL.parse returns the raw string), which makes money
@@ -17,18 +18,18 @@ try {
   /* dialect internals unavailable — frontend Number() coercion is the fallback */
 }
 
-const dbName = process.env.DB_NAME || "darfus_erp";
-const dbUser = process.env.DB_USER || "postgres";
-// Accept either DB_PASS (app convention) or DB_PASSWORD (docker-compose convention).
-const dbPass = process.env.DB_PASS || process.env.DB_PASSWORD || "postgres";
-const dbHost = process.env.DB_HOST || "localhost";
-const dbPort = process.env.DB_PORT || 5432;
+const db = resolveDatabaseEnv();
 
-const sequelize = new Sequelize(dbName, dbUser, dbPass, {
-  host: dbHost,
-  port: dbPort,
+const sequelize = db.connectionString ? new Sequelize(db.connectionString, {
   dialect: "postgres",
-  logging: process.env.NODE_ENV === "development" ? (msg) => console.log(`[Sequelize] ${msg}`) : false,
+  logging: db.environment === "development" ? (msg) => console.log(`[Sequelize] ${msg}`) : false,
+  ...(db.ssl ? { dialectOptions: { ssl: { require: true, rejectUnauthorized: false } } } : {}),
+}) : new Sequelize(db.database, db.username, db.password, {
+  host: db.host,
+  port: db.port,
+  dialect: "postgres",
+  logging: db.environment === "development" ? (msg) => console.log(`[Sequelize] ${msg}`) : false,
+  ...(db.ssl ? { dialectOptions: { ssl: { require: true, rejectUnauthorized: false } } } : {}),
   define: {
     timestamps: true,
     underscored: true,
