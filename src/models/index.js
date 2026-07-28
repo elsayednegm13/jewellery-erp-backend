@@ -84,6 +84,10 @@ const PasswordResetToken = require("./passwordResetToken.model");
 const EmailChangeToken = require("./emailChangeToken.model");
 const EmployeeCodeHistory = require("./employeeCodeHistory.model");
 const SystemAccountRole = require("./systemAccountRole.model");
+const BranchFinancialMapping = require("./branchFinancialMapping.model");
+const ReservationDepositReceiptDocument = require("./reservationDepositReceiptDocument.model");
+const ReservationDepositReceiptSequence = require("./reservationDepositReceiptSequence.model");
+const FirstRunSetupState = require("./firstRunSetupState.model");
 
 // Define Associations
 
@@ -200,6 +204,12 @@ Company.hasMany(SystemAccountRole, { foreignKey: "companyId", as: "systemAccount
 SystemAccountRole.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 Account.hasMany(SystemAccountRole, { foreignKey: "accountId", as: "systemRoles" });
 SystemAccountRole.belongsTo(Account, { foreignKey: "accountId", as: "account" });
+Company.hasMany(BranchFinancialMapping, { foreignKey: "companyId", as: "branchFinancialMappings" });
+BranchFinancialMapping.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(BranchFinancialMapping, { foreignKey: "branchId", as: "financialMappings" });
+BranchFinancialMapping.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+Account.hasMany(BranchFinancialMapping, { foreignKey: "accountId", as: "branchFinancialMappings" });
+BranchFinancialMapping.belongsTo(Account, { foreignKey: "accountId", as: "account" });
 Company.hasOne(AccountingLock, { foreignKey: "companyId", as: "accountingLock" });
 AccountingLock.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
@@ -391,7 +401,11 @@ Asset.hasMany(ReservationItem, { foreignKey: "assetId", as: "reservationItems" }
 ReservationItem.belongsTo(Asset, { foreignKey: "assetId", as: "asset" });
 ReservationPayment.belongsTo(JournalEntry, { foreignKey: "journalEntryId", as: "journalEntry" });
 JournalEntry.hasOne(ReservationPayment, { foreignKey: "journalEntryId", as: "reservationPayment" });
-ReservationPayment.hasOne(ReservationPaymentApplication, { foreignKey: "reservationPaymentId", as: "application" });
+ReservationPayment.belongsTo(CashTransaction, { foreignKey: "cashTransactionId", as: "cashTransaction" });
+ReservationPayment.belongsTo(CashRegisterSession, { foreignKey: "cashRegisterSessionId", as: "cashRegisterSession" });
+// A receipt can be settled in several bounded applications.  The subledger,
+// rather than mutation of the original payment row, is the authority.
+ReservationPayment.hasMany(ReservationPaymentApplication, { foreignKey: "reservationPaymentId", as: "applications" });
 ReservationPaymentApplication.belongsTo(ReservationPayment, { foreignKey: "reservationPaymentId", as: "reservationPayment" });
 Invoice.hasOne(Reservation, { foreignKey: "finalInvoiceId", as: "completedReservation" });
 Reservation.belongsTo(Invoice, { foreignKey: "finalInvoiceId", as: "finalInvoice" });
@@ -399,6 +413,18 @@ ReservationRefund.hasMany(ReservationRefundAllocation, { foreignKey: "reservatio
 ReservationRefundAllocation.belongsTo(ReservationRefund, { foreignKey: "reservationRefundId", as: "refund" });
 ReservationPayment.hasMany(ReservationRefundAllocation, { foreignKey: "reservationPaymentId", as: "refundAllocations" });
 ReservationRefundAllocation.belongsTo(ReservationPayment, { foreignKey: "reservationPaymentId", as: "reservationPayment" });
+ReservationPayment.hasOne(ReservationDepositReceiptDocument, { foreignKey: "reservationPaymentId", as: "depositReceipt" });
+ReservationDepositReceiptDocument.belongsTo(ReservationPayment, { foreignKey: "reservationPaymentId", as: "reservationPayment" });
+Reservation.hasMany(ReservationDepositReceiptDocument, { foreignKey: "reservationId", as: "depositReceipts" });
+ReservationDepositReceiptDocument.belongsTo(Reservation, { foreignKey: "reservationId", as: "reservation" });
+Company.hasMany(ReservationDepositReceiptDocument, { foreignKey: "companyId", as: "reservationDepositReceipts" });
+ReservationDepositReceiptDocument.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(ReservationDepositReceiptDocument, { foreignKey: "branchId", as: "reservationDepositReceipts" });
+ReservationDepositReceiptDocument.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+Customer.hasMany(ReservationDepositReceiptDocument, { foreignKey: "customerId", as: "reservationDepositReceipts" });
+ReservationDepositReceiptDocument.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
+Employee.hasMany(ReservationDepositReceiptDocument, { foreignKey: "employeeId", as: "reservationDepositReceipts" });
+ReservationDepositReceiptDocument.belongsTo(Employee, { foreignKey: "employeeId", as: "employee" });
 ReservationRefund.belongsTo(JournalEntry, { foreignKey: "journalEntryId", as: "journalEntry" });
 JournalEntry.hasOne(ReservationRefund, { foreignKey: "journalEntryId", as: "reservationRefund" });
 
@@ -583,5 +609,9 @@ module.exports = {
   PasswordResetToken,
   EmailChangeToken,
   EmployeeCodeHistory,
-  SystemAccountRole
+  SystemAccountRole,
+  BranchFinancialMapping,
+  ReservationDepositReceiptDocument,
+  ReservationDepositReceiptSequence,
+  FirstRunSetupState
 };

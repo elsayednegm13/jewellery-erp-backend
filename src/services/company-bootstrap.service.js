@@ -5,6 +5,23 @@ const { AppError } = require("../utils/errors");
 
 const SYSTEM_ACCOUNT_ROLES = Object.freeze({
   CUSTOMER_DEPOSIT_LIABILITY: "CUSTOMER_DEPOSIT_LIABILITY",
+  ACCOUNTS_RECEIVABLE: "ACCOUNTS_RECEIVABLE",
+  SALES_REVENUE: "SALES_REVENUE",
+  VAT_PAYABLE: "VAT_PAYABLE",
+  INVENTORY_ASSET: "INVENTORY_ASSET",
+  COST_OF_GOODS_SOLD: "COST_OF_GOODS_SOLD",
+});
+
+// Complete-sale posting must resolve these roles before it creates an Invoice
+// or any financial side effect.  They deliberately use the existing,
+// branch-scoped system_account_roles contract rather than company chart codes.
+const FINAL_SALE_ROLE_DEFINITIONS = Object.freeze({
+  accountsReceivable: { roleCode: SYSTEM_ACCOUNT_ROLES.ACCOUNTS_RECEIVABLE, type: "asset", nature: "debit" },
+  salesRevenue: { roleCode: SYSTEM_ACCOUNT_ROLES.SALES_REVENUE, type: "revenue", nature: "credit" },
+  vatPayable: { roleCode: SYSTEM_ACCOUNT_ROLES.VAT_PAYABLE, type: "liability", nature: "credit" },
+  inventoryAsset: { roleCode: SYSTEM_ACCOUNT_ROLES.INVENTORY_ASSET, type: "asset", nature: "debit" },
+  costOfGoodsSold: { roleCode: SYSTEM_ACCOUNT_ROLES.COST_OF_GOODS_SOLD, type: "expense", nature: "debit" },
+  reservationAdvanceLiability: { roleCode: SYSTEM_ACCOUNT_ROLES.CUSTOMER_DEPOSIT_LIABILITY, type: "liability", nature: "credit" },
 });
 
 function roleError(code, ar, en) {
@@ -42,6 +59,49 @@ async function resolveSystemAccountRole(companyId, branchId, roleCode, transacti
   if (rows.length !== 1) throw roleError("CUSTOMER_DEPOSIT_ROLE_DUPLICATE", "تم العثور على أكثر من ربط لحساب دفعات العملاء للفرع.", "More than one customer-deposit mapping was found for the branch.");
   if (roleCode !== SYSTEM_ACCOUNT_ROLES.CUSTOMER_DEPOSIT_LIABILITY) throw new AppError("Unsupported system account role.", 422, "SYSTEM_ACCOUNT_ROLE_UNSUPPORTED");
   return assertDepositAccount(companyId, branchId, rows[0].accountId, transaction);
+}
+
+function finalSaleRoleError(code, message) {
+  return new AppError(message, 422, code);
+}
+
+async function resolveRequiredFinalSaleAccounts(companyId, branchId, transaction, { accountingByKarat = false } = {}) {
+  if (!companyId || !branchId) {
+    throw finalSaleRoleError("BRANCH_FINANCIAL_MAPPING_REQUIRED", "Complete-sale requires explicit company and operational branch financial mappings.");
+  }
+  if (accountingByKarat) {
+    throw finalSaleRoleError("FINAL_SALE_ACCOUNTING_BY_KARAT_NOT_CONFIGURED", "Per-karat Complete-sale accounting requires explicitly configured branch role mappings.");
+  }
+  const branch = await models.Branch.findOne({
+    where: { id: branchId, companyId, isActive: true }, transaction,
+    lock: transaction ? transaction.LOCK.UPDATE : undefined,
+  });
+  if (!branch) throw finalSaleRoleError("BRANCH_FINANCIAL_ACCOUNT_SCOPE_INVALID", "The Complete-sale operational branch is invalid.");
+
+  const resolved = {};
+  for (const [key, definition] of Object.entries(FINAL_SALE_ROLE_DEFINITIONS)) {
+    const rows = await findRoleRows(companyId, branchId, definition.roleCode, transaction);
+    if (rows.length === 0) {
+      throw finalSaleRoleError("BRANCH_FINANCIAL_MAPPING_REQUIRED", `Complete-sale requires an explicit ${definition.roleCode} branch mapping.`);
+    }
+    if (rows.length !== 1) {
+      throw finalSaleRoleError("BRANCH_FINANCIAL_MAPPING_AMBIGUOUS", `Complete-sale ${definition.roleCode} branch mapping is ambiguous.`);
+    }
+    const account = await models.Account.findByPk(rows[0].accountId, {
+      transaction,
+      lock: transaction ? transaction.LOCK.UPDATE : undefined,
+    });
+    if (!account) throw finalSaleRoleError("BRANCH_FINANCIAL_ACCOUNT_NOT_FOUND", "The mapped Complete-sale account was not found.");
+    if (String(account.companyId) !== String(companyId) || String(account.branchId) !== String(branchId)) {
+      throw finalSaleRoleError("BRANCH_FINANCIAL_ACCOUNT_SCOPE_INVALID", "The mapped Complete-sale account is outside the effective branch scope.");
+    }
+    if (!account.isActive) throw finalSaleRoleError("BRANCH_FINANCIAL_ACCOUNT_INACTIVE", "The mapped Complete-sale account is inactive.");
+    if (account.type !== definition.type || account.nature !== definition.nature) {
+      throw finalSaleRoleError("BRANCH_FINANCIAL_ACCOUNT_ROLE_INVALID", "The mapped Complete-sale account is not eligible for its financial role.");
+    }
+    resolved[key] = account;
+  }
+  return resolved;
 }
 
 async function legacyRole(companyId, roleCode, transaction) {
@@ -113,4 +173,12 @@ async function branchReadinessReport(companyId) {
   return { companyId, branches: records, historical, classification: "AMBIGUOUS_MANUAL_REVIEW" };
 }
 
-module.exports = { SYSTEM_ACCOUNT_ROLES, bootstrapBranchAccounts, resolveSystemAccountRole, branchReadiness, branchReadinessReport };
+module.exports = {
+  SYSTEM_ACCOUNT_ROLES,
+  FINAL_SALE_ROLE_DEFINITIONS,
+  bootstrapBranchAccounts,
+  resolveSystemAccountRole,
+  resolveRequiredFinalSaleAccounts,
+  branchReadiness,
+  branchReadinessReport,
+};

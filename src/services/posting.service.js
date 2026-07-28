@@ -290,7 +290,21 @@ class PostingService {
 
       let i = 0;
       for (const line of lines) {
-        const account = await this.ensureAccount(companyId, line.accountCode, t);
+        // Explicit role-resolved accounts are mandatory for strict flows such
+        // as Complete-sale.  Legacy posting callers continue to use the
+        // canonical-chart setup path until they are independently migrated.
+        const account = line.accountId
+          ? await Account.findOne({
+            where: {
+              id: line.accountId,
+              companyId,
+              ...(opts.branchId ? { branchId: opts.branchId } : {}),
+              isActive: true,
+            },
+            transaction: t,
+          })
+          : await this.ensureAccount(companyId, line.accountCode, t);
+        if (!account) throw new Error("Explicit posting account is inactive or outside the operational branch.");
         const debit = round(line.debit);
         const credit = round(line.credit);
 
@@ -345,6 +359,35 @@ class PostingService {
     const tax = round(invoice.tax);
     const subtotal = round(invoice.subtotal != null ? invoice.subtotal : total - tax);
     const cost = round(items.reduce((s, it) => s + (Number(it.cost) || 0) * (Number(it.quantity) || 1), 0));
+
+    // Reservation Complete-sale supplies all roles from the strict branch
+    // resolver.  It therefore cannot reach ensureAccount or a company-code
+    // fallback while posting the Invoice and its COGS entry.
+    if (opts.finalSaleAccounts) {
+      const roles = opts.finalSaleAccounts;
+      const required = ["accountsReceivable", "salesRevenue", "vatPayable", "inventoryAsset", "costOfGoodsSold"];
+      if (required.some((key) => !roles[key]?.id)) throw new Error("Complete-sale posting requires explicit branch financial roles.");
+      const byKarat = await this.resolveAccountingByKarat(companyId, opts);
+      if (byKarat) throw new Error("Per-karat Complete-sale posting requires explicit branch role mappings.");
+      const lines = [
+        { accountId: roles.accountsReceivable.id, debit: total, credit: 0, description: `فاتورة ${invoice.id}` },
+        { accountId: roles.salesRevenue.id, debit: 0, credit: subtotal, description: "إيراد مبيعات" },
+      ];
+      if (tax > 0) lines.push({ accountId: roles.vatPayable.id, debit: 0, credit: tax, description: "ضريبة القيمة المضافة" });
+      if (cost > 0) {
+        lines.push({ accountId: roles.costOfGoodsSold.id, debit: cost, credit: 0, description: "تكلفة البضاعة المباعة" });
+        lines.push({ accountId: roles.inventoryAsset.id, debit: 0, credit: cost, description: "تخفيض المخزون" });
+      }
+      return this.postEntry(companyId, {
+        description: `قيد بيع — فاتورة ${invoice.id} (${invoice.customerName || "عميل"})`,
+        date: (invoice.date || "").slice(0, 10) || undefined,
+        sourceType: "invoice",
+        sourceId: invoice.id,
+        postedBy,
+        transaction: opts.transaction,
+        branchId: invoice.branchId || opts.branchId,
+      }, lines);
+    }
 
     // Choose the debit-side account from payment method / status.
     const method = String(invoice.paymentMethod || "").toLowerCase();
@@ -612,7 +655,8 @@ class PostingService {
     const companyId = reservation.companyId;
     const amt = round(amount);
     const advancesAccountCode = opts.advancesAccountCode;
-    if (!advancesAccountCode) throw new Error("Reservation advances account is not configured");
+    if (!advancesAccountCode && !opts.advancesAccountId) throw new Error("Reservation advances account is not configured");
+    if (opts.advancesAccountId && !opts.receivableAccountId) throw new Error("Reservation settlement receivable account is not configured");
 
     return this.postEntry(
       companyId,
@@ -626,8 +670,12 @@ class PostingService {
         branchId: reservation.branchId || opts.branchId
       },
       [
-        { accountCode: advancesAccountCode, debit: amt, credit: 0, description: `تسوية التزام دفعات حجز ${reservation.id}` },
-        { accountCode: "1300", debit: 0, credit: amt, description: `تسوية ذمم فاتورة حجز ${opts.invoiceId || reservation.finalInvoiceId || ""}` },
+        opts.advancesAccountId
+          ? { accountId: opts.advancesAccountId, debit: amt, credit: 0, description: `تسوية التزام دفعات حجز ${reservation.id}` }
+          : { accountCode: advancesAccountCode, debit: amt, credit: 0, description: `تسوية التزام دفعات حجز ${reservation.id}` },
+        opts.receivableAccountId
+          ? { accountId: opts.receivableAccountId, debit: 0, credit: amt, description: `تسوية ذمم فاتورة حجز ${opts.invoiceId || reservation.finalInvoiceId || ""}` }
+          : { accountCode: "1300", debit: 0, credit: amt, description: `تسوية ذمم فاتورة حجز ${opts.invoiceId || reservation.finalInvoiceId || ""}` },
       ]
     );
   }

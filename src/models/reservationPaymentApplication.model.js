@@ -10,7 +10,8 @@ const ReservationPaymentApplication = sequelize.define("ReservationPaymentApplic
   appliedAmount: { type: DataTypes.DECIMAL(20, 8), allowNull: false, field: "applied_amount" },
   appliedAt: { type: DataTypes.DATE, allowNull: false, field: "applied_at" },
   appliedBy: { type: DataTypes.STRING, allowNull: true, field: "applied_by" },
-  sourceReference: { type: DataTypes.STRING, allowNull: true, field: "source_reference" }
+  sourceReference: { type: DataTypes.STRING, allowNull: true, field: "source_reference" },
+  idempotencyKey: { type: DataTypes.STRING, allowNull: true, field: "idempotency_key" }
 }, {
   tableName: "reservation_payment_applications",
   timestamps: true,

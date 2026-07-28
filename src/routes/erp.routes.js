@@ -21,6 +21,8 @@ const idempotencyService = require("../services/idempotency.service");
 const customerCreditService = require("../services/customer-credit.service");
 const barcodeIdentityService = require("../services/barcode-identity.service");
 const reservationService = require("../services/reservation.service");
+const reservationDepositReceiptService = require("../services/reservation-deposit-receipt.service");
+const reservationDepositSettingsService = require("../services/reservation-deposit-settings.service");
 const permissionService = require("../services/permission.service");
 const employeeAuthorizationService = require("../services/employee-authorization.service");
 const commandActorContext = require("../services/command-actor-context.service");
@@ -43,6 +45,7 @@ const allowAuthenticated = (req, res, next) => next();
 
 const reservationPerms = {
   view: ["reservations.view", "reservations.view_all", "reservations.view_branch", "reservations.view_own", "sales.view"],
+  viewReceipts: "reservations.view_receipts",
   create: ["reservations.create", "sales.create"],
   recordPayment: ["reservations.record_payment", "sales.create"],
   completeSale: ["reservations.complete_sale", "sales.create"],
@@ -84,6 +87,32 @@ router.post("/bootstrap/branch-accounts", authMiddleware, requirePermission("set
 router.get("/readiness/branches", authMiddleware, requirePermission("settings.update"), async (req, res, next) => {
   try {
     return res.status(200).json({ success: true, data: await companyBootstrapService.branchReadinessReport(req.companyId) });
+  } catch (error) { return next(error); }
+});
+
+// Branch-only reservation-deposit configuration. Account IDs are validated on
+// the server against the selected operational branch; no code/treasury value
+// supplied by a client is ever treated as financial authority.
+router.get("/branch-settings/reservation-deposit", authMiddleware, requireAnyBusinessPermission(["settings.update"], { touch: true, operation: "reservation_deposit.settings_read" }), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.headers["x-branch-id"], { required: true });
+    return res.status(200).json({ success: true, data: await reservationDepositSettingsService.read({ companyId: req.companyId, branchId }) });
+  } catch (error) { return next(error); }
+});
+
+router.put("/branch-settings/reservation-deposit", authMiddleware, requireAnyBusinessPermission(["settings.update"], { touch: true, operation: "reservation_deposit.settings_write" }), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const data = await reservationDepositSettingsService.save({
+      companyId: req.companyId, branchId, body: req.body || {},
+      actor: req.user?.id || req.user?.email || "System"
+    });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
+      action: "reservation_deposit.branch_settings_updated",
+      description: `Branch reservation deposit settings updated for ${branchId}`,
+      metadata: { branchId }
+    }));
+    return res.status(200).json({ success: true, data });
   } catch (error) { return next(error); }
 });
 
@@ -5068,6 +5097,59 @@ router.get("/reservations", authMiddleware, requireAnyBusinessPermission(reserva
   }
 });
 
+// Receipt reads are deliberately separate from reservation mutation.  Every
+// lookup is bound to the authenticated company and one authorized branch, and
+// receipt data comes only from the immutable server-created snapshot.
+router.get("/reservation-deposit-receipts/number/:receiptNumber", authMiddleware, requireBusinessPermission(reservationPerms.viewReceipts), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"] || req.query.branchId, { required: true });
+    const receipt = await reservationDepositReceiptService.readByNumber({
+      companyId: req.companyId,
+      branchId,
+      receiptNumber: req.params.receiptNumber
+    });
+    return res.status(200).json({ success: true, data: receipt });
+  } catch (error) { return next(error); }
+});
+
+router.get("/reservation-deposit-receipts/:receiptId", authMiddleware, requireBusinessPermission(reservationPerms.viewReceipts), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"] || req.query.branchId, { required: true });
+    const receipt = await reservationDepositReceiptService.readById({
+      companyId: req.companyId,
+      branchId,
+      receiptId: req.params.receiptId
+    });
+    return res.status(200).json({ success: true, data: receipt });
+  } catch (error) { return next(error); }
+});
+
+router.get("/reservation-payments/:paymentId/deposit-receipt", authMiddleware, requireBusinessPermission(reservationPerms.viewReceipts), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"] || req.query.branchId, { required: true });
+    const receipt = await reservationDepositReceiptService.readByPaymentId({
+      companyId: req.companyId,
+      branchId,
+      paymentId: req.params.paymentId
+    });
+    return res.status(200).json({ success: true, data: receipt });
+  } catch (error) { return next(error); }
+});
+
+router.get("/reservations/:id/deposit-receipts", authMiddleware, requireBusinessPermission(reservationPerms.viewReceipts), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"] || req.query.branchId, { required: true });
+    const result = await reservationDepositReceiptService.history({
+      companyId: req.companyId,
+      branchId,
+      reservationId: req.params.id,
+      page: req.query.page,
+      pageSize: req.query.limit
+    });
+    return res.status(200).json({ success: true, ...result, data: result.items });
+  } catch (error) { return next(error); }
+});
+
 router.get("/reservations/:id", authMiddleware, requireAnyBusinessPermission(reservationPerms.view), async (req, res, next) => {
   try {
     const reservation = await reservationService.getById({ companyId: req.companyId, id: req.params.id, user: req.user, branchId: req.branchId });
@@ -5126,12 +5208,20 @@ router.post("/reservations", authMiddleware, requireAnyBusinessPermission(reserv
 router.post("/reservations/:id/payments", authMiddleware, requireAnyBusinessPermission(reservationPerms.recordPayment, { touch: true }), async (req, res, next) => {
   try {
     const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
+    const operationBranchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const body = {
+      ...(req.body || {}),
+      // A browser cannot choose the receipt operator identity.  Branch-shell
+      // sessions have a verified operator context; company users may use only
+      // their server-owned default Employee reference.
+      receivedEmployeeId: req.operatorContext?.employeeId || req.user?.defaultEmployeeId || null
+    };
     const result = await reservationService.addPayment({
       companyId: req.companyId,
-      branchId: req.branchId || req.body?.branchId || null,
+      branchId: operationBranchId,
       user: req.user,
       reservationId: req.params.id,
-      body: req.body || {},
+      body,
       idempotencyKey
     });
     emitEntityChanged(req.companyId, { entity: "Reservation", action: "update", id: req.params.id });
@@ -5144,9 +5234,10 @@ router.post("/reservations/:id/payments", authMiddleware, requireAnyBusinessPerm
 router.post("/reservations/:id/complete-sale", authMiddleware, requireAnyBusinessPermission(reservationPerms.completeSale, { touch: true }), async (req, res, next) => {
   try {
     const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
+    const operationBranchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
     const result = await reservationService.completeSale({
       companyId: req.companyId,
-      branchId: req.branchId || req.body?.branchId || null,
+      branchId: operationBranchId,
       user: req.user,
       reservationId: req.params.id,
       body: req.body || {},
@@ -5177,12 +5268,14 @@ router.post("/reservations/:id/cancel", authMiddleware, requireAnyBusinessPermis
 
 router.post("/reservations/:id/refunds", authMiddleware, requireAnyBusinessPermission(reservationPerms.refundRequest, { touch: true }), async (req, res, next) => {
   try {
+    const operationBranchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
     const result = await reservationService.requestRefund({
       companyId: req.companyId,
-      branchId: req.branchId || req.body?.branchId || null,
+      branchId: operationBranchId,
       user: req.user,
       reservationId: req.params.id,
-      body: req.body || {}
+      body: req.body || {},
+      idempotencyKey: req.headers["idempotency-key"] || req.body?.idempotencyKey
     });
     emitEntityChanged(req.companyId, { entity: "Reservation", action: "refund-request", id: req.params.id });
     return res.status(result.statusCode).json(result.responseBody);
@@ -5191,11 +5284,12 @@ router.post("/reservations/:id/refunds", authMiddleware, requireAnyBusinessPermi
   }
 });
 
-router.post("/reservation-refunds/:id/approve", authMiddleware, requireAnyPermission(reservationPerms.refundApprove), async (req, res, next) => {
+router.post("/reservation-refunds/:id/approve", authMiddleware, requireAnyBusinessPermission(reservationPerms.refundApprove, { touch: true }), async (req, res, next) => {
   try {
+    const operationBranchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
     const result = await reservationService.approveRefund({
       companyId: req.companyId,
-      branchId: req.branchId || req.body?.branchId || null,
+      branchId: operationBranchId,
       user: req.user,
       refundId: req.params.id,
       body: req.body || {}
@@ -5207,11 +5301,12 @@ router.post("/reservation-refunds/:id/approve", authMiddleware, requireAnyPermis
   }
 });
 
-router.post("/reservation-refunds/:id/reject", authMiddleware, requireAnyPermission(reservationPerms.refundReject), async (req, res, next) => {
+router.post("/reservation-refunds/:id/reject", authMiddleware, requireAnyBusinessPermission(reservationPerms.refundReject, { touch: true }), async (req, res, next) => {
   try {
+    const operationBranchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
     const result = await reservationService.rejectRefund({
       companyId: req.companyId,
-      branchId: req.branchId || req.body?.branchId || null,
+      branchId: operationBranchId,
       user: req.user,
       refundId: req.params.id,
       body: req.body || {}
@@ -5223,12 +5318,13 @@ router.post("/reservation-refunds/:id/reject", authMiddleware, requireAnyPermiss
   }
 });
 
-router.post("/reservation-refunds/:id/execute", authMiddleware, requireAnyPermission(reservationPerms.refundExecute), async (req, res, next) => {
+router.post("/reservation-refunds/:id/execute", authMiddleware, requireAnyBusinessPermission(reservationPerms.refundExecute, { touch: true }), async (req, res, next) => {
   try {
     const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
+    const operationBranchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
     const result = await reservationService.executeRefund({
       companyId: req.companyId,
-      branchId: req.branchId || req.body?.branchId || null,
+      branchId: operationBranchId,
       user: req.user,
       refundId: req.params.id,
       body: req.body || {},
@@ -5361,11 +5457,12 @@ router.get("/reservations/:id/renewal", authMiddleware, requireAnyPermission(res
   }
 });
 
-router.post("/reservation-renewal-refunds/:id/approve", authMiddleware, requireAnyPermission(reservationPerms.refundApprove), async (req, res, next) => {
+router.post("/reservation-renewal-refunds/:id/approve", authMiddleware, requireAnyBusinessPermission(reservationPerms.refundApprove, { touch: true }), async (req, res, next) => {
   try {
+    const operationBranchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
     const result = await reservationService.approveRenewalExcessRefund({
       companyId: req.companyId,
-      branchId: req.branchId || req.body?.branchId || null,
+      branchId: operationBranchId,
       user: req.user,
       refundId: req.params.id,
       body: req.body || {}
@@ -5377,12 +5474,13 @@ router.post("/reservation-renewal-refunds/:id/approve", authMiddleware, requireA
   }
 });
 
-router.post("/reservation-renewal-refunds/:id/execute", authMiddleware, requireAnyPermission(reservationPerms.refundExecute), async (req, res, next) => {
+router.post("/reservation-renewal-refunds/:id/execute", authMiddleware, requireAnyBusinessPermission(reservationPerms.refundExecute, { touch: true }), async (req, res, next) => {
   try {
     const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
+    const operationBranchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
     const result = await reservationService.executeRenewalExcessRefund({
       companyId: req.companyId,
-      branchId: req.branchId || req.body?.branchId || null,
+      branchId: operationBranchId,
       user: req.user,
       refundId: req.params.id,
       body: req.body || {},

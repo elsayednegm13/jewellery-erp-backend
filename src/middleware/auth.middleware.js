@@ -8,10 +8,8 @@ const models = require("../models");
 
 const { JWT_SECRET } = require("../config/security");
 
-/**
- * Authentication middleware to verify bearer tokens
- */
-const authMiddleware = async (req, res, next) => {
+function createAuthMiddleware({ requireSuperAdminCompanyContext = true } = {}) {
+  return async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -40,7 +38,10 @@ const authMiddleware = async (req, res, next) => {
     const accountType = user.accountType || "legacy";
     const headerCompanyId = req.headers["x-company-id"] ? String(req.headers["x-company-id"]) : null;
     const headerBranchId = req.headers["x-branch-id"] ? String(req.headers["x-branch-id"]) : null;
-    req.companyId = user.companyId || "CMP-DEMO";
+    // A Super Admin is a technical account, not an implicit company-scoped
+    // financial operator. Operational routes must receive an explicit company
+    // selection; context-free authentication routes opt out explicitly below.
+    req.companyId = accountType === "super_admin" ? null : (user.companyId || "CMP-DEMO");
     req.branchId = user.branchId || null;
 
     const COMPANY_LEVEL_PREFIXES = [
@@ -54,12 +55,19 @@ const authMiddleware = async (req, res, next) => {
     const isCompanyLevel = COMPANY_LEVEL_PREFIXES.some(prefix => req.path.startsWith(prefix));
 
     if (accountType === "super_admin") {
+      if (!headerCompanyId && requireSuperAdminCompanyContext) {
+        throw new AppError("A company selection is required for Super Admin operations.", 422, "SUPER_ADMIN_COMPANY_CONTEXT_REQUIRED");
+      }
       if (headerCompanyId) {
         const company = await models.Company.findByPk(headerCompanyId);
         if (!company) {
           throw new AppError("Selected company is invalid.", 403, "COMPANY_SCOPE_INVALID");
         }
         req.companyId = headerCompanyId;
+      } else if (!requireSuperAdminCompanyContext) {
+        // Authentication-only routes preserve their existing technical account
+        // context; they are not operational or financial entry points.
+        req.companyId = user.companyId || "CMP-DEMO";
       }
     } else if (headerCompanyId && String(headerCompanyId) !== String(user.companyId)) {
       throw new AppError("Selected company is outside this account scope.", 403, "COMPANY_SCOPE_FORBIDDEN");
@@ -108,7 +116,19 @@ const authMiddleware = async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-};
+  };
+}
+
+/**
+ * Authentication middleware for operational and financial routes.
+ */
+const authMiddleware = createAuthMiddleware();
+
+/**
+ * Authentication-only routes may identify or end a technical session without a
+ * selected operating company. Do not use this for business routes.
+ */
+const authMiddlewareWithoutCompanyContext = createAuthMiddleware({ requireSuperAdminCompanyContext: false });
 
 /**
  * Role authorization guard
@@ -163,6 +183,7 @@ const requireAnyPermission = (permissionNames) => {
 
 module.exports = {
   authMiddleware,
+  authMiddlewareWithoutCompanyContext,
   requireRole,
   requirePermission,
   requireAnyPermission

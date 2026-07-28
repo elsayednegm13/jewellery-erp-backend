@@ -1,7 +1,7 @@
 const { Permission, Role, RolePermission, UserRole } = require("../models");
 const { PERMISSIONS, ROLE_DEFS } = require("./permission-baseline-v1");
 
-async function ensurePermissions() {
+async function ensurePermissions({ transaction } = {}) {
   const rows = [];
   for (const name of PERMISSIONS) {
     const parts = name.split(".");
@@ -9,11 +9,11 @@ async function ensurePermissions() {
     const moduleName = parts.join(".");
     rows.push({ id: `PERM-${name}`, name, module: moduleName, action, description: name });
   }
-  await Permission.bulkCreate(rows, { ignoreDuplicates: true });
+  await Permission.bulkCreate(rows, { ignoreDuplicates: true, transaction });
 }
 
-async function ensureRolesForCompany(companyId) {
-  await ensurePermissions();
+async function ensureRolesForCompany(companyId, { transaction } = {}) {
+  await ensurePermissions({ transaction });
   for (const [slug, permissionNames] of Object.entries(ROLE_DEFS)) {
     const [role] = await Role.findOrCreate({
       where: { companyId, slug },
@@ -24,21 +24,22 @@ async function ensureRolesForCompany(companyId) {
         description: `${slug} role`,
         isSystem: true,
         isAdmin: slug === "admin" || slug === "owner"
-      }
+      },
+      transaction
     });
-    const permissions = await Permission.findAll({ where: { name: permissionNames } });
+    const permissions = await Permission.findAll({ where: { name: permissionNames }, transaction });
     await RolePermission.bulkCreate(
       permissions.map((permission) => ({ roleId: role.id, permissionId: permission.id })),
-      { ignoreDuplicates: true }
+      { ignoreDuplicates: true, transaction }
     );
   }
 }
 
-async function assignUserRole(userId, companyId, slug) {
-  await ensureRolesForCompany(companyId);
-  const role = await Role.findOne({ where: { companyId, slug } });
+async function assignUserRole(userId, companyId, slug, { transaction } = {}) {
+  await ensureRolesForCompany(companyId, { transaction });
+  const role = await Role.findOne({ where: { companyId, slug }, transaction });
   if (!role) return null;
-  await UserRole.findOrCreate({ where: { userId, roleId: role.id } });
+  await UserRole.findOrCreate({ where: { userId, roleId: role.id }, transaction });
   return role;
 }
 

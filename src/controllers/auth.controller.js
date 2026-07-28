@@ -9,6 +9,7 @@ const technicalSessions = require("../services/technical-session.service");
 const localRecoveryDelivery = require("../services/local-recovery-delivery.service");
 const auditService = require("../services/audit.service");
 const { validatePasswordPolicy } = require("../utils/password-policy");
+const { listAccessibleCompanies } = require("../services/accessible-company-bootstrap.service");
 
 const DUMMY_BCRYPT_HASH = "$2a$10$7EqJtq98hPqEX7fNZaFWoOhiHNO7Q8NOq8B4EGKGU9Yh/8q0LJcMK";
 const MAX_LOGIN_FAILURES = 5;
@@ -233,6 +234,17 @@ class AuthController {
           company: serializeCompany(company)
         }
       });
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  accessibleCompanies = async (req, res, next) => {
+    try {
+      const companies = await listAccessibleCompanies({ Company, user: req.user });
+      // This authentication bootstrap endpoint intentionally has no selected
+      // Company side effect. The client must validate and explicitly select.
+      return res.status(200).json({ success: true, data: { items: companies } });
     } catch (error) {
       next(error);
     }

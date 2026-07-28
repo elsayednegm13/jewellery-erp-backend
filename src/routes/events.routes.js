@@ -1,5 +1,6 @@
 const express = require("express");
 const { authMiddleware } = require("../middleware/auth.middleware");
+const { UnauthorizedError } = require("../utils/errors");
 const eventsService = require("../services/events.service");
 const technicalSessions = require("../services/technical-session.service");
 
@@ -8,9 +9,9 @@ const router = express.Router();
 /**
  * GET /events/stream with the normal protected-route technical-session checks.
  */
-router.get("/stream", authMiddleware, async (req, res) => {
+router.get("/stream", authMiddleware, async (req, res, next) => {
   const companyId = req.companyId || req.user?.companyId;
-  if (!companyId) return res.status(401).end();
+  if (!companyId) return next(new UnauthorizedError());
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream",

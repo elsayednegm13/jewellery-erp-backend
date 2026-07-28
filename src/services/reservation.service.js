@@ -6,7 +6,9 @@ const idempotencyService = require("./idempotency.service");
 const settingsService = require("./settings.service");
 const permissionService = require("./permission.service");
 const notificationService = require("./notification.service");
-const { SYSTEM_ACCOUNT_ROLES, resolveSystemAccountRole } = require("./company-bootstrap.service");
+const { SYSTEM_ACCOUNT_ROLES, resolveSystemAccountRole, resolveRequiredFinalSaleAccounts } = require("./company-bootstrap.service");
+const reservationFinancialResolver = require("./reservation-financial-resolver.service");
+const depositReceiptService = require("./reservation-deposit-receipt.service");
 const { requireOperationalBranch, assertBranchCustomer, assertSameBranch } = require("./branch-isolation.service");
 const { AppError, ValidationError, NotFoundError, ConflictError } = require("../utils/errors");
 
@@ -64,13 +66,17 @@ async function reservationVisibilityWhere(companyId, user, branchId) {
 }
 
 async function requireReservationInBranch({ companyId, branchId, reservationId, transaction = null, lock = false }) {
-  const branch = await requireOperationalBranch({ companyId, branchId, transaction });
   const reservation = await models.Reservation.findOne({
-    where: { id: reservationId, companyId, branchId: branch.id },
+    where: { id: reservationId, companyId },
     transaction,
     lock: lock && transaction ? transaction.LOCK.UPDATE : undefined,
   });
   if (!reservation) throw new NotFoundError("Reservation not found");
+  if (!reservation.branchId) {
+    throw new AppError("Branchless legacy reservations require manual review.", 409, "LEGACY_BRANCHLESS_RESERVATION_MANUAL_REVIEW");
+  }
+  const branch = await requireOperationalBranch({ companyId, branchId, transaction });
+  if (String(reservation.branchId) !== String(branch.id)) throw new NotFoundError("Reservation not found");
   return reservation;
 }
 
@@ -275,9 +281,9 @@ function currentAssetPriceUnits(asset) {
   return units;
 }
 
-// Per-payment transferable/refundable availability for a renewal source
-// reservation: posted payment value that has not already been transferred out
-// or refunded. Original payment rows are never mutated; the transfer and refund
+// Per-payment transferable/refundable availability for a reservation: posted
+// payment value that has not already been transferred out, applied, or refunded.
+// Original payment rows are never mutated; the transfer, application, and refund
 // subledgers are the source of truth.
 async function sourcePaymentAvailability(reservationId, companyId, transaction) {
   const payments = await models.ReservationPayment.findAll({
@@ -299,7 +305,11 @@ async function sourcePaymentAvailability(reservationId, companyId, transaction) 
       transaction
     });
     const refundedUnits = allocations.reduce((sum, a) => sum + parseMoneyUnits(a.allocatedAmount, "allocated amount"), 0n);
-    const remaining = paidUnits - transferredUnits - refundedUnits;
+    const applications = await models.ReservationPaymentApplication.findAll({
+      where: { reservationPaymentId: payment.id, companyId }, transaction, lock: true
+    });
+    const appliedUnits = applications.reduce((sum, a) => sum + parseMoneyUnits(a.appliedAmount, "applied amount"), 0n);
+    const remaining = paidUnits - transferredUnits - appliedUnits - refundedUnits;
     if (remaining > 0n) availability.push({ payment, remaining });
   }
   return availability;
@@ -377,6 +387,7 @@ class ReservationService {
   }
 
   async createReservation({ companyId, branchId, user, body = {}, idempotencyKey }) {
+    reservationFinancialResolver.assertNoRawFinancialAuthority(body);
     if (!idempotencyKey) throw new ValidationError("Idempotency-Key is required for reservation creation");
     const scope = "reservation.create";
     const requestHash = idempotencyService.hashRequest(scope, body);
@@ -386,7 +397,12 @@ class ReservationService {
       if (!claim.claimed) {
         try { await t.rollback(); } catch (_) {}
         const prior = await idempotencyService.resolveExisting({ models, companyId, scope, key: idempotencyKey, requestHash });
-        if (prior.state === "replay") return { statusCode: prior.statusCode, responseBody: prior.responseBody };
+        if (prior.state === "replay") {
+          return {
+            statusCode: prior.statusCode,
+            responseBody: prior.responseBody
+          };
+        }
         throw new ConflictError(prior.message);
       }
 
@@ -459,7 +475,6 @@ class ReservationService {
     if (compareMoney(initialPayment.amountUnits, agreedTotalUnits) > 0) {
       throw new ValidationError("Initial reservation payment cannot exceed the reservation total | دفعة الحجز الأولى لا يمكن أن تتجاوز إجمالي الحجز");
     }
-    const advancesAccount = initialPayment ? await getReservationAdvancesAccount(companyId, branch.id, transaction) : null;
     const paidUnits = initialPayment ? initialPayment.amountUnits : 0n;
     const remainingUnits = agreedTotalUnits - paidUnits;
     const status = reservationStatusForTotals(paidUnits, agreedTotalUnits);
@@ -545,7 +560,6 @@ class ReservationService {
         paymentMethod: initialPayment.paymentMethod,
         receivedEmployeeId: initialPayment.receivedEmployeeId,
         sourceReference: initialPayment.sourceReference,
-        advancesAccount,
         idempotencyKey: `${idempotencyKey}:initial-payment`,
         transaction
       });
@@ -582,6 +596,7 @@ class ReservationService {
   }
 
   async addPayment({ companyId, branchId, user, reservationId, body = {}, idempotencyKey }) {
+    reservationFinancialResolver.assertNoRawFinancialAuthority(body);
     if (!idempotencyKey) throw new ValidationError("Idempotency-Key is required for reservation payment");
     const scope = "reservation.payment";
     const requestHash = idempotencyService.hashRequest(scope, body, { reservationId });
@@ -591,7 +606,10 @@ class ReservationService {
       if (!claim.claimed) {
         try { await t.rollback(); } catch (_) {}
         const prior = await idempotencyService.resolveExisting({ models, companyId, scope, key: idempotencyKey, requestHash });
-        if (prior.state === "replay") return { statusCode: prior.statusCode, responseBody: prior.responseBody };
+        if (prior.state === "replay") return {
+          statusCode: prior.statusCode,
+          responseBody: { ...prior.responseBody, replay: true }
+        };
         throw new ConflictError(prior.message);
       }
 
@@ -618,7 +636,6 @@ class ReservationService {
       if (remainingBeforeUnits <= 0n) throw new ConflictError("Reservation is already fully paid");
       if (amountUnits > remainingBeforeUnits) throw new ValidationError("Reservation payment cannot exceed remaining amount");
 
-      const advancesAccount = await getReservationAdvancesAccount(companyId, branchId, t);
       const payment = await this._createPaymentInTransaction({
         companyId,
         reservation,
@@ -628,7 +645,6 @@ class ReservationService {
         paymentMethod: body.paymentMethod || "cash",
         receivedEmployeeId: body.receivedEmployeeId || null,
         sourceReference: body.sourceReference || null,
-        advancesAccount,
         idempotencyKey,
         transaction: t
       });
@@ -667,7 +683,13 @@ class ReservationService {
         }, t);
       }
 
-      const responseBody = { success: true, data: { reservation, payment } };
+      const receipt = payment.getDataValue("depositReceipt");
+      const responseBody = {
+        success: true,
+        data: { reservation, payment, receipt: depositReceiptService.receiptResource(receipt) },
+        receipt: depositReceiptService.receiptResource(receipt),
+        replay: false
+      };
       await idempotencyService.succeed({ request: claim.request, statusCode: 201, responseBody, transaction: t });
       await t.commit();
       return { statusCode: 201, responseBody };
@@ -678,6 +700,7 @@ class ReservationService {
   }
 
   async completeSale({ companyId, branchId, user, reservationId, body = {}, idempotencyKey }) {
+    reservationFinancialResolver.assertNoRawFinancialAuthority(body);
     if (!idempotencyKey) throw new ValidationError("Idempotency-Key is required for reservation completion");
     const scope = "reservation.complete";
     const requestHash = idempotencyService.hashRequest(scope, body, { reservationId });
@@ -739,12 +762,12 @@ class ReservationService {
       transaction,
       lock: true
     });
-    if (!payments.length) throw new ValidationError("Reservation has no posted payments to apply");
-
     const agreedTotalUnits = items.reduce((sum, item) => sum + parseMoneyUnits(item.agreedPrice, "item agreed price"), 0n);
-    const paidUnits = payments.reduce((sum, payment) => sum + parseMoneyUnits(payment.amount, "posted payment amount"), 0n);
-    if (paidUnits !== agreedTotalUnits) {
-      throw new ConflictError("Reservation must be fully paid before final sale completion");
+    const receivedUnits = payments.reduce((sum, payment) => sum + parseMoneyUnits(payment.amount, "posted payment amount"), 0n);
+    const availability = await sourcePaymentAvailability(reservation.id, companyId, transaction);
+    const applicableDepositUnits = availability.reduce((sum, entry) => sum + entry.remaining, 0n);
+    if (applicableDepositUnits > agreedTotalUnits) {
+      throw new ConflictError("Reservation net deposit exceeds the final sale total; manual review is required");
     }
 
     const existingApplications = await models.ReservationPaymentApplication.count({
@@ -772,12 +795,21 @@ class ReservationService {
       throw new ConflictError("Reservation total no longer matches final invoice total; reprice/item-change workflow is required before completion");
     }
 
-    const advancesAccount = await getReservationAdvancesAccount(companyId, reservation.branchId, transaction);
+    // Resolve every final-sale posting role before creating an Invoice or
+    // staging inventory/accounting rows.  Transactional posting must never
+    // synthesize a company chart account or select a branchless fallback.
+    const finalSaleAccounts = await resolveRequiredFinalSaleAccounts(
+      companyId,
+      reservation.branchId,
+      transaction,
+      { accountingByKarat: Boolean(settings.accountingByKarat) }
+    );
     const now = new Date();
     const nowStr = now.toISOString().slice(0, 16).replace("T", " ");
     const prefix = settings.invoicePrefix || "INV-2026";
     const invoiceNumber = await nextInvoiceNumber(companyId, prefix, transaction);
-    const invoiceId = body.invoiceId || `INV-RES-${nowStamp()}-${Math.random().toString(36).slice(2, 8)}`;
+    const invoiceId = `INV-RES-${nowStamp()}-${Math.random().toString(36).slice(2, 8)}`;
+    const remainingCustomerDueUnits = agreedTotalUnits - applicableDepositUnits;
 
     const invoice = await models.Invoice.create({
       id: invoiceId,
@@ -795,9 +827,9 @@ class ReservationService {
       makingCharge: Number(body.makingCharge) || 0,
       stoneValue: Number(body.stoneValue) || 0,
       total: totals.total,
-      paidAmount: totals.total,
-      remainingAmount: 0,
-      status: "paid",
+      paidAmount: toNumber(applicableDepositUnits),
+      remainingAmount: toNumber(remainingCustomerDueUnits),
+      status: remainingCustomerDueUnits === 0n ? "paid" : "due",
       paymentMethod: "reservation_advance",
       paymentSplits: [],
       notes: body.notes || `Final sale from reservation ${reservation.id}`,
@@ -864,26 +896,33 @@ class ReservationService {
     invoiceForPosting.status = "due";
     invoiceForPosting.paidAmount = 0;
     invoiceForPosting.remainingAmount = totals.total;
-    const saleJournal = await postingService.postInvoiceEntry(invoiceForPosting, invoiceItems, actor, { transaction });
-    const settlementJournal = await postingService.postReservationAdvanceSettlementEntry(reservation, totals.total, actor, {
+    const saleJournal = await postingService.postInvoiceEntry(invoiceForPosting, invoiceItems, actor, {
       transaction,
-      advancesAccountCode: advancesAccount.code,
-      invoiceId,
-      date: invoice.date,
-      branchId: reservation.branchId
+      finalSaleAccounts,
     });
+    const settlementJournal = applicableDepositUnits > 0n
+      ? await postingService.postReservationAdvanceSettlementEntry(reservation, toNumber(applicableDepositUnits), actor, {
+        transaction,
+        advancesAccountId: finalSaleAccounts.reservationAdvanceLiability.id,
+        receivableAccountId: finalSaleAccounts.accountsReceivable.id,
+        invoiceId,
+        date: invoice.date,
+        branchId: reservation.branchId
+      })
+      : null;
 
-    for (const payment of payments) {
+    const applicationAllocations = allocateAcrossPayments(availability, applicableDepositUnits);
+    for (const allocation of applicationAllocations) {
       await models.ReservationPaymentApplication.create({
         id: `RPA-${nowStamp()}-${Math.random().toString(36).slice(2, 8)}`,
         companyId,
         reservationId: reservation.id,
-        reservationPaymentId: payment.id,
+        reservationPaymentId: allocation.payment.id,
         finalInvoiceId: invoiceId,
-        appliedAmount: payment.amount,
+        appliedAmount: formatMoney(allocation.units),
         appliedAt: now,
         appliedBy: actor,
-        sourceReference: settlementJournal.id
+        sourceReference: settlementJournal?.id || null
       }, { transaction });
     }
 
@@ -892,7 +931,7 @@ class ReservationService {
       finalInvoiceId: invoiceId,
       completedAt: now,
       completedBy: actor,
-      paidTotal: formatMoney(paidUnits),
+      paidTotal: formatMoney(receivedUnits),
       remainingTotal: "0.0000",
       excessTotal: "0.0000",
       version: Number(reservation.version || 0) + 1,
@@ -905,7 +944,12 @@ class ReservationService {
       user: actor,
       userId: user?.id,
       before: { status: "fully_paid", finalInvoiceId: null },
-      after: { status: "completed", finalInvoiceId: invoiceId, invoiceNumber, appliedPayments: payments.length, saleJournalId: saleJournal.id, settlementJournalId: settlementJournal.id }
+      after: {
+        status: "completed", finalInvoiceId: invoiceId, invoiceNumber,
+        totalReceived: formatMoney(receivedUnits), applicableDeposit: formatMoney(applicableDepositUnits),
+        remainingCustomerDue: formatMoney(remainingCustomerDueUnits), appliedPayments: applicationAllocations.length,
+        saleJournalId: saleJournal.id, settlementJournalId: settlementJournal?.id || null
+      }
     }, transaction);
     await notifyReservation(companyId, "completed", reservation, {
       title: "Reservation completed",
@@ -914,7 +958,12 @@ class ReservationService {
       sourceId: invoiceId
     }, transaction);
 
-    return { reservation, invoice, saleJournal, settlementJournal, appliedPayments: payments.length };
+    return {
+      reservation, invoice, saleJournal, settlementJournal,
+      appliedPayments: applicationAllocations.length,
+      applicableDeposit: formatMoney(applicableDepositUnits),
+      remainingCustomerDue: formatMoney(remainingCustomerDueUnits)
+    };
   }
 
   async cancelReservation({ companyId, branchId, user, reservationId, body = {} }) {
@@ -968,27 +1017,45 @@ class ReservationService {
     }
   }
 
-  async requestRefund({ companyId, branchId, user, reservationId, body = {} }) {
+  async requestRefund({ companyId, branchId, user, reservationId, body = {}, idempotencyKey }) {
+    reservationFinancialResolver.assertNoRawFinancialAuthority(body);
+    if (!idempotencyKey) throw new ValidationError("Idempotency-Key is required for reservation refund request");
+    const scope = "reservation.refund.request";
+    const normalizedBody = {
+      amount: body.amount,
+      refundMethod: body.refundMethod || body.requestedRefundMethod || null,
+      reason: String(body.reason || "").trim()
+    };
+    const requestHash = idempotencyService.hashRequest(scope, normalizedBody, { reservationId });
     const t = await models.sequelize.transaction();
     try {
+      const claim = await idempotencyService.claim({ models, companyId, scope, key: idempotencyKey, requestHash, transaction: t });
+      if (!claim.claimed) {
+        try { await t.rollback(); } catch (_) {}
+        const prior = await idempotencyService.resolveExisting({ models, companyId, scope, key: idempotencyKey, requestHash });
+        if (prior.state === "replay") return { statusCode: prior.statusCode, responseBody: prior.responseBody };
+        throw new ConflictError(prior.message);
+      }
       const actor = actorName(user);
       const reservation = await requireReservationInBranch({ companyId, branchId, reservationId, transaction: t, lock: true });
       if (reservation.isLegacy || Number(reservation.workflowVersion || 1) < 2) throw new ConflictError("Legacy reservations cannot be refunded through the new workflow");
-      if (reservation.status !== "cancelled_refund_pending") throw new ConflictError("Reservation must be cancelled with refund pending before refund request");
+      if (!["active", "partially_paid", "fully_paid", "cancelled_refund_pending"].includes(reservation.status)) {
+        throw new ConflictError("Reservation is not eligible for a pre-sale deposit refund");
+      }
       if (reservation.finalInvoiceId) throw new ConflictError("Completed reservations cannot be refunded through reservation refund");
       const activeRenewal = await models.ReservationRenewal.findOne({ where: { companyId, sourceReservationId: reservation.id, status: ["requested", "pending_excess_refund", "ready_to_activate", "activated"] }, transaction: t, lock: true });
       if (activeRenewal) throw new ConflictError("A renewal is in progress for this reservation; full refund is not available");
-      const existing = await models.ReservationRefund.findOne({ where: { companyId, reservationId: reservation.id, refundType: "reservation_full", status: ["requested", "approved", "executed"] }, transaction: t, lock: true });
+      const existing = await models.ReservationRefund.findOne({ where: { companyId, reservationId: reservation.id, refundType: "reservation_full", status: ["requested", "approved"] }, transaction: t, lock: true });
       if (existing) throw new ConflictError("Reservation refund already exists");
 
-      const payments = await models.ReservationPayment.findAll({ where: { reservationId: reservation.id, companyId, status: "posted" }, transaction: t, lock: true });
-      if (!payments.length) throw new ValidationError("Reservation has no posted payments to refund");
-      const amountUnits = payments.reduce((sum, payment) => sum + parseMoneyUnits(payment.amount, "posted payment amount"), 0n);
-      if (amountUnits <= 0n) throw new ValidationError("Refund amount must be greater than zero");
-      const requestedAmount = body.amount !== undefined && body.amount !== null ? parseMoneyUnits(body.amount, "refund amount") : amountUnits;
-      if (requestedAmount !== amountUnits) throw new ValidationError("Reservation refunds must be full; partial refunds are not allowed");
+      const availability = await sourcePaymentAvailability(reservation.id, companyId, t);
+      const refundableUnits = availability.reduce((sum, entry) => sum + entry.remaining, 0n);
+      if (refundableUnits <= 0n) throw new ConflictError("Reservation has no refundable deposit balance");
+      const requestedAmount = body.amount !== undefined && body.amount !== null ? parseMoneyUnits(body.amount, "refund amount") : refundableUnits;
+      if (requestedAmount <= 0n) throw new ValidationError("Refund amount must be greater than zero");
+      if (requestedAmount > refundableUnits) throw new ValidationError("Refund amount cannot exceed the refundable reservation deposit balance");
+      const payments = availability.map((entry) => entry.payment);
       const method = body.refundMethod || body.requestedRefundMethod || payments[0].paymentMethod || "cash";
-      const treasuryCode = treasuryAccountCode(method);
       const methods = [...new Set(payments.map((p) => String(p.paymentMethod || "cash").toLowerCase()))];
       const differs = !methods.includes(String(method || "cash").toLowerCase());
       const reason = String(body.reason || "").trim();
@@ -1000,11 +1067,14 @@ class ReservationService {
         reservationId: reservation.id,
         customerId: reservation.customerId,
         branchId: reservation.branchId || null,
-        amount: formatMoney(amountUnits),
+        amount: formatMoney(requestedAmount),
         currency: reservation.currency || "AED",
         status: "requested",
         requestedRefundMethod: method,
-        treasuryAccountCode: treasuryCode,
+        // Treasury is intentionally unresolved until execution, inside the
+        // locked accounting transaction, so a stale client request cannot
+        // select an account or bypass branch configuration.
+        treasuryAccountCode: null,
         originalPaymentMethodsSummary: methods.map((paymentMethod) => ({
           paymentMethod,
           amount: formatMoney(payments.filter((p) => String(p.paymentMethod || "cash").toLowerCase() === paymentMethod).reduce((sum, p) => sum + parseMoneyUnits(p.amount, "posted payment amount"), 0n))
@@ -1030,8 +1100,10 @@ class ReservationService {
         type: "approval",
         sourceId: refund.id
       }, t);
+      const responseBody = { success: true, data: { reservation, refund } };
+      await idempotencyService.succeed({ request: claim.request, statusCode: 201, responseBody, transaction: t });
       await t.commit();
-      return { statusCode: 201, responseBody: { success: true, data: { reservation, refund } } };
+      return { statusCode: 201, responseBody };
     } catch (error) {
       try { await t.rollback(); } catch (_) {}
       throw error;
@@ -1047,7 +1119,9 @@ class ReservationService {
       if (refund.refundType && refund.refundType !== "reservation_full") throw new ConflictError("Renewal excess refunds use the dedicated renewal excess refund workflow");
       if (refund.status !== "requested") throw new ConflictError("Only requested refunds can be approved");
       const reservation = await requireReservationInBranch({ companyId, branchId, reservationId: refund.reservationId, transaction: t, lock: true });
-      if (reservation.status !== "cancelled_refund_pending") throw new ConflictError("Reservation is not awaiting refund");
+      if (!["active", "partially_paid", "fully_paid", "cancelled_refund_pending"].includes(reservation.status)) {
+        throw new ConflictError("Reservation is not eligible for refund approval");
+      }
       const now = new Date();
       await refund.update({
         status: "approved",
@@ -1140,6 +1214,7 @@ class ReservationService {
   }
 
   async _executeRefundInTransaction({ companyId, branchId, user, refundId, body = {}, idempotencyKey, transaction }) {
+    reservationFinancialResolver.assertNoRawFinancialAuthority(body);
     const actor = actorName(user);
     const refund = await models.ReservationRefund.findOne({ where: { id: refundId, companyId }, transaction, lock: true });
     if (!refund) throw new NotFoundError("Reservation refund not found");
@@ -1156,14 +1231,21 @@ class ReservationService {
       transaction,
       lock: true
     });
-    if (reservation.status !== "cancelled_refund_pending") throw new ConflictError("Reservation is not awaiting refund execution");
+    if (!["active", "partially_paid", "fully_paid", "cancelled_refund_pending"].includes(reservation.status)) {
+      throw new ConflictError("Reservation is not eligible for refund execution");
+    }
     if (reservation.finalInvoiceId) throw new ConflictError("Completed reservations cannot be refunded");
-    const payments = await models.ReservationPayment.findAll({ where: { reservationId: reservation.id, companyId, status: "posted" }, transaction, lock: true });
+    const availability = await sourcePaymentAvailability(reservation.id, companyId, transaction);
     const refundUnits = parseMoneyUnits(refund.amount, "refund amount");
-    const paidUnits = payments.reduce((sum, payment) => sum + parseMoneyUnits(payment.amount, "posted payment amount"), 0n);
-    if (refundUnits !== paidUnits) throw new ValidationError("Reservation refund must equal all posted reservation payments");
-    const advancesAccount = await getReservationAdvancesAccount(companyId, reservation.branchId, transaction);
-    const treasuryCode = body.treasuryAccountCode || refund.treasuryAccountCode || treasuryAccountCode(refund.requestedRefundMethod);
+    const refundableUnits = availability.reduce((sum, entry) => sum + entry.remaining, 0n);
+    if (refundUnits <= 0n) throw new ValidationError("Refund amount must be greater than zero");
+    if (refundUnits > refundableUnits) throw new ConflictError("Refund amount exceeds the remaining refundable reservation deposit balance");
+    const allocations = allocateAcrossPayments(availability, refundUnits);
+    const financial = await reservationFinancialResolver.resolveForReservation({
+      reservation, companyId, channel: refund.requestedRefundMethod, transaction, requireSession: true
+    });
+    const advancesAccount = financial.liabilityAccount;
+    const treasuryCode = financial.treasuryAccount.code;
     const now = new Date();
     await refund.update({
       treasuryAccountCode: treasuryCode,
@@ -1178,7 +1260,7 @@ class ReservationService {
       treasuryAccountCode: treasuryCode,
       branchId: reservation.branchId
     });
-    const account = accountNameFromCode(treasuryCode);
+    const account = financial.channel === "cash" ? "cash" : "bank";
     const cashTx = await models.CashTransaction.create({
       id: `TX-RES-REF-${nowStamp()}-${Math.random().toString(36).slice(2, 6)}`,
       companyId,
@@ -1197,33 +1279,41 @@ class ReservationService {
       journalEntryId: journal.id,
       idempotencyKey
     }, { transaction });
-    for (const payment of payments) {
+    for (const allocation of allocations) {
       await models.ReservationRefundAllocation.create({
         id: `RRA-${nowStamp()}-${Math.random().toString(36).slice(2, 8)}`,
         companyId,
         reservationRefundId: refund.id,
-        reservationPaymentId: payment.id,
-        allocatedAmount: payment.amount
+        reservationPaymentId: allocation.payment.id,
+        allocatedAmount: formatMoney(allocation.units)
       }, { transaction });
-      await payment.update({ status: "refunded", refundOf: refund.id }, { transaction });
     }
     await refund.update({ status: "executed", journalEntryId: journal.id, cashTransactionId: cashTx.id }, { transaction });
-    await reservation.update({
-      status: "refunded",
-      refundedAt: now,
-      refundStatus: "executed",
-      paidTotal: "0.0000",
-      remainingTotal: "0.0000",
-      excessTotal: "0.0000",
-      version: Number(reservation.version || 0) + 1,
-      updatedBy: actor
-    }, { transaction });
+    const remainingRefundable = refundableUnits - refundUnits;
+    if (remainingRefundable === 0n) {
+      if (reservation.status !== "cancelled_refund_pending") {
+        await this._releaseActiveReservationItems(reservation, {
+          companyId, actor, now, reason: "Reservation deposit fully refunded", transaction,
+          eventAction: "RESERVATION_REFUNDED", note: `Reservation ${reservation.id} deposit fully refunded`
+        });
+      }
+      await reservation.update({
+        status: "refunded", refundedAt: now, refundStatus: "executed",
+        paidTotal: "0.0000", remainingTotal: "0.0000", excessTotal: "0.0000",
+        version: Number(reservation.version || 0) + 1, updatedBy: actor
+      }, { transaction });
+    } else {
+      await reservation.update({
+        refundStatus: "partial_executed",
+        version: Number(reservation.version || 0) + 1, updatedBy: actor
+      }, { transaction });
+    }
     await audit(companyId, "reservation.refund_executed", {
       reservationId: reservation.id,
       branchId: reservation.branchId,
       user: actor,
       userId: user?.id,
-      after: { refundId: refund.id, amount: refund.amount, journalEntryId: journal.id, cashTransactionId: cashTx.id, allocations: payments.length }
+      after: { refundId: refund.id, amount: refund.amount, journalEntryId: journal.id, cashTransactionId: cashTx.id, allocations: allocations.length, remainingRefundable: formatMoney(remainingRefundable) }
     }, transaction);
     await notifyReservation(companyId, "refund_executed", reservation, {
       title: "Reservation refund executed",
@@ -1231,7 +1321,7 @@ class ReservationService {
       type: "success",
       sourceId: refund.id
     }, transaction);
-    return { reservation, refund, journal, cashTransaction: cashTx, allocations: payments.length };
+    return { reservation, refund, journal, cashTransaction: cashTx, allocations: allocations.length, remainingRefundable: formatMoney(remainingRefundable) };
   }
 
   // ─── Phase 32.6-Fix C — Item Amendments ───────────────────────────────────
@@ -2083,7 +2173,8 @@ class ReservationService {
       refundType: "renewal_excess",
       renewalId: renewal.id,
       requestedRefundMethod: refundMethod,
-      treasuryAccountCode: treasuryAccountCode(refundMethod),
+        // Resolve the treasury only inside the locked execution transaction.
+        treasuryAccountCode: null,
       methodDiffersFromOriginal: differs,
       methodOverrideApproved: false,
       reason: `Renewal excess refund for renewal ${renewal.id}`,
@@ -2271,6 +2362,7 @@ class ReservationService {
   }
 
   async _executeRenewalExcessRefundInTransaction({ companyId, branchId, user, refundId, body = {}, idempotencyKey, transaction }) {
+    reservationFinancialResolver.assertNoRawFinancialAuthority(body);
     const actor = actorName(user);
     const refund = await models.ReservationRefund.findOne({ where: { id: refundId, companyId, refundType: "renewal_excess" }, transaction, lock: true });
     if (!refund) throw new NotFoundError("Renewal excess refund not found");
@@ -2293,8 +2385,14 @@ class ReservationService {
     assertSameBranch(successor, branchId, "Renewal successor");
 
     const now = new Date();
-    const advancesAccount = await getReservationAdvancesAccount(companyId, source.branchId, transaction);
-    const treasuryCode = body.treasuryAccountCode || refund.treasuryAccountCode || treasuryAccountCode(refund.requestedRefundMethod);
+    // Renewal excess is sourced from the same branch Reservation Advance
+    // liability. Resolve its cash/channel and cash-session authority exactly as
+    // a standard refund; no client-selected treasury is accepted.
+    const financial = await reservationFinancialResolver.resolveForReservation({
+      reservation: source, companyId, channel: refund.requestedRefundMethod, transaction, requireSession: true
+    });
+    const advancesAccount = financial.liabilityAccount;
+    const treasuryCode = financial.treasuryAccount.code;
     const excessUnits = parseMoneyUnits(refund.amount, "excess refund amount");
     const successorTotalUnits = parseMoneyUnits(renewal.successorTotal, "successor total");
 
@@ -2309,7 +2407,7 @@ class ReservationService {
       branchId: source.branchId || null,
       branch: source.branch || "Main Branch",
       type: "cash_out",
-      account: accountNameFromCode(treasuryCode),
+      account: financial.channel === "cash" ? "cash" : "bank",
       amount: formatMoney(excessUnits),
       category: "استرداد فائض تجديد حجز",
       counterAccountCode: advancesAccount.code,
@@ -2353,9 +2451,17 @@ class ReservationService {
     return { source, successor: refreshedSuccessor, renewal, refund, journal, cashTransaction: cashTx, transferAmount: formatMoney(transferredUnits) };
   }
 
-  async _createPaymentInTransaction({ companyId, reservation, customer, user, amountUnits, paymentMethod, receivedEmployeeId, sourceReference, advancesAccount, idempotencyKey, transaction }) {
+  async _createPaymentInTransaction({ companyId, reservation, customer, user, amountUnits, paymentMethod, receivedEmployeeId, sourceReference, idempotencyKey, transaction }) {
     const receivedAt = new Date();
     const actor = actorName(user);
+    const financial = await reservationFinancialResolver.resolveForReservation({
+      reservation, companyId, channel: paymentMethod, transaction, requireSession: true
+    });
+    const branch = await models.Branch.findOne({ where: { id: reservation.branchId, companyId }, transaction, lock: transaction.LOCK.UPDATE });
+    if (!branch) throw new AppError("Reservation branch is unavailable for receipt issuance.", 422, "DEPOSIT_RECEIPT_BRANCH_REQUIRED");
+    const allocation = await depositReceiptService.allocateNumber({
+      companyId, branchId: reservation.branchId, branchCode: branch.code, postedAt: receivedAt, transaction
+    });
     const payment = await models.ReservationPayment.create({
       id: `RSP-${nowStamp()}-${Math.floor(Math.random() * 100000)}`,
       companyId,
@@ -2365,10 +2471,10 @@ class ReservationService {
       amount: formatMoney(amountUnits),
       currency: reservation.currency || "AED",
       paymentMethod,
-      treasuryAccountCode: treasuryAccountCode(paymentMethod),
-      advancesAccountId: advancesAccount.id,
-      advancesAccountCode: advancesAccount.code,
-      receiptNumber: `RCP-RES-${nowStamp()}-${Math.floor(Math.random() * 1000)}`,
+      treasuryAccountCode: financial.treasuryAccount.code,
+      advancesAccountId: financial.liabilityAccount.id,
+      advancesAccountCode: financial.liabilityAccount.code,
+      receiptNumber: allocation.receiptNumber,
       status: "posted",
       idempotencyKey,
       receivedBy: actor,
@@ -2380,10 +2486,19 @@ class ReservationService {
     const journal = await postingService.postReservationPaymentEntry(payment, actor, {
       transaction,
       treasuryAccountCode: payment.treasuryAccountCode,
-      advancesAccountCode: advancesAccount.code,
+      advancesAccountCode: financial.liabilityAccount.code,
       branchId: reservation.branchId
     });
-    await payment.update({ journalEntryId: journal.id }, { transaction });
+    const cashTx = await models.CashTransaction.create({
+      id: `TX-RES-RCP-${nowStamp()}-${Math.random().toString(36).slice(2, 6)}`,
+      companyId, branchId: reservation.branchId, branch: reservation.branch || "Main Branch",
+      type: "cash_in", account: financial.channel === "cash" ? "cash" : "bank",
+      amount: formatMoney(amountUnits), category: "دفعة حجز", counterAccountCode: financial.liabilityAccount.code,
+      description: `دفعة حجز ${reservation.id}`, reference: payment.id,
+      date: receivedAt.toISOString().slice(0, 10), status: "posted", createdBy: user?.id || actor,
+      journalEntryId: journal.id, idempotencyKey
+    }, { transaction });
+    await payment.update({ journalEntryId: journal.id, cashTransactionId: cashTx.id, cashRegisterSessionId: financial.cashSession?.id || null }, { transaction });
     await audit(companyId, "reservation.payment_posted", {
       reservationId: reservation.id,
       branchId: reservation.branchId,
@@ -2395,9 +2510,13 @@ class ReservationService {
         amount: formatMoney(amountUnits),
         journalEntryId: journal.id,
         treasuryAccountCode: payment.treasuryAccountCode,
-        advancesAccountCode: advancesAccount.code
+        advancesAccountCode: financial.liabilityAccount.code,
+        cashTransactionId: cashTx.id,
+        cashRegisterSessionId: financial.cashSession?.id || null
       }
     }, transaction);
+    const receipt = await depositReceiptService.createImmutableDocument({ payment, reservation, actor, transaction, allocation });
+    payment.setDataValue("depositReceipt", receipt);
     return payment;
   }
 }

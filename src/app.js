@@ -8,9 +8,14 @@ const fs = require("fs");
 
 const routes = require("./routes");
 const errorMiddleware = require("./middleware/error.middleware");
+const requestIdMiddleware = require("./middleware/request-id.middleware");
+const errorResponseNormalizer = require("./middleware/error-response-normalizer.middleware");
 const logger = require("./utils/logger");
 
 const app = express();
+
+app.use(requestIdMiddleware);
+app.use(errorResponseNormalizer);
 
 // 1. Security & Logging Middlewares
 app.use(helmet({
@@ -44,7 +49,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Company-ID", "X-Branch-ID", "X-Correlation-ID", "X-Device-Session-ID", "Idempotency-Key"]
+  allowedHeaders: ["Content-Type", "Authorization", "X-Company-ID", "X-Branch-ID", "X-Correlation-ID", "X-Device-Session-ID", "Idempotency-Key", "X-First-Run-Setup-Token"]
 }));
 
 const SENSITIVE_QUERY_KEYS = new Set(["token", "access_token", "accesstoken", "refreshtoken", "refresh_token", "authorization", "apikey", "key", "secret"]);
@@ -65,7 +70,7 @@ const morganFormat = (tokens, req, res) => [
   sanitizedRequestUrl(req.originalUrl || req.url),
   tokens.status(req, res),
   `${tokens["response-time"](req, res)}ms`,
-  `corr=${req.headers["x-correlation-id"] || req.id || "-"}`,
+  `request_id=${req.requestId || "-"}`,
 ].join(" ");
 app.use(morgan(morganFormat, {
   stream: {
@@ -106,15 +111,7 @@ app.get("/", (req, res) => {
 
 // 6. 404 Route handler
 app.use((req, res, next) => {
-  res.status(404).json({
-    success: false,
-    message: "المورد غير موجود - Resource not found",
-    error: {
-      code: "RESOURCE_NOT_FOUND",
-      message: "Resource not found",
-      status: 404
-    }
-  });
+  res.status(404).json({ success: false, code: "ROUTE_NOT_FOUND", message: "The requested API route was not found." });
 });
 
 // 7. Global Error Boundary Middleware

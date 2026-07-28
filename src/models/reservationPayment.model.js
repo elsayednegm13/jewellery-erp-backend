@@ -15,6 +15,8 @@ const ReservationPayment = sequelize.define("ReservationPayment", {
   advancesAccountCode: { type: DataTypes.STRING, allowNull: false, field: "advances_account_code" },
   receiptNumber: { type: DataTypes.STRING, allowNull: false, field: "receipt_number" },
   journalEntryId: { type: DataTypes.STRING, allowNull: true, field: "journal_entry_id" },
+  cashTransactionId: { type: DataTypes.STRING, allowNull: true, field: "cash_transaction_id" },
+  cashRegisterSessionId: { type: DataTypes.STRING, allowNull: true, field: "cash_register_session_id" },
   status: { type: DataTypes.ENUM("posted", "reversed", "refunded", "transferred"), allowNull: false, defaultValue: "posted" },
   idempotencyKey: { type: DataTypes.STRING, allowNull: true, field: "idempotency_key" },
   receivedBy: { type: DataTypes.STRING, allowNull: true, field: "received_by" },
