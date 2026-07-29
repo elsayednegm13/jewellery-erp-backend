@@ -34,7 +34,7 @@ function depositAccountInvalid() {
 
 async function assertDepositAccount(companyId, branchId, accountId, transaction) {
   const account = await models.Account.findOne({
-    where: { id: accountId, companyId, branchId, isActive: true }, transaction,
+    where: { id: accountId, companyId, isActive: true }, transaction,
     lock: transaction ? transaction.LOCK.UPDATE : undefined,
   });
   if (!account || account.type !== "liability" || account.nature !== "credit") throw depositAccountInvalid();
@@ -92,7 +92,7 @@ async function resolveRequiredFinalSaleAccounts(companyId, branchId, transaction
       lock: transaction ? transaction.LOCK.UPDATE : undefined,
     });
     if (!account) throw finalSaleRoleError("BRANCH_FINANCIAL_ACCOUNT_NOT_FOUND", "The mapped Complete-sale account was not found.");
-    if (String(account.companyId) !== String(companyId) || String(account.branchId) !== String(branchId)) {
+    if (String(account.companyId) !== String(companyId) || (account.branchId && String(account.branchId) !== String(branchId))) {
       throw finalSaleRoleError("BRANCH_FINANCIAL_ACCOUNT_SCOPE_INVALID", "The mapped Complete-sale account is outside the effective branch scope.");
     }
     if (!account.isActive) throw finalSaleRoleError("BRANCH_FINANCIAL_ACCOUNT_INACTIVE", "The mapped Complete-sale account is inactive.");

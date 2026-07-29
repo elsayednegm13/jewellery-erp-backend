@@ -1,6 +1,7 @@
 "use strict";
 
 const models = require("../models");
+const { Op } = require("sequelize");
 const { AppError, ValidationError } = require("../utils/errors");
 const { TYPES, normalizeChannel } = require("./reservation-financial-resolver.service");
 
@@ -14,7 +15,7 @@ function newId(prefix) {
 
 async function assertPostingAccount({ companyId, branchId, accountId, type, nature, transaction }) {
   const account = await models.Account.findOne({
-    where: { id: accountId, companyId, branchId, isActive: true }, transaction, lock: transaction?.LOCK.UPDATE
+    where: { id: accountId, companyId, isActive: true, [Op.or]: [{ branchId: null }, { branchId }] }, transaction, lock: transaction?.LOCK.UPDATE
   });
   if (!account || account.type !== type || account.nature !== nature) {
     throw configurationError("DEPOSIT_MAPPING_ACCOUNT_INVALID", "The selected active posting account is not owned by this branch.");
@@ -30,8 +31,8 @@ async function read({ companyId, branchId, transaction = null }) {
     order: [["mappingType", "ASC"], ["channel", "ASC"], ["createdAt", "ASC"]],
     transaction
     }),
-    models.Account.findAll({ where: { companyId, branchId, isActive: true, type: "liability", nature: "credit" }, attributes: ["id", "code", "name", "nameAr"], order: [["code", "ASC"]], transaction }),
-    models.Account.findAll({ where: { companyId, branchId, isActive: true, type: "asset", nature: "debit" }, attributes: ["id", "code", "name", "nameAr"], order: [["code", "ASC"]], transaction })
+    models.Account.findAll({ where: { companyId, isActive: true, type: "liability", nature: "credit", [Op.or]: [{ branchId: null }, { branchId }] }, attributes: ["id", "code", "name", "nameAr"], order: [["code", "ASC"]], transaction }),
+    models.Account.findAll({ where: { companyId, isActive: true, type: "asset", nature: "debit", [Op.or]: [{ branchId: null }, { branchId }] }, attributes: ["id", "code", "name", "nameAr"], order: [["code", "ASC"]], transaction })
   ]);
   const active = mappings.filter((mapping) => mapping.isActive);
   const byType = (mappingType, channel = undefined) => active.find((mapping) => mapping.mappingType === mappingType && (channel === undefined ? !mapping.channel : mapping.channel === channel)) || null;

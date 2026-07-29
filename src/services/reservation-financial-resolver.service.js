@@ -33,7 +33,8 @@ async function mapping(companyId, branchId, mappingType, channel, transaction) {
   const prefix = mappingType === TYPES.RESERVATION_ADVANCE_LIABILITY ? "DEPOSIT_LIABILITY" : "TREASURY";
   if (!rows.length) throw fail(`${prefix}_MAPPING_MISSING`, "Required branch financial mapping is missing.");
   if (rows.length !== 1) throw fail(`${prefix}_MAPPING_AMBIGUOUS`, "Required branch financial mapping is ambiguous.");
-  const account = await models.Account.findOne({ where: { id: rows[0].accountId, companyId, branchId, isActive: true }, transaction, lock: transaction?.LOCK.UPDATE });
+  const account = await models.Account.findOne({ where: { id: rows[0].accountId, companyId, isActive: true }, transaction, lock: transaction?.LOCK.UPDATE });
+  if (account?.branchId && String(account.branchId) !== String(branchId)) throw fail(`${prefix}_MAPPING_MISSING`, "Mapped financial account is outside the branch.");
   if (!account) throw fail(`${prefix}_MAPPING_MISSING`, "Mapped financial account is inactive or outside the branch.");
   return { mapping: rows[0], account };
 }

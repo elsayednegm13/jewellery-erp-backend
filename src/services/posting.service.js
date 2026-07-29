@@ -1,6 +1,7 @@
-const { Account, JournalEntry, JournalLine, sequelize } = require("../models");
+const { JournalEntry, JournalLine, sequelize } = require("../models");
 const logger = require("../utils/logger");
 const accountingLockService = require("./accounting-lock.service");
+const financialAccountResolver = require("./financial-account-resolver.service");
 
 /**
  * Financial Posting Engine
@@ -11,14 +12,15 @@ const accountingLockService = require("./accounting-lock.service");
  *
  * Design rules:
  *  - Every entry MUST balance (sum of debit === sum of credit).
- *  - Accounts are resolved by CODE and auto-created if missing, so the
- *    engine is self-healing on both fresh and existing databases.
+ *  - Accounts are resolved from explicit Branch mappings or the pre-provisioned
+ *    catalog. Missing configuration fails before any journal is written.
  *  - Each entry is linked to its source (sourceType / sourceId) for
  *    full traceability.
  */
 
-// Canonical Chart of Accounts for jewellery retail.
-// code → definition. Used to auto-create any account the engine needs.
+// Canonical display metadata retained for journal previews. Persistent posting
+// accounts are provisioned by financial-bootstrap.service and resolved through
+// explicit Branch mappings; this object never creates database rows.
 const CHART = {
   "1000": { name: "Assets", nameAr: "الأصول", type: "asset", nature: "debit", level: 1, parent: null },
   "1100": { name: "Cash & Bank", nameAr: "النقد والبنوك", type: "asset", nature: "debit", level: 2, parent: "1000" },
@@ -32,9 +34,7 @@ const CHART = {
   "1213": { name: "Inventory Gold 24K", nameAr: "مخزون ذهب 24", type: "asset", nature: "debit", level: 3, parent: "1200" },
   "1219": { name: "Inventory Other / Non-Gold", nameAr: "مخزون أخرى / غير ذهب", type: "asset", nature: "debit", level: 3, parent: "1200" },
   "1300": { name: "Accounts Receivable", nameAr: "ذمم العملاء", type: "asset", nature: "debit", level: 2, parent: "1000" },
-  // Phase 12E foundation — Input VAT (recoverable purchase VAT). Defined here so
-  // it is auto-created by ensureAccount WHEN purchase-VAT posting lands (12F).
-  // No posting reads it yet, so no account row is created until then.
+  // Phase 12E foundation — Input VAT (recoverable purchase VAT).
   "1400": { name: "Input VAT Recoverable", nameAr: "ضريبة مدخلات قابلة للخصم", type: "asset", nature: "debit", level: 2, parent: "1000" },
   "2000": { name: "Liabilities", nameAr: "الخصوم", type: "liability", nature: "credit", level: 1, parent: null },
   "2100": { name: "Accounts Payable", nameAr: "ذمم الموردين", type: "liability", nature: "credit", level: 2, parent: "2000" },
@@ -208,38 +208,6 @@ class PostingService {
   }
 
   /**
-   * Resolve an account by code for a company, creating it from the
-   * canonical chart if it does not yet exist.
-   */
-  async ensureAccount(companyId, code, transaction) {
-    let account = await Account.findOne({ where: { companyId, code }, transaction });
-    if (account) return account;
-
-    const def = CHART[code];
-    if (!def) {
-      throw new Error(`Unknown account code "${code}" — not in canonical chart of accounts.`);
-    }
-    account = await Account.create(
-      {
-        id: `ACC-${code}-${companyId}`.slice(0, 60),
-        companyId,
-        code,
-        name: def.name,
-        nameAr: def.nameAr,
-        type: def.type,
-        nature: def.nature,
-        parentId: def.parent ? `ACC-${def.parent}` : null,
-        balance: 0,
-        isActive: true,
-        level: def.level,
-      },
-      { transaction }
-    );
-    logger.info(`[Posting] Auto-created account ${code} (${def.nameAr}) for ${companyId}`);
-    return account;
-  }
-
-  /**
    * Core: create a balanced journal entry from a set of lines.
    * @param {string} companyId
    * @param {object} opts { description, date, sourceType, sourceId, postedBy, transaction, branchId }
@@ -293,17 +261,13 @@ class PostingService {
         // Explicit role-resolved accounts are mandatory for strict flows such
         // as Complete-sale.  Legacy posting callers continue to use the
         // canonical-chart setup path until they are independently migrated.
-        const account = line.accountId
-          ? await Account.findOne({
-            where: {
-              id: line.accountId,
-              companyId,
-              ...(opts.branchId ? { branchId: opts.branchId } : {}),
-              isActive: true,
-            },
-            transaction: t,
-          })
-          : await this.ensureAccount(companyId, line.accountCode, t);
+        const account = await financialAccountResolver.resolvePostingAccount({
+          companyId,
+          branchId: opts.branchId || null,
+          accountId: line.accountId || null,
+          accountCode: line.accountCode || null,
+          transaction: t,
+        });
         if (!account) throw new Error("Explicit posting account is inactive or outside the operational branch.");
         const debit = round(line.debit);
         const credit = round(line.credit);
@@ -361,8 +325,8 @@ class PostingService {
     const cost = round(items.reduce((s, it) => s + (Number(it.cost) || 0) * (Number(it.quantity) || 1), 0));
 
     // Reservation Complete-sale supplies all roles from the strict branch
-    // resolver.  It therefore cannot reach ensureAccount or a company-code
-    // fallback while posting the Invoice and its COGS entry.
+    // resolver. It therefore cannot reach a company-code fallback while
+    // posting the Invoice and its COGS entry.
     if (opts.finalSaleAccounts) {
       const roles = opts.finalSaleAccounts;
       const required = ["accountsReceivable", "salesRevenue", "vatPayable", "inventoryAsset", "costOfGoodsSold"];

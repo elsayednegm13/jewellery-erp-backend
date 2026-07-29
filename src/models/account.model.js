@@ -51,6 +51,22 @@ const Account = sequelize.define("Account", {
     field: "is_active",
     defaultValue: true
   },
+  isPosting: {
+    type: DataTypes.BOOLEAN,
+    field: "is_posting",
+    defaultValue: true,
+    allowNull: false
+  },
+  statementClassification: {
+    type: DataTypes.STRING,
+    field: "statement_classification",
+    allowNull: true
+  },
+  bootstrapVersion: {
+    type: DataTypes.INTEGER,
+    field: "bootstrap_version",
+    allowNull: true
+  },
   level: {
     type: DataTypes.INTEGER,
     defaultValue: 1

@@ -34,6 +34,10 @@ const accountBalanceService = require("../services/account-balance.service");
 const cashRegisterService = require("../services/cash-register.service");
 const companyBootstrapService = require("../services/company-bootstrap.service");
 const ledgerReportingService = require("../services/ledger-reporting.service");
+const financialBootstrapService = require("../services/financial-bootstrap.service");
+const financialAccountService = require("../services/financial-account.service");
+const financialReportingService = require("../services/financial-reporting.service");
+const { ACCOUNT_ROLE_CATALOG, BRANCH_MAPPING_CATALOG } = require("../services/financial-account-catalog.service");
 const { requireBranchCustomerResource } = require("../services/branch-isolation.service");
 const logger = require("../utils/logger");
 const { AppError, ValidationError, NotFoundError, ConflictError, ForbiddenError } = require("../utils/errors");
@@ -5765,7 +5769,182 @@ router.get(
 );
 
 setupCrud("journal-entries", models.JournalEntry, ["id", "description", "date"]);
-setupCrud("accounts", models.Account, ["name", "nameAr", "code"]);
+
+const auditFinancialConfiguration = (req, action, entityId = null) =>
+  auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
+    action,
+    description: "Financial configuration changed through the supported accounting domain.",
+    metadata: entityId ? { entityId } : undefined,
+  }));
+
+router.get("/accounts", authMiddleware, requireBusinessPermission("accounting.view"), async (req, res, next) => {
+  try {
+    const data = await financialAccountService.listAccounts({ models, companyId: req.companyId, query: req.query });
+    return res.status(200).json({ success: true, data });
+  } catch (error) { return next(error); }
+});
+
+router.get("/accounts/:id", authMiddleware, requireBusinessPermission("accounting.view"), async (req, res, next) => {
+  try {
+    const data = await financialAccountService.getAccount({ models, companyId: req.companyId, accountId: req.params.id });
+    return res.status(200).json({ success: true, data });
+  } catch (error) { return next(error); }
+});
+
+router.post("/accounts", authMiddleware, requireBusinessPermission("accounting.post", { touch: true }), async (req, res, next) => {
+  try {
+    const data = await financialAccountService.createAccount({ models, companyId: req.companyId, body: req.body || {} });
+    await auditFinancialConfiguration(req, "financial_account.created", data.id);
+    return res.status(201).json({ success: true, data });
+  } catch (error) { return next(error); }
+});
+
+const updateFinancialAccount = async (req, res, next) => {
+  try {
+    const data = await financialAccountService.updateAccount({
+      models,
+      companyId: req.companyId,
+      accountId: req.params.id,
+      body: req.body || {},
+    });
+    await auditFinancialConfiguration(req, "financial_account.updated", data.id);
+    return res.status(200).json({ success: true, data });
+  } catch (error) { return next(error); }
+};
+router.put("/accounts/:id", authMiddleware, requireBusinessPermission("accounting.post", { touch: true }), updateFinancialAccount);
+router.patch("/accounts/:id", authMiddleware, requireBusinessPermission("accounting.post", { touch: true }), updateFinancialAccount);
+
+router.post("/accounts/:id/deactivate", authMiddleware, requireBusinessPermission("accounting.post", { touch: true }), async (req, res, next) => {
+  try {
+    const data = await financialAccountService.deactivateAccount({ models, companyId: req.companyId, accountId: req.params.id });
+    await auditFinancialConfiguration(req, "financial_account.deactivated", data.id);
+    return res.status(200).json({ success: true, data });
+  } catch (error) { return next(error); }
+});
+router.post("/accounts/:id/reactivate", authMiddleware, requireBusinessPermission("accounting.post", { touch: true }), async (req, res, next) => {
+  try {
+    const data = await financialAccountService.reactivateAccount({ models, companyId: req.companyId, accountId: req.params.id });
+    await auditFinancialConfiguration(req, "financial_account.reactivated", data.id);
+    return res.status(200).json({ success: true, data });
+  } catch (error) { return next(error); }
+});
+router.delete("/accounts/:id", authMiddleware, requireBusinessPermission("accounting.post", { touch: true }), async (req, res, next) => {
+  try {
+    await financialAccountService.deleteAccount({ models, companyId: req.companyId, accountId: req.params.id });
+    return res.status(204).end();
+  } catch (error) { return next(error); }
+});
+
+router.get("/financial/readiness", authMiddleware, requireBusinessPermission("accounting.view"), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.headers["x-branch-id"], { required: true });
+    const data = await financialBootstrapService.evaluateReadiness({ models, companyId: req.companyId, branchId });
+    return res.status(200).json({
+      success: true,
+      data: {
+        ...data,
+        blockingCode: data.status === "READY" ? null : "FINANCIAL_READINESS_REQUIRED",
+      },
+    });
+  } catch (error) { return next(error); }
+});
+
+router.post("/financial/reconcile", authMiddleware, requireBusinessPermission("settings.update", { touch: true }), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.body?.branchId || req.headers["x-branch-id"], { required: true });
+    const data = await financialBootstrapService.reconcile({
+      models,
+      companyId: req.companyId,
+      branchId,
+      actorId: req.user?.id || "financial-reconcile",
+      dryRun: Boolean(req.body?.dryRun),
+    });
+    if (!req.body?.dryRun) await auditFinancialConfiguration(req, "financial_configuration.reconciled");
+    return res.status(200).json({ success: true, data });
+  } catch (error) { return next(error); }
+});
+
+router.get("/financial/branch-mappings", authMiddleware, requireBusinessPermission("accounting.view"), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.headers["x-branch-id"], { required: true });
+    const rows = await models.BranchFinancialMapping.findAll({
+      where: { companyId: req.companyId, branchId, channel: null, isActive: true },
+      attributes: ["mappingType", "accountId", "isActive"],
+      order: [["mappingType", "ASC"]],
+    });
+    return res.status(200).json({
+      success: true,
+      data: {
+        branchId,
+        required: Object.keys(BRANCH_MAPPING_CATALOG),
+        mappings: rows,
+      },
+    });
+  } catch (error) { return next(error); }
+});
+
+router.put("/financial/branch-mappings/:mappingRole", authMiddleware, requireBusinessPermission("settings.update", { touch: true }), async (req, res, next) => {
+  try {
+    const mappingType = String(req.params.mappingRole || "").trim().toUpperCase();
+    const mappingDefinition = BRANCH_MAPPING_CATALOG[mappingType];
+    if (!mappingDefinition) throw new ValidationError("Unsupported financial mapping role.");
+    const branchId = await resolveAuthorizedBranchId(req, req.body?.branchId || req.headers["x-branch-id"], { required: true });
+    const roleDefinition = ACCOUNT_ROLE_CATALOG[mappingDefinition.accountRoleCode];
+    const account = await models.Account.findOne({
+      where: { id: req.body?.accountId, companyId: req.companyId, isActive: true, isPosting: true },
+    });
+    if (!account || (account.branchId && String(account.branchId) !== String(branchId)) ||
+        account.type !== roleDefinition.type || account.nature !== roleDefinition.nature) {
+      throw new ValidationError("The selected account is not eligible for this Branch mapping.");
+    }
+    const data = await models.sequelize.transaction(async (transaction) => {
+      const rows = await models.BranchFinancialMapping.findAll({
+        where: { companyId: req.companyId, branchId, mappingType, channel: null },
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+      if (rows.length > 1) throw new ConflictError("The Branch mapping is ambiguous.");
+      if (rows.length) {
+        await rows[0].update({ accountId: account.id, isActive: true, updatedBy: req.user?.id || null }, { transaction });
+        return rows[0];
+      }
+      return models.BranchFinancialMapping.create({
+        id: `BFM-${require("crypto").randomUUID()}`,
+        companyId: req.companyId,
+        branchId,
+        mappingType,
+        channel: null,
+        accountId: account.id,
+        isActive: true,
+        createdBy: req.user?.id || null,
+        updatedBy: req.user?.id || null,
+      }, { transaction });
+    });
+    await auditFinancialConfiguration(req, "financial_branch_mapping.updated", data.id);
+    return res.status(200).json({ success: true, data });
+  } catch (error) { return next(error); }
+});
+
+router.get("/reports/income-statement", authMiddleware, requireBusinessPermission("accounting.view"), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.headers["x-branch-id"], { required: true });
+    const from = req.query.from ? String(req.query.from) : null;
+    const to = req.query.to ? String(req.query.to) : null;
+    if (!from || !to || !isValidYmd(from) || !isValidYmd(to) || from > to) throw new ValidationError("A valid report period is required.");
+    const data = await financialReportingService.incomeStatement({ companyId: req.companyId, branchId, from, to });
+    return res.status(200).json({ success: true, data });
+  } catch (error) { return next(error); }
+});
+
+router.get("/reports/balance-sheet", authMiddleware, requireBusinessPermission("accounting.view"), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.headers["x-branch-id"], { required: true });
+    const asOf = req.query.asOf ? String(req.query.asOf) : null;
+    if (!asOf || !isValidYmd(asOf)) throw new ValidationError("A valid as-of date is required.");
+    const data = await financialReportingService.balanceSheet({ companyId: req.companyId, branchId, asOf });
+    return res.status(200).json({ success: true, data });
+  } catch (error) { return next(error); }
+});
 // NOTE: audit-logs is intentionally NOT a full CRUD resource — it is
 // append-only and immutable. Its read/append/verify routes are defined in the
 // "IMMUTABLE AUDIT" custom section below.
@@ -8802,7 +8981,7 @@ async function ledgerTotalsByAccountCode({ companyId, accountCodes, from, to, as
   return byCode;
 }
 
-router.get("/accounts/:id/statement", authMiddleware, requirePermission("accounting.view"), async (req, res, next) => {
+router.get("/accounts/:id/statement", authMiddleware, requireBusinessPermission("accounting.view"), async (req, res, next) => {
   try {
     // 1. Account must exist within the tenant. Never modified.
     const account = await models.Account.findOne({
@@ -8813,7 +8992,7 @@ router.get("/accounts/:id/statement", authMiddleware, requirePermission("account
     // 2. Validate the optional date window.
     const from = req.query.from ? String(req.query.from) : null;
     const to = req.query.to ? String(req.query.to) : null;
-    const branchId = req.query.branchId ? String(req.query.branchId) : null;
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.headers["x-branch-id"], { required: true });
     if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
     if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
     if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");

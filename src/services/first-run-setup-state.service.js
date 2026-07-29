@@ -1,7 +1,6 @@
 "use strict";
 
-const { Op } = require("sequelize");
-const { FINAL_SALE_ROLE_DEFINITIONS } = require("./company-bootstrap.service");
+const financialBootstrapService = require("./financial-bootstrap.service");
 
 const STATES = Object.freeze({
   UNINITIALIZED: "UNINITIALIZED",
@@ -43,14 +42,13 @@ async function resolveSetupState(models, { transaction = null, lock = false } = 
   const branchCount = await models.Branch.count({ where: { companyId: company.id, isActive: true }, ...readOpts });
   if (branchCount < 1) return { state: STATES.RECOVERY_REQUIRED, marker };
   const branch = await models.Branch.findOne({ where: { companyId: company.id, isActive: true }, ...readOpts, order: [["createdAt", "ASC"]] });
-  const [financialRoleCount, branchFinancialMappingCount] = await Promise.all([
-    models.SystemAccountRole.count({
-    where: { companyId: company.id, branchId: branch.id, roleCode: { [Op.in]: Object.values(FINAL_SALE_ROLE_DEFINITIONS).map((entry) => entry.roleCode) } },
-    ...readOpts
-    }),
-    models.BranchFinancialMapping.count({ where: { companyId: company.id, branchId: branch.id, isActive: true }, ...readOpts })
-  ]);
-  if (financialRoleCount !== Object.keys(FINAL_SALE_ROLE_DEFINITIONS).length || branchFinancialMappingCount < 2) return { state: STATES.RECOVERY_REQUIRED, marker };
+  const readiness = await financialBootstrapService.evaluateReadiness({
+    models,
+    companyId: company.id,
+    branchId: branch.id,
+    transaction,
+  });
+  if (readiness.status !== "READY") return { state: STATES.RECOVERY_REQUIRED, marker };
   if (marker?.state !== STATES.READY) return { state: STATES.RECOVERY_REQUIRED, marker };
   return { state: STATES.READY, marker };
 }

@@ -2,25 +2,16 @@
 
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
-const { Op } = require("sequelize");
 const { AppError, ValidationError } = require("../utils/errors");
 const { validatePasswordPolicy } = require("../utils/password-policy");
 const { ensureRolesForCompany, assignUserRole } = require("../bootstrap/accessControl");
-const { FINAL_SALE_ROLE_DEFINITIONS } = require("./company-bootstrap.service");
-const { TYPES } = require("./reservation-financial-resolver.service");
+const financialBootstrapService = require("./financial-bootstrap.service");
+const { ACCOUNT_ROLE_CATALOG, BRANCH_MAPPING_CATALOG } = require("./financial-account-catalog.service");
 const auditService = require("./audit.service");
 const { STATES, GLOBAL_SETUP_ID, resolveSetupState } = require("./first-run-setup-state.service");
 
 const SETUP_SCOPE = "first-run.bootstrap";
-const ACCOUNT_TEMPLATE = Object.freeze([
-  { roleCode: "ACCOUNTS_RECEIVABLE", code: "SYS-AR", name: "Accounts Receivable", nameAr: "الذمم المدينة", type: "asset", nature: "debit" },
-  { roleCode: "SALES_REVENUE", code: "SYS-SALES", name: "Sales Revenue", nameAr: "إيرادات المبيعات", type: "revenue", nature: "credit" },
-  { roleCode: "VAT_PAYABLE", code: "SYS-VAT", name: "VAT Payable", nameAr: "ضريبة القيمة المضافة المستحقة", type: "liability", nature: "credit" },
-  { roleCode: "INVENTORY_ASSET", code: "SYS-INVENTORY", name: "Inventory Asset", nameAr: "أصل المخزون", type: "asset", nature: "debit" },
-  { roleCode: "COST_OF_GOODS_SOLD", code: "SYS-COGS", name: "Cost of Goods Sold", nameAr: "تكلفة البضاعة المباعة", type: "expense", nature: "debit" },
-  { roleCode: "CUSTOMER_DEPOSIT_LIABILITY", code: "SYS-CUSTOMER-DEPOSIT", name: "Customer Deposit Liability", nameAr: "التزامات دفعات العملاء", type: "liability", nature: "credit" },
-  { roleCode: "CASH_TREASURY", code: "SYS-CASH", name: "Cash Treasury", nameAr: "الخزينة النقدية", type: "asset", nature: "debit" }
-]);
+const ACCOUNT_TEMPLATE = Object.freeze(Object.entries(ACCOUNT_ROLE_CATALOG).map(([roleCode, definition]) => ({ roleCode, ...definition })));
 
 function fail(code, status, message = "First-run setup is not available.") {
   return new AppError(message, status, code);
@@ -70,31 +61,20 @@ function verifyAuthorization(providedToken, environment = process.env) {
 }
 
 async function ensureFinancialReadiness(models, { company, branch, actorId, transaction }) {
-  const accountsByRole = new Map();
-  for (const template of ACCOUNT_TEMPLATE) {
-    const account = await models.Account.create({
-      id: id("ACC"), companyId: company.id, branchId: branch.id, code: `${template.code}-${branch.code}`,
-      name: template.name, nameAr: template.nameAr, type: template.type, nature: template.nature,
-      balance: 0, isActive: true, level: 1
-    }, { transaction });
-    accountsByRole.set(template.roleCode, account);
-    if (template.roleCode !== "CASH_TREASURY") {
-      await models.SystemAccountRole.create({
-        id: id("SAR"), companyId: company.id, branchId: branch.id, roleCode: template.roleCode,
-        accountId: account.id, createdBy: actorId, updatedBy: actorId
-      }, { transaction });
-    }
-  }
-  const deposit = accountsByRole.get("CUSTOMER_DEPOSIT_LIABILITY");
-  const cash = accountsByRole.get("CASH_TREASURY");
-  await models.BranchFinancialMapping.bulkCreate([
-    { id: id("BFM"), companyId: company.id, branchId: branch.id, mappingType: TYPES.RESERVATION_ADVANCE_LIABILITY, channel: null, accountId: deposit.id, isActive: true, createdBy: actorId, updatedBy: actorId },
-    { id: id("BFM"), companyId: company.id, branchId: branch.id, mappingType: TYPES.CASH_TREASURY, channel: null, accountId: cash.id, isActive: true, createdBy: actorId, updatedBy: actorId }
-  ], { transaction });
-  const actual = await models.SystemAccountRole.count({
-    where: { companyId: company.id, branchId: branch.id, roleCode: { [Op.in]: Object.values(FINAL_SALE_ROLE_DEFINITIONS).map((entry) => entry.roleCode) } }, transaction
+  await financialBootstrapService.reconcile({
+    models,
+    companyId: company.id,
+    branchId: branch.id,
+    actorId,
+    transaction,
   });
-  if (actual !== Object.keys(FINAL_SALE_ROLE_DEFINITIONS).length) throw fail("FIRST_RUN_FINANCIAL_MAPPING_INCOMPLETE", 422);
+  const readiness = await financialBootstrapService.evaluateReadiness({
+    models,
+    companyId: company.id,
+    branchId: branch.id,
+    transaction,
+  });
+  if (readiness.status !== "READY") throw fail("FIRST_RUN_FINANCIAL_MAPPING_INCOMPLETE", 422);
 }
 
 async function bootstrapFirstRun({ models, body, token, idempotencyKey, environment = process.env, dependencies = {} }) {
@@ -145,7 +125,7 @@ async function bootstrapFirstRun({ models, body, token, idempotencyKey, environm
       models.UserRole.count({ where: { userId: user.id, roleId: role.id }, transaction }),
       models.BranchFinancialMapping.count({ where: { companyId: company.id, branchId: branch.id, isActive: true }, transaction })
     ]);
-    if (activeSuperAdmins !== 1 || activeBranches < 1 || userRoleCount !== 1 || mappingCount < 2) {
+    if (activeSuperAdmins !== 1 || activeBranches < 1 || userRoleCount !== 1 || mappingCount < Object.keys(BRANCH_MAPPING_CATALOG).length) {
       throw fail("FIRST_RUN_FINANCIAL_MAPPING_INCOMPLETE", 422);
     }
     const result = { success: true, state: STATES.READY, next: "LOGIN" };
