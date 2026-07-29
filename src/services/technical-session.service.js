@@ -3,6 +3,7 @@ const jwt = require("jsonwebtoken");
 const { Op } = require("sequelize");
 const models = require("../models");
 const auditService = require("./audit.service");
+const { technicalSessionFingerprint } = require("./technical-session-linkage.service");
 const { AppError, UnauthorizedError } = require("../utils/errors");
 const { JWT_SECRET, JWT_REFRESH_SECRET, ACCESS_EXPIRY, REFRESH_EXPIRY } = require("../config/security");
 
@@ -168,9 +169,10 @@ async function revokeSession(sessionId, userId, reason = "logout", transaction =
     where: { id: sessionId, userId, revokedAt: null },
     transaction
   });
-  if (count && session?.deviceSessionId) {
+  if (count && session) {
     await revokeOperatorSessionsForUser(userId, reason, {
       deviceSessionId: session.deviceSessionId,
+      authSessionFingerprint: technicalSessionFingerprint(session.id),
       transaction
     });
   }
@@ -184,16 +186,27 @@ async function revokeUserSessions(userId, reason = "security_change", { exceptSe
     revokedAt: new Date(),
     revokeReason: reason
   }, { where, transaction });
-  if (count) await revokeOperatorSessionsForUser(userId, reason, { transaction });
+  if (count) await revokeOperatorSessionsForUser(userId, reason, { allUserSessions: true, transaction });
   return count;
 }
 
-async function revokeOperatorSessionsForUser(userId, reason = "technical_session_revoked", { deviceSessionId = null, transaction = null } = {}) {
+async function revokeOperatorSessionsForUser(userId, reason = "technical_session_revoked", {
+  deviceSessionId = null,
+  authSessionFingerprint = null,
+  allUserSessions = false,
+  transaction = null
+} = {}) {
   const where = {
     sessionUserId: userId,
     revokedAt: null
   };
-  if (deviceSessionId) where.deviceSessionId = deviceSessionId;
+  const ownedSelectors = [];
+  if (deviceSessionId) ownedSelectors.push({ deviceSessionId });
+  if (authSessionFingerprint) ownedSelectors.push({ authSessionFingerprint });
+  if (!allUserSessions) {
+    if (ownedSelectors.length === 0) return 0;
+    where[Op.or] = ownedSelectors;
+  }
   const [count] = await models.EmployeeOperationalSession.update({
     revokedAt: new Date(),
     revokedReason: reason

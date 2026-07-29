@@ -10,12 +10,14 @@ const routes = require("./routes");
 const errorMiddleware = require("./middleware/error.middleware");
 const requestIdMiddleware = require("./middleware/request-id.middleware");
 const errorResponseNormalizer = require("./middleware/error-response-normalizer.middleware");
+const { requestTerminalLogging, terminalLogFields } = require("./middleware/request-terminal-logging.middleware");
 const logger = require("./utils/logger");
 
 const app = express();
 
 app.use(requestIdMiddleware);
 app.use(errorResponseNormalizer);
+app.use(requestTerminalLogging);
 
 // 1. Security & Logging Middlewares
 app.use(helmet({
@@ -65,13 +67,17 @@ function sanitizedRequestUrl(originalUrl) {
   }
 }
 
-const morganFormat = (tokens, req, res) => [
+const morganFormat = (tokens, req, res) => {
+  const terminal = terminalLogFields(req, res);
+  return [
   tokens.method(req, res),
   sanitizedRequestUrl(req.originalUrl || req.url),
   tokens.status(req, res),
-  `${tokens["response-time"](req, res)}ms`,
+    `${terminal.duration}ms`,
+    `outcome=${terminal.outcome}`,
   `request_id=${req.requestId || "-"}`,
-].join(" ");
+  ].join(" ");
+};
 app.use(morgan(morganFormat, {
   stream: {
     write: (message) => logger.info(message.trim())

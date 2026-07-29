@@ -4601,8 +4601,14 @@ router.post("/employees", authMiddleware, requireAnyPermission(employeeCoreManag
   const t = await models.sequelize.transaction();
   try {
     const body = req.body || {};
-    if (!body.name || !body.role || !body.branch || !body.employeeCode) {
-      throw new ValidationError("name, role, branch and employeeCode are required.");
+    if (!body.name || !body.role || !body.employeeCode) {
+      throw new ValidationError("name, role and employeeCode are required.");
+    }
+    // Employee creation is identity-only; assign Branch access separately.
+    if (body.branchId || (typeof body.branch === "string" && body.branch.trim())) {
+      throw new ValidationError("Employee creation is identity-only; assign Branch access separately.", {
+        branchId: ["Create the employee first, then assign allowed Branches explicitly."]
+      });
     }
     const createPin = assertEmployeeCreatePin(body);
     const normalized = employeeAuthorizationService.normalizeEmployeeCode(body.employeeCode);
@@ -4619,9 +4625,9 @@ router.post("/employees", authMiddleware, requireAnyPermission(employeeCoreManag
       employeeCodeNormalized: normalized,
       role: String(body.role).trim(),
       systemRole: body.systemRole || "sales",
-      branch: String(body.branch).trim(),
-      branchId: body.branchId || null,
-      status: body.status || "present",
+      branch: "",
+      branchId: null,
+      status: "inactive",
       email: body.email || "",
       phone: body.phone || "",
       joinDate: body.joinDate || null,
@@ -4640,15 +4646,6 @@ router.post("/employees", authMiddleware, requireAnyPermission(employeeCoreManag
         transaction: t
       });
     }
-    if (employee.branchId) {
-      const branch = await models.Branch.findOne({ where: { id: employee.branchId, companyId: req.companyId, isActive: true }, transaction: t });
-      if (!branch) throw new ValidationError("branchId is invalid for this company.", { branchId: ["Invalid branch."] });
-      await models.EmployeeBranchAccess.findOrCreate({
-        where: { companyId: req.companyId, employeeId: employee.id, branchId: employee.branchId },
-        defaults: { id: `EBA-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, active: true, validFrom: new Date(), createdByUserId: req.user?.id || null },
-        transaction: t
-      });
-    }
     await auditService.record(req.companyId, {
       action: "employee.created",
       description: `Employee ${employee.name} created.`,
@@ -4660,7 +4657,7 @@ router.post("/employees", authMiddleware, requireAnyPermission(employeeCoreManag
     }, { transaction: t });
     await t.commit();
     emitEntityChanged(req.companyId, { entity: "Employee", action: "create", id: employee.id });
-    return res.status(201).json({ success: true, data: employee });
+    return res.status(201).json({ success: true, data: employee, setupState: "BRANCH_ASSIGNMENT_REQUIRED" });
   } catch (error) {
     await t.rollback();
     next(error);
@@ -4673,7 +4670,12 @@ async function updateEmployeeAuthoritative(req, res, next) {
     const employee = await models.Employee.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t, lock: t.LOCK.UPDATE });
     if (!employee) throw new NotFoundError("Employee not found.");
     const updates = {};
-    for (const key of ["name", "role", "systemRole", "branch", "branchId", "status", "email", "phone", "joinDate", "jobTitle", "approvalLimit", "assignedDevice", "notes", "approvalLimitsDetail", "deactivateReason"]) {
+    if (req.body.branch !== undefined || req.body.branchId !== undefined) {
+      throw new ValidationError("Employee default Branch is managed through explicit Branch access.", {
+        branchId: ["Use PUT /employees/:id/branches to assign and select a default Branch."]
+      });
+    }
+    for (const key of ["name", "role", "systemRole", "status", "email", "phone", "joinDate", "jobTitle", "approvalLimit", "assignedDevice", "notes", "approvalLimitsDetail", "deactivateReason"]) {
       if (req.body[key] !== undefined) updates[key] = req.body[key];
     }
     if (req.body.employeeCode !== undefined) {
@@ -4684,8 +4686,14 @@ async function updateEmployeeAuthoritative(req, res, next) {
         });
       }
     }
-    if (updates.status === "present" && !(await employeeHasConfiguredCredential(req.companyId, employee.id, t))) {
-      throw new ValidationError("Employee PIN must be configured before activation.", { pin: ["Set a six-digit Employee PIN before activating this Employee."] });
+    if (updates.status === "present") {
+      if (!(await employeeHasConfiguredCredential(req.companyId, employee.id, t))) {
+        throw new ValidationError("Employee PIN must be configured before activation.", { pin: ["Set a six-digit Employee PIN before activating this Employee."] });
+      }
+      const readiness = await employeeAuthorizationService.assertEmployeeOperationalReadiness({ companyId: req.companyId, employeeId: employee.id, transaction: t });
+      if (!readiness.ready) {
+        throw new ValidationError("Employee Branch assignment must be completed before activation.", { branchId: ["Assign at least one active Branch before activating this Employee."] });
+      }
     }
     const before = employee.toJSON();
     await employee.update(updates, { transaction: t });
@@ -4736,6 +4744,10 @@ router.post("/employees/:id/reactivate", authMiddleware, requireAnyPermission(em
     if (!employee) throw new NotFoundError("Employee not found.");
     if (!(await employeeHasConfiguredCredential(req.companyId, employee.id))) {
       throw new ValidationError("Employee PIN must be configured before activation.", { pin: ["Set a six-digit Employee PIN before activating this Employee."] });
+    }
+    const readiness = await employeeAuthorizationService.assertEmployeeOperationalReadiness({ companyId: req.companyId, employeeId: employee.id });
+    if (!readiness.ready) {
+      throw new ValidationError("Employee Branch assignment must be completed before activation.", { branchId: ["Assign at least one active Branch before activating this Employee."] });
     }
     await employee.update({ status: "present", deactivateReason: null });
     emitEntityChanged(req.companyId, { entity: "Employee", action: "update", id: employee.id });

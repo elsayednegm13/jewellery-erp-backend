@@ -231,6 +231,37 @@ async function assertEmployeeBranchAccess({ companyId, employeeId, branchId, tra
   return Boolean(access);
 }
 
+async function assertEmployeeOperationalReadiness({ companyId, employeeId, transaction }) {
+  const employee = await getEmployeeOrThrow(companyId, employeeId, transaction);
+  const activeBranchAccessCount = await models.EmployeeBranchAccess.count({
+    where: {
+      companyId,
+      employeeId,
+      active: true,
+      [Op.and]: [
+        { [Op.or]: [{ validFrom: null }, { validFrom: { [Op.lte]: new Date() } }] },
+        { [Op.or]: [{ validTo: null }, { validTo: { [Op.gte]: new Date() } }] }
+      ]
+    },
+    transaction
+  });
+  if (!activeBranchAccessCount) {
+    return { ready: false, code: "EMPLOYEE_BRANCH_SETUP_REQUIRED", employee };
+  }
+  if (employee.branchId) {
+    const primaryBranchAllowed = await assertEmployeeBranchAccess({
+      companyId,
+      employeeId,
+      branchId: employee.branchId,
+      transaction
+    });
+    if (!primaryBranchAllowed) {
+      return { ready: false, code: "EMPLOYEE_BRANCH_SETUP_REQUIRED", employee };
+    }
+  }
+  return { ready: true, employee };
+}
+
 async function resolveEmployeePermissions({ companyId, employeeId, branchId = null, transaction = null }) {
   const employee = await getEmployeeOrThrow(companyId, employeeId, transaction);
   if (branchId) {
@@ -326,6 +357,11 @@ async function verifyEmployeeCredential({
     if (employee.status !== "present") {
       await recordVerificationAttempt({ ...attemptWithEmployee, result: "failure", failureCode: "EMPLOYEE_INACTIVE" });
       return { failed: true, code: "EMPLOYEE_VERIFICATION_FAILED", statusCode: 403 };
+    }
+    const readiness = await assertEmployeeOperationalReadiness({ companyId, employeeId: employee.id, transaction: t });
+    if (!readiness.ready) {
+      await recordVerificationAttempt({ ...attemptWithEmployee, result: "failure", failureCode: readiness.code });
+      return { failed: true, code: readiness.code, statusCode: 403 };
     }
     const branchAllowed = await assertEmployeeBranchAccess({ companyId, employeeId: employee.id, branchId, transaction: t });
     if (!branchAllowed) {
@@ -430,23 +466,41 @@ async function updateEmployeeAuthorization({ companyId, employeeId, actorUser, r
   return transaction ? execute(transaction) : models.sequelize.transaction(execute);
 }
 
-async function updateEmployeeBranches({ companyId, employeeId, actorUser, branchIds = [], transaction }) {
+async function updateEmployeeBranches({ companyId, employeeId, actorUser, branchIds = [], defaultBranchId = undefined, transaction }) {
   await assertManagerPermission(actorUser, "employees.branches.manage");
   const execute = async (t) => {
     const employee = await getEmployeeOrThrow(companyId, employeeId, t);
     const branchIdSet = sortedUnique(branchIds);
     const branches = branchIdSet.length ? await models.Branch.findAll({ where: { id: branchIdSet, companyId, isActive: true }, transaction: t }) : [];
     if (branches.length !== branchIdSet.length) throw new ValidationError("One or more branches are invalid for this company.", { branchIds: ["Invalid branch ID."] });
+    const defaultWasSpecified = defaultBranchId !== undefined;
+    const requestedDefaultBranchId = defaultWasSpecified
+      ? (defaultBranchId ? String(defaultBranchId) : null)
+      : (employee.branchId || null);
+    if (requestedDefaultBranchId && !branchIdSet.includes(requestedDefaultBranchId)) {
+      throw new ValidationError("Default Branch must be one of the employee's active Branch assignments.", {
+        defaultBranchId: ["Choose a default Branch from the assigned Branches."]
+      });
+    }
+    const nextDefaultBranch = requestedDefaultBranchId
+      ? branches.find((branch) => String(branch.id) === requestedDefaultBranchId) || null
+      : null;
     const existingBranches = await models.EmployeeBranchAccess.findAll({
       where: { companyId, employeeId, active: true },
       attributes: ["branchId"],
       transaction: t
     });
-    const changed = !sameStringSet(existingBranches.map((row) => row.branchId), branchIdSet);
+    const changed =
+      !sameStringSet(existingBranches.map((row) => row.branchId), branchIdSet) ||
+      String(employee.branchId || "") !== String(nextDefaultBranch?.id || "");
     await models.EmployeeBranchAccess.destroy({ where: { companyId, employeeId }, transaction: t });
     await models.EmployeeBranchAccess.bulkCreate(branchIdSet.map((branchId) => ({
       id: id("EBA"), companyId, employeeId, branchId, active: true, validFrom: new Date(), createdByUserId: actorUser?.id || null
     })), { transaction: t });
+    await employee.update({
+      branchId: nextDefaultBranch?.id || null,
+      branch: nextDefaultBranch?.name || ""
+    }, { transaction: t });
     await auditService.record(companyId, {
       action: "employee.branches.updated",
       description: `Employee branch access updated for ${employee.employeeCode || employee.id}.`,
@@ -454,7 +508,7 @@ async function updateEmployeeBranches({ companyId, employeeId, actorUser, branch
       userId: actorUser?.id || null,
       place: "Employees",
       sourceDocument: employee.id,
-      after: JSON.stringify({ branchIds: branchIdSet })
+      after: JSON.stringify({ branchIds: branchIdSet, defaultBranchId: nextDefaultBranch?.id || null })
     }, { transaction: t });
     if (changed) {
       await incrementEmployeeAuthorizationVersion({ companyId, employeeId, transaction: t });
@@ -619,6 +673,7 @@ module.exports = {
   resetEmployeePin,
   verifyEmployeeCredential,
   assertEmployeeBranchAccess,
+  assertEmployeeOperationalReadiness,
   resolveEmployeePermissions,
   employeeHasPermission,
   incrementEmployeeAuthorizationVersion,

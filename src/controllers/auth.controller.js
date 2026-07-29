@@ -1,7 +1,7 @@
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const { Op } = require("sequelize");
-const { User, Company, PasswordResetToken, EmailChangeToken } = require("../models");
+const { sequelize, User, Company, PasswordResetToken, EmailChangeToken } = require("../models");
 const { AppError, ValidationError, UnauthorizedError } = require("../utils/errors");
 const logger = require("../utils/logger");
 const permissionService = require("../services/permission.service");
@@ -208,7 +208,12 @@ class AuthController {
   logout = async (req, res, next) => {
     try {
       if (req.technicalSession?.id && req.user?.id) {
-        await technicalSessions.revokeSession(req.technicalSession.id, req.user.id, "logout");
+        await sequelize.transaction((transaction) => technicalSessions.revokeSession(
+          req.technicalSession.id,
+          req.user.id,
+          "logout",
+          transaction
+        ));
       }
       logger.info(`User logged out successfully`);
       return res.status(200).json({

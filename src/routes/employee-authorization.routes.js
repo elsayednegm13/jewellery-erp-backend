@@ -409,7 +409,8 @@ router.put("/employees/:id/branches", authMiddleware, requirePermission("employe
       companyId: req.companyId,
       employeeId: req.params.id,
       actorUser: req.user,
-      branchIds
+      branchIds,
+      defaultBranchId: req.body?.defaultBranchId
     });
     return res.status(200).json({ success: true, data: { items: rows.map(branchAccessSafe) }, items: rows.map(branchAccessSafe) });
   } catch (error) {

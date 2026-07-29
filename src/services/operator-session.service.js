@@ -2,6 +2,7 @@ const { Op } = require("sequelize");
 const models = require("../models");
 const employeeAuth = require("./employee-authorization.service");
 const auditService = require("./audit.service");
+const { technicalSessionFingerprint } = require("./technical-session-linkage.service");
 const { AppError, ValidationError } = require("../utils/errors");
 
 const IDLE_TIMEOUT_MINUTES = 30;
@@ -155,6 +156,14 @@ async function assertLiveSession(session, req, options = {}) {
     await revokeSession(session, "employee_inactive");
     return { active: false, reason: "EMPLOYEE_INACTIVE", statusCode: 403, session };
   }
+  const readiness = await employeeAuth.assertEmployeeOperationalReadiness({
+    companyId: req.companyId,
+    employeeId: employee.id
+  });
+  if (!readiness.ready) {
+    await revokeSession(session, readiness.code);
+    return { active: false, reason: readiness.code, statusCode: 403, session };
+  }
   credential = await models.EmployeeCredential.findOne({
     where: { companyId: req.companyId, employeeId: employee.id, active: true }
   });
@@ -265,7 +274,7 @@ async function verifyOperator({ req, body }) {
       credentialVersion: credential?.credentialVersion || 1,
       authorizationVersion: employee.authorizationVersion || 1,
       deviceSessionId,
-      authSessionFingerprint: req.headers.authorization ? String(req.headers.authorization).slice(-32) : null,
+      authSessionFingerprint: technicalSessionFingerprint(req.technicalSession?.id),
       ipAddress: req.ip || req.connection?.remoteAddress || null,
       userAgent: req.headers["user-agent"] || null,
       employeeCodeSnapshot: employee.employeeCode || null,
