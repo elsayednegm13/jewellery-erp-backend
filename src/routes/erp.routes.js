@@ -36,8 +36,10 @@ const companyBootstrapService = require("../services/company-bootstrap.service")
 const ledgerReportingService = require("../services/ledger-reporting.service");
 const financialBootstrapService = require("../services/financial-bootstrap.service");
 const financialAccountService = require("../services/financial-account.service");
+const financialAccountResolver = require("../services/financial-account-resolver.service");
 const financialReportingService = require("../services/financial-reporting.service");
-const { ACCOUNT_ROLE_CATALOG, BRANCH_MAPPING_CATALOG } = require("../services/financial-account-catalog.service");
+const financialMappingCompatibility = require("../services/financial-mapping-compatibility.service");
+const { BRANCH_MAPPING_CATALOG } = require("../services/financial-account-catalog.service");
 const { requireBranchCustomerResource } = require("../services/branch-isolation.service");
 const logger = require("../utils/logger");
 const { AppError, ValidationError, NotFoundError, ConflictError, ForbiddenError } = require("../utils/errors");
@@ -440,6 +442,14 @@ function normalizeTreasuryAccount(value, field = "account") {
   return account;
 }
 
+function treasuryMappingRoleForPayment(value = "cash") {
+  const method = String(value || "cash").toLowerCase();
+  return method.includes("card") || method.includes("bank") ||
+    method.includes("شبك") || method.includes("transfer") || method.includes("تحويل")
+    ? "BANK_ACCOUNT"
+    : "CASH_TREASURY";
+}
+
 async function assertActiveAccountCode(companyId, code, options = {}) {
   const normalized = String(code || "").trim();
   if (!normalized) throw new ValidationError("counterAccountCode is required for manual treasury cash movements.");
@@ -451,13 +461,13 @@ async function assertActiveAccountCode(companyId, code, options = {}) {
   return account;
 }
 
-async function assertTreasuryAccountKey(companyId, key, options = {}) {
-  const code = TREASURY_GL[key];
-  const account = await assertActiveAccountCode(companyId, code, options);
-  if (account.type !== "asset" || account.nature !== "debit") {
-    throw new ValidationError(`Treasury account ${code} must be an active debit asset account.`);
-  }
-  return account;
+async function resolveTreasuryAccount(companyId, branchId, key, options = {}) {
+  return financialAccountResolver.resolveRequiredBranchFinancialAccount({
+    companyId,
+    branchId,
+    mappingRole: key === "bank" ? "BANK_ACCOUNT" : "CASH_TREASURY",
+    transaction: options.transaction,
+  });
 }
 
 function parsePositiveInt(value, fallback, max = 100) {
@@ -1436,8 +1446,8 @@ router.post(
     }
 
     // 9. Post GL Journal Entry (posting service expects positive absolute figures).
-    // The return journal is the sole GL owner: AR relief (Cr 1300) + cash (Cr 1110)
-    // + bank (Cr 1120) + customer credit (Cr 2300) all in one balanced entry.
+    // The return journal is the sole GL owner: mapped AR relief + mapped cash /
+    // bank + mapped customer credit liability, all in one balanced entry.
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
     let journalEntry = null;
     try {
@@ -1453,8 +1463,6 @@ router.post(
         cashRefundAmount: cashRefundPortion,
         bankRefundAmount: bankRefundPortion,
         customerCreditAmount: creditPortion,
-        cashAccountCode: "1110",
-        bankAccountCode: "1120"
       });
     } catch (postErr) {
       logger.error(`[Posting] Failed to post return journal entry: ${postErr.message}`);
@@ -2277,7 +2285,7 @@ router.post(
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
     const payAcc = paymentMethod.toLowerCase();
     const isBank = payAcc.includes("card") || payAcc.includes("bank") || payAcc.includes("transfer") || payAcc.includes("شبكة") || payAcc.includes("تحويل");
-    const accountCode = isBank ? "1120" : "1110";
+    const paymentMappingRole = isBank ? "BANK_ACCOUNT" : "CASH_TREASURY";
 
     // Phase 30.3 — operator-selectable settlement of the target-policy excess due to customer.
     // Absent settlement preserves the legacy default (full excess refunded to
@@ -2306,16 +2314,16 @@ router.post(
     }
 
     const lines = [];
-    // Money leg (Phase 21.2 + Phase 30): split between Cash 1110 / Bank 1120 /
-    // Customer Deposits 2300 (credit) and Accounts Receivable 1300. One journal.
+    // Money leg (Phase 21.2 + Phase 30): split between the authoritative Branch
+    // cash, bank, customer-deposit, and receivable mappings. One journal.
     if (amountDueFromCustomer > 0) {
-      if (cashInAmount > 0) lines.push({ accountCode, debit: cashInAmount, credit: 0, description: "دفع فارق استبدال نقداً" });
-      if (receivableIncreaseAmount > 0) lines.push({ accountCode: "1300", debit: receivableIncreaseAmount, credit: 0, description: "زيادة ذمم العميل — فارق استبدال" });
+      if (cashInAmount > 0) lines.push({ mappingRole: paymentMappingRole, debit: cashInAmount, credit: 0, description: "دفع فارق استبدال نقداً" });
+      if (receivableIncreaseAmount > 0) lines.push({ mappingRole: "ACCOUNTS_RECEIVABLE", debit: receivableIncreaseAmount, credit: 0, description: "زيادة ذمم العميل — فارق استبدال" });
     } else if (excessDueToCustomer > 0 || receivableReliefAmount > 0) {
-      if (receivableReliefAmount > 0) lines.push({ accountCode: "1300", debit: 0, credit: receivableReliefAmount, description: "تخفيض ذمم العميل — فارق استبدال" });
-      if (refundCashPortion > 0) lines.push({ accountCode: "1110", debit: 0, credit: refundCashPortion, description: "إرجاع فارق استبدال نقداً" });
-      if (refundBankPortion > 0) lines.push({ accountCode: "1120", debit: 0, credit: refundBankPortion, description: "إرجاع فارق استبدال بنكياً" });
-      if (refundCreditPortion > 0) lines.push({ accountCode: "2300", debit: 0, credit: refundCreditPortion, description: "رصيد دائن للعميل — فارق استبدال" });
+      if (receivableReliefAmount > 0) lines.push({ mappingRole: "ACCOUNTS_RECEIVABLE", debit: 0, credit: receivableReliefAmount, description: "تخفيض ذمم العميل — فارق استبدال" });
+      if (refundCashPortion > 0) lines.push({ mappingRole: "CASH_TREASURY", debit: 0, credit: refundCashPortion, description: "إرجاع فارق استبدال نقداً" });
+      if (refundBankPortion > 0) lines.push({ mappingRole: "BANK_ACCOUNT", debit: 0, credit: refundBankPortion, description: "إرجاع فارق استبدال بنكياً" });
+      if (refundCreditPortion > 0) lines.push({ mappingRole: "RESERVATION_ADVANCE_LIABILITY", debit: 0, credit: refundCreditPortion, description: "رصيد دائن للعميل — فارق استبدال" });
     }
 
     if (returnedValue > 0) {
@@ -2652,9 +2660,9 @@ router.post("/customers/:id/gold/deposit", authMiddleware, async (req, res, next
         karat: Number(karat)
       }, { transaction: t });
 
-      // Payout Journal: Dr Customer Deposits (2300) / Cr Cash/Bank (1110/1120)
+      // Payout Journal: Dr mapped customer deposits / Cr mapped cash or bank.
       const payMethodLower = payMethod.toLowerCase();
-      const cashAccountCode = (payMethodLower.includes("bank") || payMethodLower.includes("transfer")) ? "1120" : "1110";
+      const treasurySource = (payMethodLower.includes("bank") || payMethodLower.includes("transfer")) ? "bank" : "cash";
 
       payoutJournal = await postingService.postEntry(req.companyId, {
         description: `صرف نقدي مقابل ذهب مستعمل — ${customer.name} (${payoutId})`,
@@ -2665,8 +2673,8 @@ router.post("/customers/:id/gold/deposit", authMiddleware, async (req, res, next
         transaction: t,
         branchId
       }, [
-        { accountCode: "2300", debit: calculatedValue, credit: 0, description: "تسوية التزام ذهب عميل" },
-        { accountCode: cashAccountCode, debit: 0, credit: calculatedValue, description: "صرف نقدي للعميل" }
+        { mappingRole: "RESERVATION_ADVANCE_LIABILITY", debit: calculatedValue, credit: 0, description: "تسوية التزام ذهب عميل" },
+        { mappingRole: treasuryMappingRoleForPayment(treasurySource), debit: 0, credit: calculatedValue, description: "صرف نقدي للعميل" }
       ]);
 
       // Create Treasury Cash Transaction
@@ -2676,7 +2684,7 @@ router.post("/customers/:id/gold/deposit", authMiddleware, async (req, res, next
         branchId,
         branch: branchRecord.name,
         type: "cash_out",
-        account: cashAccountCode === "1120" ? "bank" : "cash",
+        account: treasurySource,
         amount: calculatedValue,
         category: "شراء ذهب مستعمل",
         description: `صرف نقدي مقابل شراء ذهب مستعمل رقم ${payoutId}`,
@@ -2812,10 +2820,10 @@ router.post("/customers/:id/gold/payout", authMiddleware, async (req, res, next)
       approvedBy: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System"
     }, { transaction: t });
 
-    // Dr Customer Deposits (2300) / Cr Cash/Bank (1110/1120)
+    // Dr mapped customer deposits / Cr mapped cash or bank.
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
     const payMethodLower = payMethod.toLowerCase();
-    const cashAccountCode = (payMethodLower.includes("bank") || payMethodLower.includes("transfer")) ? "1120" : "1110";
+    const treasurySource = (payMethodLower.includes("bank") || payMethodLower.includes("transfer")) ? "bank" : "cash";
 
     const journalEntry = await postingService.postEntry(req.companyId, {
       description: `صرف رصيد ذهب عميل — ${customer.name} (سند ${cgpId})`,
@@ -2825,8 +2833,8 @@ router.post("/customers/:id/gold/payout", authMiddleware, async (req, res, next)
       postedBy: actor,
       transaction: t
     }, [
-      { accountCode: "2300", debit: calculatedValue, credit: 0, description: "سحب أمانات عملاء" },
-      { accountCode: cashAccountCode, debit: 0, credit: calculatedValue, description: "صرف نقدي للعميل" }
+      { mappingRole: "RESERVATION_ADVANCE_LIABILITY", debit: calculatedValue, credit: 0, description: "سحب أمانات عملاء" },
+      { mappingRole: treasuryMappingRoleForPayment(treasurySource), debit: 0, credit: calculatedValue, description: "صرف نقدي للعميل" }
     ]);
 
     // Persist the success response for idempotent replay BEFORE commit.
@@ -3137,7 +3145,7 @@ router.post("/manufacturing-orders/process", authMiddleware, requirePermission("
       { accountCode: "1200", debit: 0, credit: rawGoldCost, description: `استهلاك خام ذهب ${parentAsset.id}` }
     ];
     if (labor > 0) {
-      glLines.push({ accountCode: "1110", debit: 0, credit: labor, description: `أجور صياغة مدفوعة نقداً` });
+      glLines.push({ mappingRole: "CASH_TREASURY", debit: 0, credit: labor, description: `أجور صياغة مدفوعة نقداً` });
     }
 
     let journalEntry = null;
@@ -5744,7 +5752,7 @@ router.get(
   requireBusinessPermission("accounting.view"),
   async (req, res, next) => {
     try {
-      const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.query.branch);
+      const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.query.branch, { required: true });
       const [summary, settings] = await Promise.all([
         accountBalanceService.calculateTreasuryLedgerSummary({ companyId: req.companyId, branchId }),
         settingsService.getCompanySettings(req.companyId),
@@ -5883,21 +5891,43 @@ router.get("/financial/branch-mappings", authMiddleware, requireBusinessPermissi
   } catch (error) { return next(error); }
 });
 
+router.get("/financial/branch-mappings/:mappingRole/eligible-accounts", authMiddleware, requireBusinessPermission("settings.update"), async (req, res, next) => {
+  try {
+    const mappingType = String(req.params.mappingRole || "").trim().toUpperCase();
+    if (!BRANCH_MAPPING_CATALOG[mappingType]) throw new ValidationError("Unsupported financial mapping role.");
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.headers["x-branch-id"], { required: true });
+    const accounts = await financialMappingCompatibility.listEligibleAccounts({
+      models,
+      companyId: req.companyId,
+      branchId,
+      mappingType,
+    });
+    return res.status(200).json({
+      success: true,
+      data: {
+        mappingRole: mappingType,
+        accounts,
+      },
+    });
+  } catch (error) { return next(error); }
+});
+
 router.put("/financial/branch-mappings/:mappingRole", authMiddleware, requireBusinessPermission("settings.update", { touch: true }), async (req, res, next) => {
   try {
     const mappingType = String(req.params.mappingRole || "").trim().toUpperCase();
     const mappingDefinition = BRANCH_MAPPING_CATALOG[mappingType];
     if (!mappingDefinition) throw new ValidationError("Unsupported financial mapping role.");
     const branchId = await resolveAuthorizedBranchId(req, req.body?.branchId || req.headers["x-branch-id"], { required: true });
-    const roleDefinition = ACCOUNT_ROLE_CATALOG[mappingDefinition.accountRoleCode];
-    const account = await models.Account.findOne({
-      where: { id: req.body?.accountId, companyId: req.companyId, isActive: true, isPosting: true },
-    });
-    if (!account || (account.branchId && String(account.branchId) !== String(branchId)) ||
-        account.type !== roleDefinition.type || account.nature !== roleDefinition.nature) {
-      throw new ValidationError("The selected account is not eligible for this Branch mapping.");
-    }
     const data = await models.sequelize.transaction(async (transaction) => {
+      const account = await financialMappingCompatibility.assertMappingAccountCompatibility({
+        models,
+        companyId: req.companyId,
+        branchId,
+        mappingType,
+        accountId: req.body?.accountId,
+        transaction,
+        lock: true,
+      });
       const rows = await models.BranchFinancialMapping.findAll({
         where: { companyId: req.companyId, branchId, mappingType, channel: null },
         transaction,
@@ -6759,7 +6789,14 @@ router.post("/purchase-orders/:id/pay", authMiddleware, requireBusinessPermissio
       throw new ValidationError("Payment amount must be a finite number greater than zero.");
     }
     const account = normalizeTreasuryAccount(b.account, "account");
-    await assertTreasuryAccountKey(req.companyId, account, { transaction: t });
+    const paymentBranchId = po.branchId || req.branchId;
+    const treasuryAccount = await resolveTreasuryAccount(req.companyId, paymentBranchId, account, { transaction: t });
+    const supplierPayableAccount = await financialAccountResolver.resolveRequiredBranchFinancialAccount({
+      companyId: req.companyId,
+      branchId: paymentBranchId,
+      mappingRole: "SUPPLIER_PAYABLE",
+      transaction: t,
+    });
     const date = b.date && isValidYmd(String(b.date)) ? String(b.date) : new Date().toISOString().slice(0, 10);
     if (b.date && !isValidYmd(String(b.date))) {
       throw new ValidationError("Invalid 'date' (expected YYYY-MM-DD).");
@@ -6795,18 +6832,22 @@ router.post("/purchase-orders/:id/pay", authMiddleware, requireBusinessPermissio
       account,
       amount,
       category: "supplier_purchase",
-      counterAccountCode: "2100", // Accounts Payable — Dr AP / Cr cash|bank
+      counterAccountCode: supplierPayableAccount.code,
       description: b.note ? String(b.note) : `سداد للمورّد عن أمر الشراء ${po.id}`,
       reference: po.id,
       branch: po.branch || req.branchId || "Main Branch",
-      branchId: req.branchId && String(req.branchId).startsWith("BR-") ? req.branchId : null,
+      branchId: paymentBranchId,
       date,
       createdBy: actor,
       status: "posted",
       idempotencyKey: String(idempotencyKey),
     }, { transaction: t });
 
-    const journalEntry = await postingService.postCashEntry(cashTx.toJSON(), actor, { transaction: t });
+    const journalEntry = await postingService.postCashEntry(cashTx.toJSON(), actor, {
+      transaction: t,
+      treasuryAccountId: treasuryAccount.id,
+      counterAccountId: supplierPayableAccount.id,
+    });
     await cashTx.update({ journalEntryId: journalEntry.id }, { transaction: t });
 
     const paidSoFarAfter = round4(paidSoFarBefore + amount);
@@ -8200,7 +8241,6 @@ function normalizeCustomerDepositPayload(req, defaultCurrency = "AED") {
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "accountCode")) throw new ValidationError("حساب الإيداع يحدده الخادم حسب طريقة الدفع.");
-  const accountCode = paymentMethod === "bank" ? "1120" : "1110";
 
   const currency = String(body.currency || defaultCurrency || "AED").trim().toUpperCase().slice(0, 8) || "AED";
   const date = body.date ? String(body.date).trim() : new Date().toISOString().slice(0, 10);
@@ -8214,7 +8254,6 @@ function normalizeCustomerDepositPayload(req, defaultCurrency = "AED") {
     amount,
     currency,
     paymentMethod,
-    accountCode,
     date,
     description,
     reference,
@@ -8234,7 +8273,6 @@ function normalizeCustomerRefundPayload(req, defaultCurrency = "AED") {
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "accountCode")) throw new ValidationError("حساب رد الرصيد يحدده الخادم حسب طريقة الدفع.");
-  const accountCode = paymentMethod === "bank" ? "1120" : "1110";
 
   const currency = String(body.currency || defaultCurrency || "AED").trim().toUpperCase().slice(0, 8) || "AED";
   const date = body.date ? String(body.date).trim() : new Date().toISOString().slice(0, 10);
@@ -8248,7 +8286,6 @@ function normalizeCustomerRefundPayload(req, defaultCurrency = "AED") {
     amount,
     currency,
     paymentMethod,
-    accountCode,
     date,
     description,
     reference,
@@ -8322,7 +8359,7 @@ router.post("/customers/:id/credit/deposit", authMiddleware, requireBusinessPerm
         const branch = await resolveAuthorizedBranch(req, effectiveBranchId, { required: true, transaction: t });
         const customer = await requireBranchCustomerResource({ companyId: req.companyId, branchId: branch.id, customerId: req.params.id, transaction: t, lock: true });
         const depositAccount = await companyBootstrapService.resolveSystemAccountRole(req.companyId, branch.id, companyBootstrapService.SYSTEM_ACCOUNT_ROLES.CUSTOMER_DEPOSIT_LIABILITY, t);
-        await assertTreasuryAccountKey(req.companyId, payload.paymentMethod, { transaction: t });
+        const treasuryAccount = await resolveTreasuryAccount(req.companyId, branch.id, payload.paymentMethod, { transaction: t });
         if (customer.status && customer.status !== "active") {
           throw new ValidationError("لا يمكن تسجيل إيداع لعميل غير نشط");
         }
@@ -8360,15 +8397,15 @@ router.post("/customers/:id/credit/deposit", authMiddleware, requireBusinessPerm
           metadata: {
             reference: payload.reference,
             paymentMethod: payload.paymentMethod,
-            accountCode: payload.accountCode,
+            treasurySource: payload.paymentMethod,
             depositAccountId: depositAccount.id,
           },
           transaction: t,
           glPosting: {
             enabled: true,
-            debitAccountCode: payload.accountCode,
-            creditAccountCode: depositAccount.code,
-            customerDepositAccountCode: depositAccount.code,
+            debitAccountId: treasuryAccount.id,
+            creditAccountId: depositAccount.id,
+            customerDepositAccountId: depositAccount.id,
             description: payload.description,
             date: payload.date,
             postedBy: actorName,
@@ -8502,7 +8539,7 @@ router.post("/customers/:id/credit/refund", authMiddleware, requireBusinessPermi
         const branch = await resolveAuthorizedBranch(req, effectiveBranchId, { required: true, transaction: t });
         const customer = await requireBranchCustomerResource({ companyId: req.companyId, branchId: branch.id, customerId: req.params.id, transaction: t, lock: true });
         const depositAccount = await companyBootstrapService.resolveSystemAccountRole(req.companyId, branch.id, companyBootstrapService.SYSTEM_ACCOUNT_ROLES.CUSTOMER_DEPOSIT_LIABILITY, t);
-        await assertTreasuryAccountKey(req.companyId, payload.paymentMethod, { transaction: t });
+        const treasuryAccount = await resolveTreasuryAccount(req.companyId, branch.id, payload.paymentMethod, { transaction: t });
         if (customer.status && customer.status !== "active") {
           throw new ValidationError("لا يمكن رد رصيد لعميل غير نشط");
         }
@@ -8551,15 +8588,15 @@ router.post("/customers/:id/credit/refund", authMiddleware, requireBusinessPermi
           metadata: {
             reference: payload.reference,
             paymentMethod: payload.paymentMethod,
-            accountCode: payload.accountCode,
+            treasurySource: payload.paymentMethod,
             depositAccountId: depositAccount.id,
           },
           transaction: t,
           glPosting: {
             enabled: true,
-            debitAccountCode: depositAccount.code,
-            creditAccountCode: payload.accountCode,
-            customerDepositAccountCode: depositAccount.code,
+            debitAccountId: depositAccount.id,
+            creditAccountId: treasuryAccount.id,
+            customerDepositAccountId: depositAccount.id,
             description: payload.description,
             date: payload.date,
             postedBy: actorName,
@@ -10444,15 +10481,19 @@ router.get("/reports/ledger/cash-reconciliation", authMiddleware, requireBusines
   try {
     const from = req.query.from ? String(req.query.from) : null;
     const to = req.query.to ? String(req.query.to) : null;
-    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId);
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId, { required: true });
     if (from && !isValidYmd(from)) throw new ValidationError("Invalid 'from' date (expected YYYY-MM-DD).");
     if (to && !isValidYmd(to)) throw new ValidationError("Invalid 'to' date (expected YYYY-MM-DD).");
     if (from && to && from > to) throw new ValidationError("'from' must not be after 'to'.");
     await ledgerReportingService.assertReportableLedgerIntegrity({ companyId: req.companyId, branchId });
 
+    const [cashAccount, bankAccount] = await Promise.all([
+      resolveTreasuryAccount(req.companyId, branchId, "cash"),
+      resolveTreasuryAccount(req.companyId, branchId, "bank"),
+    ]);
     const accountSpecs = [
-      { key: "cash", code: "1110", label: "Cash on Hand" },
-      { key: "bank", code: "1120", label: "Bank Accounts" },
+      { key: "cash", code: cashAccount.code, accountId: cashAccount.id, label: "Cash Treasury" },
+      { key: "bank", code: bankAccount.code, accountId: bankAccount.id, label: "Bank Account" },
     ];
     const codes = accountSpecs.map((spec) => spec.code);
     const accounts = await models.Account.findAll({
@@ -10550,7 +10591,7 @@ router.get("/reports/ledger/cash-reconciliation", authMiddleware, requireBusines
           glSource: "journal_lines",
           operationalSource: "cash_transactions",
           readOnly: true,
-          accounts: ["1110", "1120"],
+          accountRoles: ["CASH_TREASURY", "BANK_ACCOUNT"],
         },
       },
     });
@@ -13034,13 +13075,11 @@ router.post(
     const payDate = new Date().toISOString().slice(0, 10);
 
     // Treasury account mirrors the GL cash account chosen by
-    // postInstallmentPayment (cashCode 1120/bank vs 1110/cash) so the treasury
+    // postInstallmentPayment uses the selected Branch bank/cash mapping so the treasury
     // log row lands on the same account the journal debits.
     const m = String(method).toLowerCase();
     const treasuryAccount =
       m.includes("card") || m.includes("bank") || m.includes("شبك") || m.includes("تحويل") ? "bank" : "cash";
-    const branchId =
-      req.branchId && String(req.branchId).startsWith("BR-") ? req.branchId : null;
 
     // Phase 10O + 11D: record the installment collection ATOMICALLY — the
     // installment update, the Payment row (so Customer Statement V2 picks it up
@@ -13079,8 +13118,11 @@ router.post(
           lock: { level: t.LOCK.UPDATE, of: models.Invoice }
         });
         if (!invoice) throw new NotFoundError("الفاتورة المرتبطة بالقسط غير موجودة");
+        // Installments retain a display-only `branch` label. Financial posting must
+        // use the persisted, Company-scoped invoice Branch identifier instead.
+        const branchId = await resolveAuthorizedBranchId(req, invoice.branchId, { required: true, transaction: t });
         await salesOperatorPolicy.assertSalesOperatorPolicy(req, "sales.installment.collect", {
-          branchId: invoice.branchId || branchId,
+          branchId,
           transaction: t
         });
 
@@ -13126,7 +13168,7 @@ router.post(
         }, { transaction: t });
 
         journalEntry = await postingService.postInstallmentPayment(
-          inst.toJSON(), amount, method, actor, { transaction: t }
+          inst.toJSON(), amount, method, actor, { transaction: t, branchId }
         );
 
         await models.CashTransaction.create({
@@ -13245,8 +13287,6 @@ router.post("/gift-vouchers/redeem", authMiddleware, (req, res) =>
 // TREASURY (الخزنة) — cash movements, balances & closing reconciliation
 // ─────────────────────────────────────────────────────────────────────────────
 
-const TREASURY_GL = { cash: "1110", bank: "1120" };
-
 router.get("/treasury/register/current", authMiddleware, requireAnyBusinessPermission(["treasury.register.view", "treasury.view"]), async (req, res, next) => {
   try {
     const branch = await resolveAuthorizedBranch(req, req.query.branchId || req.query.branch || req.branchId, { required: true });
@@ -13342,7 +13382,7 @@ router.get("/treasury/transactions", authMiddleware, requireBusinessPermission("
 // Current treasury balances + today's movement totals.
 router.get("/treasury/summary", authMiddleware, requireBusinessPermission("treasury.view"), async (req, res, next) => {
   try {
-    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.query.branch);
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.query.branch, { required: true });
     const ledgerSummary = await accountBalanceService.calculateTreasuryLedgerSummary({ companyId: req.companyId, branchId });
     const cash = ledgerSummary.cash;
     const bank = ledgerSummary.bank;
@@ -13396,14 +13436,6 @@ router.post("/treasury/transactions", authMiddleware, requireBusinessPermission(
     if (type === "transfer" && account === toAccount) {
       throw new ValidationError("Transfer source and destination treasury accounts must be different.");
     }
-    await assertTreasuryAccountKey(req.companyId, account);
-    if (toAccount) await assertTreasuryAccountKey(req.companyId, toAccount);
-    if (type !== "transfer") {
-      const counterAccount = await assertActiveAccountCode(req.companyId, b.counterAccountCode);
-      if (["1110", "1120"].includes(counterAccount.code)) {
-        throw new ValidationError("counterAccountCode must not be a treasury cash/bank account.");
-      }
-    }
     const branch = await resolveAuthorizedBranch(req, b.branchId || req.headers["x-branch-id"] || req.branchId, { required: true });
     if (b.date && !isValidYmd(String(b.date))) {
       throw new ValidationError("Invalid 'date' (expected YYYY-MM-DD).");
@@ -13434,6 +13466,47 @@ router.post("/treasury/transactions", authMiddleware, requireBusinessPermission(
           throw dup;
         }
         const idemRequest = idemClaim.request;
+        const treasuryAccount = await financialAccountResolver.resolveRequiredBranchFinancialAccount({
+          companyId: req.companyId,
+          branchId: branch.id,
+          mappingRole: account === "bank" ? "BANK_ACCOUNT" : "CASH_TREASURY",
+          transaction: t,
+        });
+        const toTreasuryAccount = toAccount
+          ? await financialAccountResolver.resolveRequiredBranchFinancialAccount({
+            companyId: req.companyId,
+            branchId: branch.id,
+            mappingRole: toAccount === "bank" ? "BANK_ACCOUNT" : "CASH_TREASURY",
+            transaction: t,
+          })
+          : null;
+        let counterAccount = null;
+        if (type !== "transfer") {
+          counterAccount = b.counterAccountCode
+            ? await assertActiveAccountCode(req.companyId, b.counterAccountCode, { transaction: t })
+            : await financialAccountResolver.resolveRequiredBranchFinancialAccount({
+              companyId: req.companyId,
+              branchId: branch.id,
+              mappingRole: type === "cash_out" ? "DEFAULT_EXPENSE" : "OTHER_INCOME",
+              transaction: t,
+            });
+          const counterCompatible = type === "cash_out"
+            ? counterAccount.type === "expense" && counterAccount.nature === "debit" && counterAccount.isPosting === true
+            : counterAccount.type === "revenue" && counterAccount.nature === "credit" && counterAccount.isPosting === true;
+          if (!counterCompatible) {
+            throw new AppError(
+              "The selected counter account is incompatible with the treasury posting direction.",
+              422,
+              "FINANCIAL_MAPPING_ACCOUNT_INCOMPATIBLE",
+            );
+          }
+        }
+        if (counterAccount && (
+          String(counterAccount.id) === String(treasuryAccount.id) ||
+          String(counterAccount.id) === String(toTreasuryAccount?.id || "")
+        )) {
+          throw new ValidationError("counterAccountCode must not resolve to the selected treasury account.");
+        }
         await cashRegisterService.requireOpenForCashMutation({
           companyId: req.companyId,
           branchId: branch.id,
@@ -13463,7 +13536,12 @@ router.post("/treasury/transactions", authMiddleware, requireBusinessPermission(
 
         // Post the GL entry inside the SAME transaction; any failure rolls back the
         // CashTransaction too (no orphan cash movement without a journal).
-        const journalEntry = await postingService.postCashEntry(tx.toJSON(), actor, { transaction: t });
+        const journalEntry = await postingService.postCashEntry(tx.toJSON(), actor, {
+          transaction: t,
+          treasuryAccountId: treasuryAccount.id,
+          toTreasuryAccountId: toTreasuryAccount?.id || null,
+          counterAccountId: counterAccount?.id || null,
+        });
         await tx.update({ journalEntryId: journalEntry.id }, { transaction: t });
 
         await auditService.record(req.companyId, {
@@ -13508,9 +13586,8 @@ router.post("/treasury/closing", authMiddleware, requireBusinessPermission("trea
     const b = req.body || {};
 
     const account = normalizeTreasuryAccount(b.account, "account");
-    await assertTreasuryAccountKey(req.companyId, account);
-    const glCode = TREASURY_GL[account];
     const branch = await resolveAuthorizedBranch(req, b.branchId || req.headers["x-branch-id"] || req.branchId, { required: true });
+    const treasuryAccount = await resolveTreasuryAccount(req.companyId, branch.id, account);
 
     // Idempotency: a retried/double-clicked closing returns the original closing
     // record instead of recording a second one. Checked BEFORE the duplicate
@@ -13562,7 +13639,7 @@ router.post("/treasury/closing", authMiddleware, requireBusinessPermission("trea
     const balanceRow = await accountBalanceService.calculateAccountBalance({
       companyId: req.companyId,
       branchId: branch.id,
-      accountCode: glCode,
+      accountId: treasuryAccount.id,
     });
     const expected = balanceRow ? Number(balanceRow.calculatedBalance || 0) : 0;
 

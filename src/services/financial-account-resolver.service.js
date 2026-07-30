@@ -7,9 +7,46 @@ const {
   ACCOUNT_ROLE_CATALOG,
   BRANCH_MAPPING_CATALOG,
 } = require("./financial-account-catalog.service");
+const {
+  assertMappingAccountCompatibility,
+} = require("./financial-mapping-compatibility.service");
 
 function fail(code, message) {
   return new AppError(message, 422, code);
+}
+
+async function resolveRequiredBranchFinancialAccount({
+  companyId,
+  branchId,
+  mappingRole,
+  transaction,
+  modelSet = models,
+  compatibility = assertMappingAccountCompatibility,
+}) {
+  if (!companyId) throw fail("FINANCIAL_CONTEXT_REQUIRED", "A Company context is required for posting.");
+  if (!branchId) throw fail("FINANCIAL_BRANCH_REQUIRED", "An operational Branch is required for posting.");
+
+  const mappingType = String(mappingRole || "").trim().toUpperCase();
+  if (!BRANCH_MAPPING_CATALOG[mappingType]) {
+    throw fail("FINANCIAL_MAPPING_REQUIRED", "The required financial mapping is not configured.");
+  }
+  const mappings = await modelSet.BranchFinancialMapping.findAll({
+    where: { companyId, branchId, mappingType, channel: null, isActive: true },
+    transaction,
+    lock: transaction?.LOCK.UPDATE,
+  });
+  if (mappings.length !== 1) {
+    throw fail("FINANCIAL_MAPPING_REQUIRED", "The required Branch financial mapping is missing or ambiguous.");
+  }
+  return compatibility({
+    models: modelSet,
+    companyId,
+    branchId,
+    mappingType,
+    accountId: mappings[0].accountId,
+    transaction,
+    lock: true,
+  });
 }
 
 async function resolvePostingAccount({
@@ -17,6 +54,7 @@ async function resolvePostingAccount({
   branchId,
   accountCode,
   accountId,
+  mappingRole,
   transaction,
 }) {
   if (!companyId) throw fail("FINANCIAL_CONTEXT_REQUIRED", "A Company context is required for posting.");
@@ -28,6 +66,13 @@ async function resolvePostingAccount({
       transaction,
       lock: transaction?.LOCK.UPDATE,
     });
+  } else if (mappingRole) {
+    account = await resolveRequiredBranchFinancialAccount({
+      companyId,
+      branchId,
+      mappingRole,
+      transaction,
+    });
   } else {
     const normalizedCode = String(accountCode || "").trim().toUpperCase();
     const roleCode = POSTING_CODE_ROLE[normalizedCode] ||
@@ -37,16 +82,11 @@ async function resolvePostingAccount({
       const mappingType = Object.entries(BRANCH_MAPPING_CATALOG)
         .find(([, definition]) => definition.accountRoleCode === roleCode)?.[0];
       if (!mappingType) throw fail("FINANCIAL_MAPPING_REQUIRED", "The required financial mapping is not configured.");
-      const mappings = await models.BranchFinancialMapping.findAll({
-        where: { companyId, branchId, mappingType, channel: null, isActive: true },
+      account = await resolveRequiredBranchFinancialAccount({
+        companyId,
+        branchId,
+        mappingRole: mappingType,
         transaction,
-        lock: transaction?.LOCK.UPDATE,
-      });
-      if (mappings.length !== 1) throw fail("FINANCIAL_MAPPING_REQUIRED", "The required Branch financial mapping is missing or ambiguous.");
-      account = await models.Account.findOne({
-        where: { id: mappings[0].accountId, companyId, isActive: true },
-        transaction,
-        lock: transaction?.LOCK.UPDATE,
       });
     } else {
       account = await models.Account.findOne({
@@ -66,4 +106,7 @@ async function resolvePostingAccount({
   return account;
 }
 
-module.exports = { resolvePostingAccount };
+module.exports = {
+  resolvePostingAccount,
+  resolveRequiredBranchFinancialAccount,
+};

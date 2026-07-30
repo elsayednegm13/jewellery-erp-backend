@@ -163,18 +163,17 @@ function resolvePayment({ paymentMethod, total, body = {}, installmentRules = {}
 /**
  * Phase 30 — validate/normalize the operator-selected settlement of the EXCESS
  * that remains AFTER receivable-first AR relief on a return/exchange. The excess
- * can be split across a cash refund (1110), a bank refund (1120), and customer
- * store credit (2300); the parts must sum to the excess. Pure validation — no DB.
+ * can be split across a cash refund, a bank refund, and customer store credit;
+ * the parts must sum to the excess. Account authority stays server-side.
  *
  * @param {object} p
  * @param {number} p.excessAmount   value owed back to the customer after AR relief
  * @param {object} [p.settlement]   { cashAmount, bankAmount, creditAmount,
- *                                    cashAccountCode, bankAccountCode,
  *                                    reference?, description? }
  * @param {boolean} p.hasCustomer   whether the invoice has a customer (credit needs one)
  * @param {number} [p.tolerance]    money tolerance (default 0.01)
  * @returns {{provided:boolean, cashAmount:number, bankAmount:number,
- *            creditAmount:number, cashAccountCode:string, bankAccountCode:string,
+ *            creditAmount:number,
  *            reference:(string|null), description:(string|null)}}
  *          `provided:false` when no settlement object was sent (caller keeps the
  *          legacy full cash/bank refund default).
@@ -183,10 +182,16 @@ function resolveExcessSettlement({ excessAmount, settlement, hasCustomer = false
   const excess = roundMoney(excessAmount);
 
   if (settlement === undefined || settlement === null) {
-    return { provided: false, cashAmount: 0, bankAmount: 0, creditAmount: 0, cashAccountCode: "1110", bankAccountCode: "1120", reference: null, description: null };
+    return { provided: false, cashAmount: 0, bankAmount: 0, creditAmount: 0, reference: null, description: null };
   }
   if (typeof settlement !== "object" || Array.isArray(settlement)) {
     throw new ValidationError("settlement must be an object");
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(settlement, "cashAccountCode") ||
+    Object.prototype.hasOwnProperty.call(settlement, "bankAccountCode")
+  ) {
+    throw new ValidationError("Treasury accounts are resolved from the active Branch financial mappings.");
   }
 
   const cashAmount = roundMoney(Number(settlement.cashAmount) || 0);
@@ -202,21 +207,13 @@ function resolveExcessSettlement({ excessAmount, settlement, hasCustomer = false
     if (sum > tolerance) {
       throw new ValidationError("No excess remains after receivable relief; settlement must be zero");
     }
-    return { provided: true, cashAmount: 0, bankAmount: 0, creditAmount: 0, cashAccountCode: "1110", bankAccountCode: "1120", reference: settlement.reference || null, description: settlement.description || null };
+    return { provided: true, cashAmount: 0, bankAmount: 0, creditAmount: 0, reference: settlement.reference || null, description: settlement.description || null };
   }
 
   if (Math.abs(sum - excess) > tolerance) {
     throw new ValidationError(`Settlement parts (${sum}) must equal the excess amount (${excess})`);
   }
 
-  const cashAccountCode = String(settlement.cashAccountCode || "1110");
-  const bankAccountCode = String(settlement.bankAccountCode || "1120");
-  if (cashAmount > 0 && cashAccountCode !== "1110") {
-    throw new ValidationError("cashAccountCode must be 1110 for a cash refund");
-  }
-  if (bankAmount > 0 && bankAccountCode !== "1120") {
-    throw new ValidationError("bankAccountCode must be 1120 for a bank refund");
-  }
   if (creditAmount > 0 && !hasCustomer) {
     throw new ValidationError("Customer credit requires a customer on the original invoice");
   }
@@ -226,8 +223,6 @@ function resolveExcessSettlement({ excessAmount, settlement, hasCustomer = false
     cashAmount,
     bankAmount,
     creditAmount,
-    cashAccountCode: "1110",
-    bankAccountCode: "1120",
     reference: settlement.reference ? String(settlement.reference) : null,
     description: settlement.description ? String(settlement.description) : null,
   };

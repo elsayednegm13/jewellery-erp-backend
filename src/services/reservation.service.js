@@ -106,21 +106,6 @@ function compareMoney(a, b) {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-function treasuryAccountCode(paymentMethod = "cash") {
-  const method = String(paymentMethod || "cash").toLowerCase();
-  return method.includes("card") || method.includes("bank") || method.includes("شبك") || method.includes("تحويل")
-    ? "1120"
-    : "1110";
-}
-
-function paymentMethodFromTreasuryCode(code = "1110") {
-  return String(code) === "1120" ? "bank" : "cash";
-}
-
-function accountNameFromCode(code = "1110") {
-  return String(code) === "1120" ? "bank" : "cash";
-}
-
 function roundMoneyNumber(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
 }
@@ -1256,6 +1241,8 @@ class ReservationService {
     }, { transaction });
     const journal = await postingService.postReservationRefundEntry(refund, actor, {
       transaction,
+      advancesAccountId: advancesAccount.id,
+      treasuryAccountId: financial.treasuryAccount.id,
       advancesAccountCode: advancesAccount.code,
       treasuryAccountCode: treasuryCode,
       branchId: reservation.branchId
@@ -2220,7 +2207,7 @@ class ReservationService {
         amount: formatMoney(alloc.units),
         currency: successor.currency || "AED",
         paymentMethod: "reservation_transfer",
-        treasuryAccountCode: alloc.payment.treasuryAccountCode || "1110",
+        treasuryAccountCode: alloc.payment.treasuryAccountCode || null,
         advancesAccountId: advancesAccount.id,
         advancesAccountCode: advancesAccount.code,
         receiptNumber: `RCP-XFER-${nowStamp()}-${idx}`,
@@ -2399,7 +2386,12 @@ class ReservationService {
     // Post the excess refund: Dr Reservation Advances / Cr selected Cash/Bank.
     await refund.update({ treasuryAccountCode: treasuryCode, executedBy: actor, executedAt: now, idempotencyKey, version: Number(refund.version || 0) + 1 }, { transaction });
     const journal = await postingService.postReservationRefundEntry(refund, actor, {
-      transaction, advancesAccountCode: advancesAccount.code, treasuryAccountCode: treasuryCode, branchId: source.branchId
+      transaction,
+      advancesAccountId: advancesAccount.id,
+      treasuryAccountId: financial.treasuryAccount.id,
+      advancesAccountCode: advancesAccount.code,
+      treasuryAccountCode: treasuryCode,
+      branchId: source.branchId
     });
     const cashTx = await models.CashTransaction.create({
       id: uid("TX-RES-XSREF"),
@@ -2485,6 +2477,8 @@ class ReservationService {
 
     const journal = await postingService.postReservationPaymentEntry(payment, actor, {
       transaction,
+      treasuryAccountId: financial.treasuryAccount.id,
+      advancesAccountId: financial.liabilityAccount.id,
       treasuryAccountCode: payment.treasuryAccountCode,
       advancesAccountCode: financial.liabilityAccount.code,
       branchId: reservation.branchId
@@ -2527,7 +2521,6 @@ module.exports._internal = {
   formatMoney,
   toNumber,
   getReservationAdvancesAccount,
-  treasuryAccountCode,
   reservationVisibilityWhere,
   actorName
 };

@@ -85,8 +85,6 @@ function computeExchangePolicyPreview({
     cashAmount: 0,
     bankAmount: 0,
     creditAmount: 0,
-    cashAccountCode: "1110",
-    bankAccountCode: "1120",
     isValid: true,
     remainingToAllocate: excessDueToCustomer,
   };
@@ -102,8 +100,6 @@ function computeExchangePolicyPreview({
       cashAmount: normalized.cashAmount,
       bankAmount: normalized.bankAmount,
       creditAmount: normalized.creditAmount,
-      cashAccountCode: normalized.cashAccountCode,
-      bankAccountCode: normalized.bankAccountCode,
       isValid: true,
       remainingToAllocate: 0,
       reference: normalized.reference,

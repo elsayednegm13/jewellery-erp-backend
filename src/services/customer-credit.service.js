@@ -20,7 +20,6 @@
 const postingService = require("./posting.service");
 
 const DEFAULT_CURRENCY = "AED";
-const CUSTOMER_DEPOSITS_ACCOUNT = "2300";
 
 function round4(n) {
   return Math.round((Number(n) || 0) * 10000) / 10000;
@@ -75,23 +74,23 @@ function validatePostingContext(direction, opts) {
   if (!isGlPostingEnabled(opts.glPosting)) return null;
 
   const gl = opts.glPosting || {};
-  const debitAccountCode = String(gl.debitAccountCode || "").trim();
-  const creditAccountCode = String(gl.creditAccountCode || "").trim();
-  const customerDepositAccountCode = String(gl.customerDepositAccountCode || CUSTOMER_DEPOSITS_ACCOUNT).trim();
-  if (!debitAccountCode || !creditAccountCode) {
-    throw new Error("customer-credit: glPosting requires debitAccountCode and creditAccountCode");
+  const debitAccountId = String(gl.debitAccountId || "").trim();
+  const creditAccountId = String(gl.creditAccountId || "").trim();
+  const customerDepositAccountId = String(gl.customerDepositAccountId || "").trim();
+  if (!debitAccountId || !creditAccountId || !customerDepositAccountId) {
+    throw new Error("customer-credit: glPosting requires authoritative debit, credit, and customer-deposit account IDs");
   }
 
-  if (direction === "credit_in" && creditAccountCode !== customerDepositAccountCode) {
-    throw new Error("customer-credit: credit_in GL bridge must credit account 2300");
+  if (direction === "credit_in" && creditAccountId !== customerDepositAccountId) {
+    throw new Error("customer-credit: credit_in GL bridge must credit the mapped customer-deposit liability");
   }
-  if (direction === "credit_out" && debitAccountCode !== customerDepositAccountCode) {
-    throw new Error("customer-credit: credit_out GL bridge must debit account 2300");
+  if (direction === "credit_out" && debitAccountId !== customerDepositAccountId) {
+    throw new Error("customer-credit: credit_out GL bridge must debit the mapped customer-deposit liability");
   }
 
   return {
-    debitAccountCode,
-    creditAccountCode,
+    debitAccountId,
+    creditAccountId,
     description: gl.description || opts.description || "Customer credit movement",
     date: gl.date,
     postedBy: gl.postedBy || opts.createdBy || "System",
@@ -114,13 +113,13 @@ async function postCreditJournal(direction, opts, amount, creditRowId, postingCo
     },
     [
       {
-        accountCode: postingContext.debitAccountCode,
+        accountId: postingContext.debitAccountId,
         debit: amount,
         credit: 0,
         description: isCreditIn ? "Customer credit counter-account" : "Customer deposits liability reduction",
       },
       {
-        accountCode: postingContext.creditAccountCode,
+        accountId: postingContext.creditAccountId,
         debit: 0,
         credit: amount,
         description: isCreditIn ? "Customer deposits liability increase" : "Customer credit counter-account",

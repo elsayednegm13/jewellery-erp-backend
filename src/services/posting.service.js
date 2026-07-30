@@ -67,8 +67,18 @@ const CHART = {
   "6100": { name: "Salaries & Wages", nameAr: "الرواتب والأجور", type: "expense", nature: "debit", level: 2, parent: "6000" },
 };
 
-// Map a treasury account keyword to its GL account code.
-const TREASURY_ACCOUNT = { cash: "1110", bank: "1120" };
+const TREASURY_MAPPING_ROLE = Object.freeze({
+  cash: "CASH_TREASURY",
+  bank: "BANK_ACCOUNT",
+});
+
+function treasuryMappingRole(value = "cash") {
+  const method = String(value || "cash").toLowerCase();
+  return method.includes("card") || method.includes("bank") ||
+    method.includes("شبك") || method.includes("transfer") || method.includes("تحويل")
+    ? TREASURY_MAPPING_ROLE.bank
+    : TREASURY_MAPPING_ROLE.cash;
+}
 
 // Per-karat GL account codes (P5.1 foundation). NOT used by any posting until
 // P5.2/P5.3 enable split posting behind the accountingByKarat flag. Unknown /
@@ -237,6 +247,20 @@ class PostingService {
         operation: opts.sourceType || "journal_posting"
       });
 
+      const resolvedLines = [];
+      for (const line of lines) {
+        const account = await financialAccountResolver.resolvePostingAccount({
+          companyId,
+          branchId: opts.branchId || null,
+          accountId: line.accountId || null,
+          accountCode: line.accountCode || null,
+          mappingRole: line.mappingRole || null,
+          transaction: t,
+        });
+        if (!account) throw new Error("Explicit posting account is inactive or outside the operational branch.");
+        resolvedLines.push({ line, account });
+      }
+
       const entry = await JournalEntry.create(
         {
           id: entryId,
@@ -257,18 +281,7 @@ class PostingService {
       );
 
       let i = 0;
-      for (const line of lines) {
-        // Explicit role-resolved accounts are mandatory for strict flows such
-        // as Complete-sale.  Legacy posting callers continue to use the
-        // canonical-chart setup path until they are independently migrated.
-        const account = await financialAccountResolver.resolvePostingAccount({
-          companyId,
-          branchId: opts.branchId || null,
-          accountId: line.accountId || null,
-          accountCode: line.accountCode || null,
-          transaction: t,
-        });
-        if (!account) throw new Error("Explicit posting account is inactive or outside the operational branch.");
+      for (const { line, account } of resolvedLines) {
         const debit = round(line.debit);
         const credit = round(line.credit);
 
@@ -356,10 +369,7 @@ class PostingService {
     // Choose the debit-side account from payment method / status.
     const method = String(invoice.paymentMethod || "").toLowerCase();
     const isCredit = ["due", "partial", "installment", "credit"].includes(String(invoice.status || "").toLowerCase());
-    let debitCode = "1110"; // Cash on Hand
-    if (isCredit) debitCode = "1300"; // Accounts Receivable
-    else if (method.includes("card") || method.includes("bank") || method.includes("شبك") || method.includes("تحويل"))
-      debitCode = "1120"; // Bank
+    const debitMappingRole = isCredit ? "ACCOUNTS_RECEIVABLE" : treasuryMappingRole(method);
 
     const lines = [];
 
@@ -367,18 +377,16 @@ class PostingService {
     // and the financed remainder (Accounts Receivable).
     const downPayment = round(invoice.downPayment);
     if (invoice.type === "installment" && downPayment > 0 && downPayment < total) {
-      const cashCode = method.includes("card") || method.includes("bank") || method.includes("شبك") || method.includes("تحويل") ? "1120" : "1110";
-      lines.push({ accountCode: cashCode, debit: downPayment, credit: 0, description: `مقدّم فاتورة ${invoice.id}` });
-      lines.push({ accountCode: "1300", debit: round(total - downPayment), credit: 0, description: `أقساط مستحقة ${invoice.id}` });
+      lines.push({ mappingRole: treasuryMappingRole(method), debit: downPayment, credit: 0, description: `مقدّم فاتورة ${invoice.id}` });
+      lines.push({ mappingRole: "ACCOUNTS_RECEIVABLE", debit: round(total - downPayment), credit: 0, description: `أقساط مستحقة ${invoice.id}` });
     } else if (method === "split" && Array.isArray(invoice.paymentSplits) && invoice.paymentSplits.length > 0) {
       for (const split of invoice.paymentSplits) {
         const splitMethod = String(split.method || "").toLowerCase();
         const splitAmt = round(split.amount);
-        const splitCode = splitMethod.includes("card") || splitMethod.includes("bank") || splitMethod.includes("شبك") || splitMethod.includes("transfer") ? "1120" : "1110";
-        lines.push({ accountCode: splitCode, debit: splitAmt, credit: 0, description: `دفع مجزأ ${splitMethod} - فاتورة ${invoice.id}` });
+        lines.push({ mappingRole: treasuryMappingRole(splitMethod), debit: splitAmt, credit: 0, description: `دفع مجزأ ${splitMethod} - فاتورة ${invoice.id}` });
       }
     } else {
-      lines.push({ accountCode: debitCode, debit: total, credit: 0, description: `فاتورة ${invoice.id}` });
+      lines.push({ mappingRole: debitMappingRole, debit: total, credit: 0, description: `فاتورة ${invoice.id}` });
     }
 
     const byKarat = await this.resolveAccountingByKarat(companyId, opts);
@@ -425,33 +433,29 @@ class PostingService {
     const cost = round(items.reduce((s, it) => s + (Number(it.cost) || 0) * (Number(it.quantity) || 1), 0));
 
     // Phase 21.2 + Phase 30: the return money leg splits between customer
-    // receivable relief (Cr AR 1300) and the excess owed back to the customer.
-    // The excess is settled across a cash refund (Cr 1110), a bank refund
-    // (Cr 1120), and/or customer store credit (Cr 2300) per the operator's
-    // settlement choice. Callers pass { receivableReliefAmount, cashRefundAmount,
-    // bankRefundAmount, customerCreditAmount, cashAccountCode, bankAccountCode }.
+    // receivable relief and the excess owed back to the customer. The excess is
+    // settled across mapped cash, mapped bank, and/or mapped customer-deposit
+    // liability accounts per the operator's settlement choice. Callers pass
+    // amounts only; Branch mappings remain the account authority.
     // When cashRefundAmount is omitted (legacy callers) this falls back to the
-    // previous behaviour — a full cash refund on `cashAccountCode` (default 1110)
-    // — so the entry still balances to `total`. The 2300 line keeps a single
-    // return journal as the GL owner (no separate credit journal).
-    const cashAccountCode = opts.cashAccountCode || "1110";
-    const bankAccountCode = opts.bankAccountCode || "1120";
+    // previous behaviour — a full mapped cash refund — so the entry still
+    // balances to `total`. One return journal remains the GL owner.
     const receivableRelief = round(opts.receivableReliefAmount != null ? opts.receivableReliefAmount : 0);
     const cashRefund = round(opts.cashRefundAmount != null ? opts.cashRefundAmount : total - receivableRelief);
     const bankRefund = round(opts.bankRefundAmount != null ? opts.bankRefundAmount : 0);
     const customerCredit = round(opts.customerCreditAmount != null ? opts.customerCreditAmount : 0);
     const moneyLegLines = [];
     if (receivableRelief > 0) {
-      moneyLegLines.push({ accountCode: "1300", debit: 0, credit: receivableRelief, description: `تخفيض ذمم العميل — مرتجع فاتورة ${invoice.id}` });
+      moneyLegLines.push({ mappingRole: "ACCOUNTS_RECEIVABLE", debit: 0, credit: receivableRelief, description: `تخفيض ذمم العميل — مرتجع فاتورة ${invoice.id}` });
     }
     if (cashRefund > 0) {
-      moneyLegLines.push({ accountCode: cashAccountCode, debit: 0, credit: cashRefund, description: `مرتجع نقدي — فاتورة ${invoice.id}` });
+      moneyLegLines.push({ mappingRole: "CASH_TREASURY", debit: 0, credit: cashRefund, description: `مرتجع نقدي — فاتورة ${invoice.id}` });
     }
     if (bankRefund > 0) {
-      moneyLegLines.push({ accountCode: bankAccountCode, debit: 0, credit: bankRefund, description: `مرتجع بنكي — فاتورة ${invoice.id}` });
+      moneyLegLines.push({ mappingRole: "BANK_ACCOUNT", debit: 0, credit: bankRefund, description: `مرتجع بنكي — فاتورة ${invoice.id}` });
     }
     if (customerCredit > 0) {
-      moneyLegLines.push({ accountCode: "2300", debit: 0, credit: customerCredit, description: `رصيد دائن للعميل — مرتجع فاتورة ${invoice.id}` });
+      moneyLegLines.push({ mappingRole: "RESERVATION_ADVANCE_LIABILITY", debit: 0, credit: customerCredit, description: `رصيد دائن للعميل — مرتجع فاتورة ${invoice.id}` });
     }
 
     const byKarat = await this.resolveAccountingByKarat(companyId, opts);
@@ -495,31 +499,43 @@ class PostingService {
   async postCashEntry(tx, postedBy = "System", opts = {}) {
     const companyId = tx.companyId;
     const amount = round(tx.amount);
-    const accCode = TREASURY_ACCOUNT[tx.account] || "1110";
+    const sourceMappingRole = treasuryMappingRole(tx.account);
 
     let lines;
     let label;
     if (tx.type === "transfer") {
-      const toCode = TREASURY_ACCOUNT[tx.toAccount] || "1120";
+      const destinationMappingRole = treasuryMappingRole(tx.toAccount);
       label = `تحويل خزينة — ${tx.description || tx.id}`;
       lines = [
-        { accountCode: toCode, debit: amount, credit: 0, description: tx.category || "تحويل" },
-        { accountCode: accCode, debit: 0, credit: amount, description: tx.category || "تحويل" },
+        { accountId: opts.toTreasuryAccountId || null, mappingRole: destinationMappingRole, debit: amount, credit: 0, description: tx.category || "تحويل" },
+        { accountId: opts.treasuryAccountId || null, mappingRole: sourceMappingRole, debit: 0, credit: amount, description: tx.category || "تحويل" },
       ];
     } else if (tx.type === "cash_out") {
-      const counter = tx.counterAccountCode || "6000";
       label = `صرف نقدي — ${tx.category || tx.description || tx.id}`;
       lines = [
-        { accountCode: counter, debit: amount, credit: 0, description: tx.category || "مصروف" },
-        { accountCode: accCode, debit: 0, credit: amount, description: tx.category || "مصروف" },
+        {
+          accountId: opts.counterAccountId || null,
+          accountCode: opts.counterAccountId ? null : tx.counterAccountCode || null,
+          mappingRole: opts.counterAccountId || tx.counterAccountCode ? null : "DEFAULT_EXPENSE",
+          debit: amount,
+          credit: 0,
+          description: tx.category || "مصروف",
+        },
+        { accountId: opts.treasuryAccountId || null, mappingRole: sourceMappingRole, debit: 0, credit: amount, description: tx.category || "مصروف" },
       ];
     } else {
       // cash_in (default)
-      const counter = tx.counterAccountCode || "4900";
       label = `قبض نقدي — ${tx.category || tx.description || tx.id}`;
       lines = [
-        { accountCode: accCode, debit: amount, credit: 0, description: tx.category || "إيراد" },
-        { accountCode: counter, debit: 0, credit: amount, description: tx.category || "إيراد" },
+        { accountId: opts.treasuryAccountId || null, mappingRole: sourceMappingRole, debit: amount, credit: 0, description: tx.category || "إيراد" },
+        {
+          accountId: opts.counterAccountId || null,
+          accountCode: opts.counterAccountId ? null : tx.counterAccountCode || null,
+          mappingRole: opts.counterAccountId || tx.counterAccountCode ? null : "OTHER_INCOME",
+          debit: 0,
+          credit: amount,
+          description: tx.category || "إيراد",
+        },
       ];
     }
 
@@ -553,7 +569,6 @@ class PostingService {
           : 0;
     const amount = round(receivedAmount);
     const method = String(invoice.paymentMethod || "").toLowerCase();
-    const cashCode = method.includes("card") || method.includes("bank") || method.includes("شبك") || method.includes("تحويل") ? "1120" : "1110";
     return this.postEntry(
       companyId,
       {
@@ -566,8 +581,8 @@ class PostingService {
         branchId: invoice.branchId || opts.branchId
       },
       [
-        { accountCode: cashCode, debit: amount, credit: 0, description: "عربون مستلم" },
-        { accountCode: "2300", debit: 0, credit: amount, description: "التزام عربون عميل" },
+        { mappingRole: treasuryMappingRole(method), debit: amount, credit: 0, description: "عربون مستلم" },
+        { mappingRole: "RESERVATION_ADVANCE_LIABILITY", debit: 0, credit: amount, description: "التزام عربون عميل" },
       ]
     );
   }
@@ -583,11 +598,13 @@ class PostingService {
   async postReservationPaymentEntry(payment, postedBy = "System", opts = {}) {
     const companyId = payment.companyId;
     const amount = round(payment.amount);
+    const debitAccountId = opts.treasuryAccountId;
+    const creditAccountId = opts.advancesAccountId;
     const debitAccountCode = opts.treasuryAccountCode || payment.treasuryAccountCode;
     const creditAccountCode = opts.advancesAccountCode || payment.advancesAccountCode;
 
-    if (!debitAccountCode) throw new Error("Reservation payment treasury account is required");
-    if (!creditAccountCode) throw new Error("Reservation advances account is not configured");
+    if (!debitAccountId && !debitAccountCode) throw new Error("Reservation payment treasury account is required");
+    if (!creditAccountId && !creditAccountCode) throw new Error("Reservation advances account is not configured");
 
     return this.postEntry(
       companyId,
@@ -601,8 +618,8 @@ class PostingService {
         branchId: payment.branchId || opts.branchId
       },
       [
-        { accountCode: debitAccountCode, debit: amount, credit: 0, description: `قبض دفعة حجز ${payment.receiptNumber}` },
-        { accountCode: creditAccountCode, debit: 0, credit: amount, description: `التزام دفعات حجوزات ${payment.reservationId}` },
+        { accountId: debitAccountId || null, accountCode: debitAccountId ? null : debitAccountCode, debit: amount, credit: 0, description: `قبض دفعة حجز ${payment.receiptNumber}` },
+        { accountId: creditAccountId || null, accountCode: creditAccountId ? null : creditAccountCode, debit: 0, credit: amount, description: `التزام دفعات حجوزات ${payment.reservationId}` },
       ]
     );
   }
@@ -655,10 +672,12 @@ class PostingService {
   async postReservationRefundEntry(refund, postedBy = "System", opts = {}) {
     const companyId = refund.companyId;
     const amt = round(refund.amount);
+    const advancesAccountId = opts.advancesAccountId;
+    const treasuryAccountId = opts.treasuryAccountId;
     const advancesAccountCode = opts.advancesAccountCode;
     const treasuryAccountCode = opts.treasuryAccountCode || refund.treasuryAccountCode;
-    if (!advancesAccountCode) throw new Error("Reservation advances account is not configured");
-    if (!treasuryAccountCode) throw new Error("Reservation refund treasury account is required");
+    if (!advancesAccountId && !advancesAccountCode) throw new Error("Reservation advances account is not configured");
+    if (!treasuryAccountId && !treasuryAccountCode) throw new Error("Reservation refund treasury account is required");
 
     return this.postEntry(
       companyId,
@@ -672,8 +691,8 @@ class PostingService {
         branchId: refund.branchId || opts.branchId
       },
       [
-        { accountCode: advancesAccountCode, debit: amt, credit: 0, description: `إقفال التزام دفعات حجز ${refund.reservationId}` },
-        { accountCode: treasuryAccountCode, debit: 0, credit: amt, description: `صرف استرداد حجز ${refund.reservationId}` },
+        { accountId: advancesAccountId || null, accountCode: advancesAccountId ? null : advancesAccountCode, debit: amt, credit: 0, description: `إقفال التزام دفعات حجز ${refund.reservationId}` },
+        { accountId: treasuryAccountId || null, accountCode: treasuryAccountId ? null : treasuryAccountCode, debit: 0, credit: amt, description: `صرف استرداد حجز ${refund.reservationId}` },
       ]
     );
   }
@@ -681,14 +700,13 @@ class PostingService {
   /**
    * Supplier purchase receiving:
    *   Dr  Inventory (1200)              total received cost
-   *   Cr  Cash/Bank (1110/1120)         paid amount, if any
+   *   Cr  mapped Cash/Bank               paid amount, if any
    *   Cr  Accounts Payable (2100)       unpaid balance
    */
   async postPurchaseEntry(purchaseOrder, paidAmount = 0, paymentMethod = "credit", postedBy = "System", opts = {}) {
     const companyId = purchaseOrder.companyId;
     const total = round(purchaseOrder.total);
     const method = String(paymentMethod || "").toLowerCase();
-    const cashCode = method.includes("card") || method.includes("bank") || method.includes("transfer") || method.includes("تحويل") ? "1120" : "1110";
 
     // Phase 12G — purchase VAT / RCM, driven ONLY by the PurchaseOrder snapshot
     // fields (12F) + optional settings account codes (12E). Default path (no VAT
@@ -758,10 +776,10 @@ class PostingService {
 
     // Credit side (cash / bank / AP) — gross owed to the supplier.
     if (paid > 0) {
-      lines.push({ accountCode: cashCode, debit: 0, credit: paid, description: `دفع للمورد ${purchaseOrder.supplierName}` });
+      lines.push({ mappingRole: treasuryMappingRole(method), debit: 0, credit: paid, description: `دفع للمورد ${purchaseOrder.supplierName}` });
     }
     if (payable > 0) {
-      lines.push({ accountCode: "2100", debit: 0, credit: payable, description: `ذمم مورد ${purchaseOrder.supplierName}` });
+      lines.push({ mappingRole: "SUPPLIER_PAYABLE", debit: 0, credit: payable, description: `ذمم مورد ${purchaseOrder.supplierName}` });
     }
 
     return this.postEntry(
@@ -787,7 +805,6 @@ class PostingService {
     const companyId = voucher.companyId;
     const amount = round(voucher.value);
     const method = String(voucher.paymentMethod || "").toLowerCase();
-    const cashCode = method.includes("card") || method.includes("bank") || method.includes("شبك") || method.includes("تحويل") ? "1120" : "1110";
     return this.postEntry(
       companyId,
       {
@@ -799,7 +816,7 @@ class PostingService {
         branchId: voucher.branchId || opts.branchId
       },
       [
-        { accountCode: cashCode, debit: amount, credit: 0, description: "بيع قسيمة هدية" },
+        { mappingRole: treasuryMappingRole(method), debit: amount, credit: 0, description: "بيع قسيمة هدية" },
         { accountCode: "2400", debit: 0, credit: amount, description: "التزام قسيمة هدية" },
       ]
     );
@@ -837,7 +854,6 @@ class PostingService {
     const companyId = installment.companyId;
     const amt = round(amount);
     const method = String(paymentMethod).toLowerCase();
-    const cashCode = method.includes("card") || method.includes("bank") || method.includes("شبك") || method.includes("تحويل") ? "1120" : "1110";
     return this.postEntry(
       companyId,
       {
@@ -846,11 +862,11 @@ class PostingService {
         sourceId: installment.id,
         postedBy,
         transaction: opts.transaction,
-        branchId: installment.branch || opts.branchId
+        branchId: opts.branchId || installment.branchId || null
       },
       [
-        { accountCode: cashCode, debit: amt, credit: 0, description: "تحصيل قسط" },
-        { accountCode: "1300", debit: 0, credit: amt, description: "سداد ذمم العميل" },
+        { mappingRole: treasuryMappingRole(method), debit: amt, credit: 0, description: "تحصيل قسط" },
+        { mappingRole: "ACCOUNTS_RECEIVABLE", debit: 0, credit: amt, description: "سداد ذمم العميل" },
       ]
     );
   }
@@ -863,7 +879,6 @@ class PostingService {
     const companyId = payslip.companyId;
     const amount = round(payslip.net);
     const method = String(paymentMethod).toLowerCase();
-    const cashCode = method.includes("card") || method.includes("bank") || method.includes("شبك") || method.includes("تحويل") ? "1120" : "1110";
     return this.postEntry(
       companyId,
       {
@@ -876,7 +891,7 @@ class PostingService {
       },
       [
         { accountCode: "6100", debit: amount, credit: 0, description: "رواتب وأجور موظفين" },
-        { accountCode: cashCode, debit: 0, credit: amount, description: "صرف رواتب" }
+        { mappingRole: treasuryMappingRole(method), debit: 0, credit: amount, description: "صرف رواتب" }
       ]
     );
   }

@@ -8,6 +8,10 @@ const {
   BRANCH_MAPPING_CATALOG,
   POSTING_ACCOUNT_CATALOG,
 } = require("./financial-account-catalog.service");
+const {
+  evaluateMappingAccountCompatibility,
+  inspectMappingAccountCompatibility,
+} = require("./financial-mapping-compatibility.service");
 
 const id = (prefix) => `${prefix}-${crypto.randomUUID()}`;
 const readinessError = () =>
@@ -165,8 +169,19 @@ async function reconcile({ models, companyId, branchId, actorId = "financial-boo
           updatedBy: actorId,
         }, { transaction });
         report.createdMappings += 1;
-      } else if (existing[0].accountId !== account.id || !existing[0].isActive) {
-        await existing[0].update({ accountId: account.id, isActive: true, updatedBy: actorId }, { transaction });
+      } else {
+        const inspected = await inspectMappingAccountCompatibility({
+          models,
+          companyId,
+          branchId,
+          mappingType,
+          accountId: existing[0].accountId,
+          transaction,
+          lock: true,
+        });
+        if (!existing[0].isActive || !inspected.result.compatible) {
+          await existing[0].update({ accountId: account.id, isActive: true, updatedBy: actorId }, { transaction });
+        }
       }
     }
     const readiness = await evaluateReadiness({ models, companyId, branchId, transaction });
@@ -182,7 +197,6 @@ async function evaluateReadiness({ models, companyId, branchId, transaction = nu
   const mappings = await models.BranchFinancialMapping.findAll({ where: { companyId, branchId, isActive: true }, transaction });
   const missingRoles = [];
   const invalidRoles = [];
-  const resolvedRoleAccounts = new Map();
   for (const [roleCode, definition] of Object.entries(ACCOUNT_ROLE_CATALOG)) {
     const matches = roles.filter((row) => row.roleCode === roleCode);
     if (matches.length !== 1) {
@@ -191,21 +205,32 @@ async function evaluateReadiness({ models, companyId, branchId, transaction = nu
     }
     const account = await models.Account.findOne({ where: { id: matches[0].accountId, companyId, isActive: true }, transaction });
     if (!account || account.type !== definition.type || account.nature !== definition.nature ||
+        account.statementClassification !== definition.statementClassification ||
         account.isPosting === false || (account.branchId && String(account.branchId) !== String(branchId))) {
       invalidRoles.push(roleCode);
       continue;
     }
-    resolvedRoleAccounts.set(roleCode, account.id);
   }
   const missingMappings = [];
   const invalidMappings = [];
-  for (const [mappingType, definition] of Object.entries(BRANCH_MAPPING_CATALOG)) {
+  for (const mappingType of Object.keys(BRANCH_MAPPING_CATALOG)) {
     const matches = mappings.filter((row) => row.channel === null && row.mappingType === mappingType);
     if (matches.length !== 1) {
       missingMappings.push(mappingType);
       continue;
     }
-    if (matches[0].accountId !== resolvedRoleAccounts.get(definition.accountRoleCode)) invalidMappings.push(mappingType);
+    const account = await models.Account.findOne({ where: { id: matches[0].accountId }, transaction });
+    const roleCodes = roles
+      .filter((row) => String(row.accountId) === String(matches[0].accountId))
+      .map((row) => row.roleCode);
+    const compatibility = evaluateMappingAccountCompatibility({
+      companyId,
+      branchId,
+      mappingType,
+      account,
+      roleCodes,
+    });
+    if (!compatibility.compatible) invalidMappings.push(mappingType);
   }
   return {
     status: missingRoles.length || invalidRoles.length || missingMappings.length || invalidMappings.length ? "BLOCKED" : "READY",

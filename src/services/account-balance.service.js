@@ -5,11 +5,11 @@ const {
   reportableLedgerReplacements,
   assertReportableLedgerIntegrity,
 } = require("./ledger-reporting.service");
+const { resolveRequiredBranchFinancialAccount } = require("./financial-account-resolver.service");
 
 const round = (value) => Math.round((Number(value) || 0) * 10000) / 10000;
-const TREASURY_ACCOUNT_CODES = Object.freeze({ cash: "1110", bank: "1120" });
 
-async function calculateBalances({ companyId, branchId = null, accountCode = null, transaction = null, skipLedgerIntegrityCheck = false } = {}) {
+async function calculateBalances({ companyId, branchId = null, accountCode = null, accountId = null, transaction = null, skipLedgerIntegrityCheck = false } = {}) {
   if (!companyId) throw new Error("calculateBalances requires companyId");
   if (!skipLedgerIntegrityCheck) {
     await assertReportableLedgerIntegrity({ companyId, branchId, transaction });
@@ -21,6 +21,9 @@ async function calculateBalances({ companyId, branchId = null, accountCode = nul
   if (accountCode) {
     replacements.accountCode = String(accountCode);
     accountFilter = "AND a.code = :accountCode";
+  } else if (accountId) {
+    replacements.accountId = String(accountId);
+    accountFilter = "AND a.id = :accountId";
   }
   if (branchId) {
     replacements.branchId = String(branchId);
@@ -90,20 +93,35 @@ async function calculateAccountBalance(args = {}) {
  */
 async function calculateTreasuryLedgerSummary({ companyId, branchId = null, transaction = null } = {}) {
   if (!companyId) throw new Error("calculateTreasuryLedgerSummary requires companyId");
+  if (!branchId) throw new Error("calculateTreasuryLedgerSummary requires branchId");
 
   await assertReportableLedgerIntegrity({ companyId, branchId, transaction });
+  const [cashAccount, bankAccount] = await Promise.all([
+    resolveRequiredBranchFinancialAccount({
+      companyId,
+      branchId,
+      mappingRole: "CASH_TREASURY",
+      transaction,
+    }),
+    resolveRequiredBranchFinancialAccount({
+      companyId,
+      branchId,
+      mappingRole: "BANK_ACCOUNT",
+      transaction,
+    }),
+  ]);
 
   const cashRow = await calculateAccountBalance({
     companyId,
     branchId,
-    accountCode: TREASURY_ACCOUNT_CODES.cash,
+    accountId: cashAccount.id,
     transaction,
     skipLedgerIntegrityCheck: true,
   });
   const bankRow = await calculateAccountBalance({
     companyId,
     branchId,
-    accountCode: TREASURY_ACCOUNT_CODES.bank,
+    accountId: bankAccount.id,
     transaction,
     skipLedgerIntegrityCheck: true,
   });
@@ -128,13 +146,13 @@ async function calculateTreasuryLedgerSummary({ companyId, branchId = null, tran
     WHERE je.company_id = :companyId
       AND ${reportableLedgerPredicate}
       ${branchFilter}
-      AND jl.account_code IN (:cashAccountCode, :bankAccountCode)
+      AND jl.account_id IN (:cashAccountId, :bankAccountId)
     GROUP BY COALESCE(je.reversal_of, je.id)
   `, {
     replacements: {
       ...replacements,
-      cashAccountCode: TREASURY_ACCOUNT_CODES.cash,
-      bankAccountCode: TREASURY_ACCOUNT_CODES.bank,
+      cashAccountId: cashAccount.id,
+      bankAccountId: bankAccount.id,
     },
     type: QueryTypes.SELECT,
     transaction,
@@ -201,7 +219,6 @@ async function calculateMovementSince({ companyId, branchId, accountCode, since,
 }
 
 module.exports = {
-  TREASURY_ACCOUNT_CODES,
   calculateBalances,
   calculateAccountBalance,
   calculateTreasuryLedgerSummary,

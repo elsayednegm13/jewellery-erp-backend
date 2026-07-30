@@ -1,9 +1,9 @@
 const { CashRegisterSession, sequelize } = require("../models");
 const auditService = require("./audit.service");
 const accountBalanceService = require("./account-balance.service");
+const { resolveRequiredBranchFinancialAccount } = require("./financial-account-resolver.service");
 const { AppError, ConflictError, ValidationError } = require("../utils/errors");
 
-const CASH_ACCOUNT_CODE = "1110";
 const round = (value) => Math.round((Number(value) || 0) * 100) / 100;
 
 function actorFromRequest(req) {
@@ -21,8 +21,14 @@ function isCashAffected(account, toAccount) {
 }
 
 async function currentOpen({ companyId, branchId, transaction = null }) {
+  const cashAccount = await resolveRequiredBranchFinancialAccount({
+    companyId,
+    branchId,
+    mappingRole: "CASH_TREASURY",
+    transaction,
+  });
   return CashRegisterSession.findOne({
-    where: { companyId, branchId, cashAccountCode: CASH_ACCOUNT_CODE, status: "OPEN" },
+    where: { companyId, branchId, cashAccountCode: cashAccount.code, status: "OPEN" },
     order: [["opened_at", "DESC"]],
     transaction
   });
@@ -41,10 +47,13 @@ async function listSessions({ companyId, branchId = null, limit = 50, transactio
 
 async function calculateExpected(session, options = {}) {
   if (!session) return null;
+  if (!session.cashAccountCode) {
+    throw new AppError("The cash register is not linked to an authoritative mapped cash account.", 422, "FINANCIAL_MAPPING_REQUIRED");
+  }
   const movement = await accountBalanceService.calculateMovementSince({
     companyId: session.companyId,
     branchId: session.branchId,
-    accountCode: session.cashAccountCode || CASH_ACCOUNT_CODE,
+    accountCode: session.cashAccountCode,
     since: session.openedAt,
     transaction: options.transaction || null
   });
@@ -67,6 +76,12 @@ async function openRegister({ companyId, branchId, openingCountedAmount, idempot
     throw new ValidationError("Opening counted amount must be a valid non-negative number.");
   }
   const execute = async (t) => {
+    const cashAccount = await resolveRequiredBranchFinancialAccount({
+      companyId,
+      branchId,
+      mappingRole: "CASH_TREASURY",
+      transaction: t,
+    });
     if (idempotencyKey) {
       const existingByKey = await CashRegisterSession.findOne({ where: { companyId, openIdempotencyKey: idempotencyKey }, transaction: t });
       if (existingByKey) return existingByKey;
@@ -78,7 +93,7 @@ async function openRegister({ companyId, branchId, openingCountedAmount, idempot
       id: `CRS-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       companyId,
       branchId,
-      cashAccountCode: CASH_ACCOUNT_CODE,
+      cashAccountCode: cashAccount.code,
       status: "OPEN",
       openedAt: now,
       openingCountedAmount: round(opening),
@@ -153,7 +168,6 @@ async function closeRegister({ companyId, branchId, countedAmount, varianceReaso
 }
 
 module.exports = {
-  CASH_ACCOUNT_CODE,
   actorFromRequest,
   calculateExpected,
   closeRegister,

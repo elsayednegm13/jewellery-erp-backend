@@ -2,10 +2,12 @@
 
 const models = require("../models");
 const { AppError } = require("../utils/errors");
+const { resolveRequiredBranchFinancialAccount } = require("./financial-account-resolver.service");
 
 const TYPES = Object.freeze({
   RESERVATION_ADVANCE_LIABILITY: "RESERVATION_ADVANCE_LIABILITY",
   CASH_TREASURY: "CASH_TREASURY",
+  BANK_ACCOUNT: "BANK_ACCOUNT",
   PAYMENT_CHANNEL: "PAYMENT_CHANNEL",
 });
 
@@ -43,28 +45,45 @@ async function resolveForReservation({ reservation, companyId, channel, transact
   if (!reservation?.branchId) throw fail("LEGACY_BRANCHLESS_RESERVATION_MANUAL_REVIEW", "Branchless legacy reservations require manual review.", 409);
   if (String(reservation.companyId) !== String(companyId)) throw fail("DEPOSIT_BRANCH_REQUIRED", "Reservation company scope is invalid.", 403);
   await branchRow(companyId, reservation.branchId, transaction);
-  const liability = await mapping(companyId, reservation.branchId, TYPES.RESERVATION_ADVANCE_LIABILITY, undefined, transaction);
-  if (liability.account.type !== "liability" || liability.account.nature !== "credit") throw fail("DEPOSIT_LIABILITY_MAPPING_MISSING", "Reservation advance liability mapping is not a posting liability account.");
+  const liabilityAccount = await resolveRequiredBranchFinancialAccount({
+    companyId,
+    branchId: reservation.branchId,
+    mappingRole: TYPES.RESERVATION_ADVANCE_LIABILITY,
+    transaction,
+  });
   if (!requireTreasury) {
-    return { branchId: reservation.branchId, channel: null, liabilityAccount: liability.account, treasuryAccount: null, cashSession: null };
+    return { branchId: reservation.branchId, channel: null, liabilityAccount, treasuryAccount: null, cashSession: null };
   }
   const normalized = normalizeChannel(channel);
   if (normalized === "cash") {
-    const treasury = await mapping(companyId, reservation.branchId, TYPES.CASH_TREASURY, undefined, transaction);
-    if (treasury.account.type !== "asset" || treasury.account.nature !== "debit") throw fail("TREASURY_MAPPING_MISSING", "Cash treasury mapping is not a posting asset account.");
+    const treasuryAccount = await resolveRequiredBranchFinancialAccount({
+      companyId,
+      branchId: reservation.branchId,
+      mappingRole: TYPES.CASH_TREASURY,
+      transaction,
+    });
     let session = null;
     if (requireSession) {
-      session = await models.CashRegisterSession.findOne({ where: { companyId, branchId: reservation.branchId, cashAccountCode: treasury.account.code, status: "OPEN" }, transaction, lock: transaction?.LOCK.UPDATE });
+      session = await models.CashRegisterSession.findOne({ where: { companyId, branchId: reservation.branchId, cashAccountCode: treasuryAccount.code, status: "OPEN" }, transaction, lock: transaction?.LOCK.UPDATE });
       if (!session) throw fail("CASH_REGISTER_SESSION_REQUIRED", "Open the branch cash register before recording a cash reservation deposit.", 409);
     }
-    return { branchId: reservation.branchId, channel: normalized, liabilityAccount: liability.account, treasuryAccount: treasury.account, cashSession: session };
+    return { branchId: reservation.branchId, channel: normalized, liabilityAccount, treasuryAccount, cashSession: session };
+  }
+  if (normalized === "bank") {
+    const treasuryAccount = await resolveRequiredBranchFinancialAccount({
+      companyId,
+      branchId: reservation.branchId,
+      mappingRole: TYPES.BANK_ACCOUNT,
+      transaction,
+    });
+    return { branchId: reservation.branchId, channel: normalized, liabilityAccount, treasuryAccount, cashSession: null };
   }
   const treasury = await mapping(companyId, reservation.branchId, TYPES.PAYMENT_CHANNEL, normalized, transaction).catch((error) => {
     if (error.errorCode === "TREASURY_MAPPING_MISSING") throw fail("PAYMENT_CHANNEL_UNAUTHORIZED", "The payment channel is not authorized for this branch.");
     throw error;
   });
   if (treasury.account.type !== "asset" || treasury.account.nature !== "debit") throw fail("TREASURY_MAPPING_MISSING", "Payment channel mapping is not a posting asset account.");
-  return { branchId: reservation.branchId, channel: normalized, liabilityAccount: liability.account, treasuryAccount: treasury.account, cashSession: null };
+  return { branchId: reservation.branchId, channel: normalized, liabilityAccount, treasuryAccount: treasury.account, cashSession: null };
 }
 
 module.exports = { TYPES, assertNoRawFinancialAuthority, normalizeChannel, resolveForReservation };

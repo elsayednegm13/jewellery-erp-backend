@@ -3,6 +3,9 @@
 const crypto = require("crypto");
 const { Op } = require("sequelize");
 const { AppError, ValidationError, NotFoundError, ConflictError } = require("../utils/errors");
+const {
+  validateFinancialAccountProposedState,
+} = require("./financial-account-integrity.service");
 
 const TYPES = new Set(["asset", "liability", "equity", "revenue", "expense"]);
 const CLASSIFICATIONS = new Set(["asset", "liability", "equity", "revenue", "cost_of_goods_sold", "operating_expense", "other_income"]);
@@ -109,14 +112,35 @@ async function updateAccount({ models, companyId, accountId, body, transaction: 
       transaction,
     });
     if (duplicate) throw new ConflictError("Account code already exists.");
-    const referencedLines = await models.JournalLine.count({ where: { accountId }, transaction });
-    if (referencedLines && (data.type !== account.type || data.nature !== account.nature)) {
-      throw new ConflictError("Posted accounts cannot change type or nature.");
-    }
-    const childCount = await models.Account.count({ where: { companyId, parentId: accountId }, transaction });
-    if (childCount && data.isPosting) throw new ValidationError("An account with children cannot be posting-enabled.");
+    const [referencedLines, childAccounts, stableRoleBindings, activeMappings] = await Promise.all([
+      models.JournalLine.count({ where: { accountId }, transaction }),
+      models.Account.findAll({ where: { companyId, parentId: accountId }, transaction }),
+      models.SystemAccountRole.findAll({ where: { companyId, accountId }, transaction, lock: transaction?.LOCK.UPDATE }),
+      models.BranchFinancialMapping.findAll({
+        where: { companyId, accountId, isActive: true },
+        transaction,
+        lock: transaction?.LOCK.UPDATE,
+      }),
+    ]);
     const parent = await parentFor(models, companyId, accountId, data.parentId, transaction);
-    if (parent?.isPosting) throw new ValidationError("A posting account cannot be used as a parent.");
+    const currentAccount = typeof account.get === "function" ? account.get({ plain: true }) : { ...account };
+    const proposedAccount = {
+      ...currentAccount,
+      ...data,
+      companyId: account.companyId,
+      branchId: account.branchId,
+      isActive: account.isActive === true,
+    };
+    validateFinancialAccountProposedState({
+      companyId,
+      currentAccount,
+      proposedAccount,
+      stableRoleBindings,
+      activeMappings,
+      childAccounts,
+      parentAccount: parent,
+      journalReferenceCount: referencedLines,
+    });
     await account.update({ ...data, level: parent ? Number(parent.level || 1) + 1 : 1 }, { transaction });
     return account;
   };
@@ -127,11 +151,22 @@ async function setActive({ models, companyId, accountId, isActive, transaction: 
   const run = async (transaction) => {
     const account = await getAccount({ models, companyId, accountId, transaction });
     if (!isActive) {
-      const [roles, mappings] = await Promise.all([
-        models.SystemAccountRole.count({ where: { companyId, accountId }, transaction }),
-        models.BranchFinancialMapping.count({ where: { companyId, accountId, isActive: true }, transaction }),
+      const [stableRoleBindings, activeMappings, childAccounts, journalReferenceCount] = await Promise.all([
+        models.SystemAccountRole.findAll({ where: { companyId, accountId }, transaction }),
+        models.BranchFinancialMapping.findAll({ where: { companyId, accountId, isActive: true }, transaction }),
+        models.Account.findAll({ where: { companyId, parentId: accountId }, transaction }),
+        models.JournalLine.count({ where: { accountId }, transaction }),
       ]);
-      if (roles || mappings) throw new ConflictError("Mapped system accounts cannot be deactivated.");
+      const currentAccount = typeof account.get === "function" ? account.get({ plain: true }) : { ...account };
+      validateFinancialAccountProposedState({
+        companyId,
+        currentAccount,
+        proposedAccount: { ...currentAccount, isActive: false },
+        stableRoleBindings,
+        activeMappings,
+        childAccounts,
+        journalReferenceCount,
+      });
     }
     await account.update({ isActive }, { transaction });
     return account;

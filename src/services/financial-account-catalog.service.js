@@ -33,8 +33,13 @@ const ACCOUNT_ROLE_CATALOG = Object.freeze({
   OTHER_INCOME: accountRole("SYS-OTHER-INCOME", "Other Income", "إيرادات أخرى", "revenue", "credit", "other_income"),
 });
 
-const branchMapping = (accountRoleCode) =>
-  Object.freeze({ accountRoleCode, required: true, bootstrapVersion: BOOTSTRAP_VERSION });
+const branchMapping = (accountRoleCode, options = {}) =>
+  Object.freeze({
+    accountRoleCode,
+    required: true,
+    bootstrapVersion: BOOTSTRAP_VERSION,
+    allowedStatementClassifications: Object.freeze(options.allowedStatementClassifications || []),
+  });
 
 const BRANCH_MAPPING_CATALOG = Object.freeze({
   CASH_TREASURY: branchMapping("CASH_TREASURY"),
@@ -45,7 +50,9 @@ const BRANCH_MAPPING_CATALOG = Object.freeze({
   COST_OF_GOODS_SOLD: branchMapping("COST_OF_GOODS_SOLD"),
   SALES_REVENUE: branchMapping("SALES_REVENUE"),
   RESERVATION_ADVANCE_LIABILITY: branchMapping("CUSTOMER_DEPOSIT_LIABILITY"),
-  DEFAULT_EXPENSE: branchMapping("OPERATING_EXPENSE"),
+  DEFAULT_EXPENSE: branchMapping("OPERATING_EXPENSE", {
+    allowedStatementClassifications: ["operating_expense"],
+  }),
   OTHER_INCOME: branchMapping("OTHER_INCOME"),
   VAT_PAYABLE: branchMapping("VAT_PAYABLE"),
 });
