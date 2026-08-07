@@ -19,4 +19,4 @@ ENV PORT=8000
 EXPOSE 8000
 
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["sh", "-c", "npm run db:migrate && npm start"]
+CMD ["npm", "start"]
