@@ -1,5 +1,6 @@
 const { JournalEntry, JournalLine, sequelize } = require("../models");
 const logger = require("../utils/logger");
+const { AppError } = require("../utils/errors");
 const accountingLockService = require("./accounting-lock.service");
 const financialAccountResolver = require("./financial-account-resolver.service");
 
@@ -102,6 +103,19 @@ function karatAccounts(karat) {
 }
 
 const round = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const MONEY_SCALE_4 = 10000n;
+
+function moneyToUnits4(value) {
+  const text = String(value ?? "").trim();
+  if (!/^(?:0|[1-9]\d*)(?:\.\d{1,4})?$/.test(text)) throw new Error("Invalid DECIMAL(15,4) posting amount.");
+  const [whole, fraction = ""] = text.split(".");
+  return BigInt(whole) * MONEY_SCALE_4 + BigInt(`${fraction}0000`.slice(0, 4));
+}
+
+function moneyFromUnits4(units) {
+  const value = BigInt(units);
+  return `${value / MONEY_SCALE_4}.${(value % MONEY_SCALE_4).toString().padStart(4, "0")}`;
+}
 
 // Group sale/return line items by karat bucket (18/21/22/24 or "other"),
 // summing cost (cost*qty) and revenue basis (price*qty) per bucket. Insertion
@@ -225,6 +239,13 @@ class PostingService {
    * @returns {JournalEntry} with lines
    */
   async postEntry(companyId, opts, lines) {
+    if (opts?.precision === 4) {
+      const debitUnits = lines.reduce((sum, line) => sum + moneyToUnits4(line.debit || 0), 0n);
+      const creditUnits = lines.reduce((sum, line) => sum + moneyToUnits4(line.credit || 0), 0n);
+      if (debitUnits !== creditUnits) throw new Error("Unbalanced exact journal entry. Posting rejected.");
+      if (debitUnits <= 0n) throw new Error("Empty exact journal entry. Posting rejected.");
+      return this.postExactFourDecimalEntry(companyId, opts, lines, debitUnits);
+    }
     const totalDebit = round(lines.reduce((s, l) => s + (Number(l.debit) || 0), 0));
     const totalCredit = round(lines.reduce((s, l) => s + (Number(l.credit) || 0), 0));
 
@@ -320,6 +341,39 @@ class PostingService {
     } else {
       return sequelize.transaction(execute);
     }
+  }
+
+  async postExactFourDecimalEntry(companyId, opts, lines, totalUnits) {
+    const execute = async (t) => {
+      const entryId = opts.id || `JE-${Date.now()}`;
+      const date = opts.date || new Date().toISOString().slice(0, 10);
+      await accountingLockService.assertDateUnlocked(companyId, date, { transaction: t, operation: opts.sourceType || "journal_posting" });
+      const resolvedLines = [];
+      for (const line of lines) {
+        const account = await financialAccountResolver.resolvePostingAccount({ companyId, branchId: opts.branchId || null, accountId: line.accountId || null, accountCode: line.accountCode || null, mappingRole: line.mappingRole || null, transaction: t });
+        if (!account) throw new Error("Explicit posting account is inactive or outside the operational branch.");
+        resolvedLines.push({ line, account });
+      }
+      const total = moneyFromUnits4(totalUnits);
+      const entry = await JournalEntry.create({ id: entryId, companyId, branchId: opts.branchId || null, description: opts.description || "Auto-generated entry", date, status: "posted", amount: total, totalDebit: total, totalCredit: total, sourceType: opts.sourceType || null, sourceId: opts.sourceId || null, postedBy: opts.postedBy || "System", postedAt: new Date().toISOString() }, { transaction: t });
+      let index = 0;
+      for (const { line, account } of resolvedLines) {
+        const debit = moneyFromUnits4(moneyToUnits4(line.debit || 0));
+        const credit = moneyFromUnits4(moneyToUnits4(line.credit || 0));
+        await JournalLine.create({ id: `${entryId}-L${++index}`, journalEntryId: entryId, accountId: account.id, accountCode: account.code, accountName: account.nameAr, debit, credit, description: line.description || opts.description || "" }, { transaction: t });
+        const debitUnits = moneyToUnits4(debit);
+        const creditUnits = moneyToUnits4(credit);
+        const deltaUnits = account.nature === "debit" ? debitUnits - creditUnits : creditUnits - debitUnits;
+        if (deltaUnits >= 0n) {
+          await account.increment("balance", { by: moneyFromUnits4(deltaUnits), transaction: t, silent: true });
+        } else {
+          await account.decrement("balance", { by: moneyFromUnits4(-deltaUnits), transaction: t, silent: true });
+        }
+      }
+      const lineRows = await JournalLine.findAll({ where: { journalEntryId: entryId }, transaction: t });
+      return { ...entry.toJSON(), lines: lineRows.map((row) => row.toJSON()) };
+    };
+    return opts?.transaction ? execute(opts.transaction) : sequelize.transaction(execute);
   }
 
   /**
@@ -852,17 +906,28 @@ class PostingService {
    */
   async postInstallmentPayment(installment, amount, paymentMethod = "Cash", postedBy = "System", opts = {}) {
     const companyId = installment.companyId;
-    const amt = round(amount);
+    // Installment collections are a four-decimal business domain. Preserve the
+    // exact amount through Journal lines and Account.balance; display rounding
+    // belongs at the presentation boundary, never in accounting posting.
+    const amt = moneyFromUnits4(moneyToUnits4(amount));
     const method = String(paymentMethod).toLowerCase();
+    const collectionEventId = String(opts.collectionEventId || "").trim();
+    if (!collectionEventId) {
+      throw new AppError("Installment collection requires a durable payment event", 422, "INSTALLMENT_COLLECTION_EVENT_REQUIRED");
+    }
     return this.postEntry(
       companyId,
       {
         description: `تحصيل قسط #${installment.sequence} — فاتورة ${installment.invoiceId}`,
-        sourceType: "installment",
-        sourceId: installment.id,
+        // An installment may be collected more than once.  The durable Payment
+        // created by the route is the financial event, while the installment is
+        // only the aggregate being reduced.
+        sourceType: "installment_collection",
+        sourceId: collectionEventId,
         postedBy,
         transaction: opts.transaction,
-        branchId: opts.branchId || installment.branchId || null
+        branchId: opts.branchId || installment.branchId || null,
+        precision: 4
       },
       [
         { mappingRole: treasuryMappingRole(method), debit: amt, credit: 0, description: "تحصيل قسط" },

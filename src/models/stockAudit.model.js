@@ -17,7 +17,7 @@ const StockAudit = sequelize.define("StockAudit", {
     field: "branch_id"
   },
   status: {
-    type: DataTypes.ENUM("in-progress", "completed", "cancelled"),
+    type: DataTypes.ENUM("draft", "in-progress", "completed", "closed", "cancelled"),
     defaultValue: "in-progress"
   },
   createdBy: {
@@ -31,7 +31,13 @@ const StockAudit = sequelize.define("StockAudit", {
   },
   notes: {
     type: DataTypes.TEXT
-  }
+  },
+  auditNumber: { type: DataTypes.STRING, field: "audit_number" },
+  auditDate: { type: DataTypes.DATEONLY, field: "audit_date" },
+  locationId: { type: DataTypes.STRING, field: "location_id" },
+  auditMethod: { type: DataTypes.STRING, field: "audit_method" },
+  closedAt: { type: DataTypes.DATE, field: "closed_at" },
+  closedBy: { type: DataTypes.STRING, field: "closed_by" }
 }, {
   tableName: "stock_audits",
   timestamps: true,

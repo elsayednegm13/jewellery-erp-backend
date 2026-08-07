@@ -4,7 +4,9 @@ const accountBalanceService = require("./account-balance.service");
 const { resolveRequiredBranchFinancialAccount } = require("./financial-account-resolver.service");
 const { AppError, ConflictError, ValidationError } = require("../utils/errors");
 
-const round = (value) => Math.round((Number(value) || 0) * 100) / 100;
+// Register accounting/reconciliation remains exact to the business four
+// decimals. UI currency formatting may present two decimals separately.
+const round = (value) => Math.round((Number(value) || 0) * 10000) / 10000;
 
 function actorFromRequest(req) {
   const user = req?.user || {};

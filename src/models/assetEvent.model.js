@@ -55,7 +55,21 @@ const AssetEvent = sequelize.define("AssetEvent", {
   severity: {
     type: DataTypes.ENUM("info", "warning", "critical"),
     defaultValue: "info"
-  }
+  },
+  companyId: { type: DataTypes.STRING, allowNull: true, field: "company_id" },
+  branchId: { type: DataTypes.STRING, allowNull: true, field: "branch_id" },
+  eventType: { type: DataTypes.STRING(48), allowNull: true, field: "event_type" },
+  occurredAt: { type: DataTypes.DATE, allowNull: true, field: "occurred_at" },
+  userId: { type: DataTypes.STRING, allowNull: true, field: "user_id" },
+  employeeCode: { type: DataTypes.STRING, allowNull: true, field: "employee_code" },
+  employeeName: { type: DataTypes.STRING, allowNull: true, field: "employee_name" },
+  operatorSessionId: { type: DataTypes.STRING, allowNull: true, field: "operator_session_id" },
+  sourceType: { type: DataTypes.STRING(48), allowNull: true, field: "source_type" },
+  sourceId: { type: DataTypes.STRING, allowNull: true, field: "source_id" },
+  oldContext: { type: DataTypes.JSONB, allowNull: true, field: "old_context" },
+  newContext: { type: DataTypes.JSONB, allowNull: true, field: "new_context" },
+  notes: { type: DataTypes.TEXT, allowNull: true },
+  idempotencyKey: { type: DataTypes.STRING(128), allowNull: true, field: "idempotency_key" }
 }, {
   tableName: "asset_events",
   timestamps: true,

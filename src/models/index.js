@@ -18,6 +18,7 @@ const EmployeeVerificationAttempt = require("./employeeVerificationAttempt.model
 const EmployeeOperationalSession = require("./employeeOperationalSession.model");
 const Asset = require("./asset.model");
 const AssetEvent = require("./assetEvent.model");
+const AssetReturnReview = require("./assetReturnReview.model");
 const AssetCertificate = require("./assetCertificate.model");
 const AssetAttachment = require("./assetAttachment.model");
 const Customer = require("./customer.model");
@@ -79,6 +80,7 @@ const CustomerCreditTransaction = require("./customerCreditTransaction.model");
 const BarcodeInventoryCode = require("./barcodeInventoryCode.model");
 const BarcodeItemCode = require("./barcodeItemCode.model");
 const BarcodeSequence = require("./barcodeSequence.model");
+const PearlSizeMasterData = require("./pearlSizeMasterData.model");
 const TechnicalAccountSession = require("./technicalAccountSession.model");
 const PasswordResetToken = require("./passwordResetToken.model");
 const EmailChangeToken = require("./emailChangeToken.model");
@@ -156,6 +158,8 @@ Asset.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
 Company.hasMany(BarcodeInventoryCode, { foreignKey: "companyId", as: "barcodeInventoryCodes" });
 BarcodeInventoryCode.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Company.hasMany(PearlSizeMasterData, { foreignKey: "companyId", as: "pearlSizeMasterData" });
+PearlSizeMasterData.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 Company.hasMany(BarcodeItemCode, { foreignKey: "companyId", as: "barcodeItemCodes" });
 BarcodeItemCode.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 Company.hasMany(BarcodeSequence, { foreignKey: "companyId", as: "barcodeSequences" });
@@ -372,6 +376,8 @@ EmployeeOperationalSession.hasMany(AuditLog, { foreignKey: "operatorSessionId", 
 // Asset relationships
 Asset.hasMany(AssetEvent, { foreignKey: "assetId", as: "events" });
 AssetEvent.belongsTo(Asset, { foreignKey: "assetId", as: "asset" });
+Asset.hasMany(AssetReturnReview, { foreignKey: "assetId", as: "returnReviews" });
+AssetReturnReview.belongsTo(Asset, { foreignKey: "assetId", as: "asset" });
 
 Asset.hasMany(AssetCertificate, { foreignKey: "assetId", as: "certificates" });
 AssetCertificate.belongsTo(Asset, { foreignKey: "assetId", as: "asset" });
@@ -544,6 +550,7 @@ module.exports = {
   EmployeeOperationalSession,
   Asset,
   AssetEvent,
+  AssetReturnReview,
   AssetCertificate,
   AssetAttachment,
   Customer,
@@ -605,6 +612,7 @@ module.exports = {
   BarcodeInventoryCode,
   BarcodeItemCode,
   BarcodeSequence,
+  PearlSizeMasterData,
   TechnicalAccountSession,
   PasswordResetToken,
   EmailChangeToken,

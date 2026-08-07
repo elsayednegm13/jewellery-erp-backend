@@ -168,7 +168,16 @@ async function generateBarcodeForAsset({
   if (!inventory || !inventory.isActive) throw new ValidationError("No active inventory barcode code is configured for this asset type.");
   if (inventory.assetType !== assetType) throw new ValidationError("Inventory code does not match the selected asset type.");
 
-  const effectiveItemCode = validateItemCode(itemCode || inventory.defaultItemCode || "");
+  // A configured inventory code can intentionally omit a default item code.
+  // In that case select the first active compatible item code from the same
+  // Company configuration; never invent a code in a workflow adapter.
+  const configuredFallbackItem = settings.itemCodes.find((row) => {
+    const allowed = Array.isArray(row.allowedInventoryCodes) ? row.allowedInventoryCodes : [];
+    return row.isActive && (!allowed.length || allowed.includes(inventory.code));
+  });
+  const effectiveItemCode = validateItemCode(
+    itemCode || inventory.defaultItemCode || configuredFallbackItem?.code || ""
+  );
   const item = settings.itemCodes.find((row) => row.code === effectiveItemCode);
   if (!item || !item.isActive) throw new ValidationError("The selected item barcode code is missing or inactive.");
   const allowed = Array.isArray(item.allowedInventoryCodes) ? item.allowedInventoryCodes : [];
@@ -195,7 +204,9 @@ async function generateBarcodeForAsset({
       transaction,
     });
     const barcode = formatBarcode({ inventoryCode: inventory.code, itemCode: item.code, karatCode, serial });
-    const collision = await models.Asset.count({ where: { companyId, barcode }, paranoid: false, transaction });
+    // Inventory Master V2 reserves Barcode identity globally, including rows
+    // outside the caller's Company and soft-deleted/terminal Assets.
+    const collision = await models.Asset.count({ where: { barcode }, paranoid: false, transaction });
     if (!collision) {
       return {
         barcode,

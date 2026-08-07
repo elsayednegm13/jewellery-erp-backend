@@ -25,6 +25,19 @@ function round4(n) {
   return Math.round((Number(n) || 0) * 10000) / 10000;
 }
 
+function exactAmount(value) {
+  const text = String(value ?? "").trim();
+  if (!/^(?:0|[1-9]\d*)(?:\.\d{1,4})?$/.test(text)) {
+    throw new Error("customer-credit: amount must be an exact positive DECIMAL(15,4)");
+  }
+  const [whole, fraction = ""] = text.split(".");
+  const normalized = `${whole}.${`${fraction}0000`.slice(0, 4)}`;
+  if (BigInt(whole) * 10000n + BigInt(normalized.split(".")[1]) <= 0n) {
+    throw new Error("customer-credit: amount must be an exact positive DECIMAL(15,4)");
+  }
+  return normalized;
+}
+
 function genId() {
   return `CCT-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -33,6 +46,7 @@ function genId() {
 function assertRecordInput({ companyId, customerId, amount }) {
   if (!companyId) throw new Error("customer-credit: companyId is required");
   if (!customerId) throw new Error("customer-credit: customerId is required");
+  if (arguments[0]?.exactMoney === true) return exactAmount(amount);
   const amt = Number(amount);
   if (!Number.isFinite(amt) || amt <= 0) {
     throw new Error("customer-credit: amount must be a finite number greater than zero");
@@ -94,6 +108,11 @@ function validatePostingContext(direction, opts) {
     description: gl.description || opts.description || "Customer credit movement",
     date: gl.date,
     postedBy: gl.postedBy || opts.createdBy || "System",
+    // The overpayment remediation is a source-specific DECIMAL(15,4)
+    // correction. Preserve its explicit journal identity and precision instead
+    // of silently falling back to the legacy two-decimal credit bridge.
+    sourceType: gl.sourceType || "customer_credit",
+    precision: gl.precision || 2,
   };
 }
 
@@ -105,11 +124,12 @@ async function postCreditJournal(direction, opts, amount, creditRowId, postingCo
     {
       description,
       date: postingContext.date,
-      sourceType: "customer_credit",
+      sourceType: postingContext.sourceType || "customer_credit",
       sourceId: creditRowId,
       postedBy: postingContext.postedBy,
       transaction: opts.transaction,
       branchId: opts.branchId || null,
+      precision: postingContext.precision || 2,
     },
     [
       {

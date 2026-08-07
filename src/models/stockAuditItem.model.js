@@ -28,7 +28,10 @@ const StockAuditItem = sequelize.define("StockAuditItem", {
   status: {
     type: DataTypes.ENUM("matched", "missing", "unexpected"),
     allowNull: false
-  }
+  },
+  result: { type: DataTypes.STRING },
+  observedAt: { type: DataTypes.DATE, field: "observed_at" },
+  scanMethod: { type: DataTypes.STRING, field: "scan_method" }
 }, {
   tableName: "stock_audit_items",
   timestamps: true,

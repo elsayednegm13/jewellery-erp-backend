@@ -6,6 +6,7 @@ const idempotencyService = require("./idempotency.service");
 const settingsService = require("./settings.service");
 const permissionService = require("./permission.service");
 const notificationService = require("./notification.service");
+const inventoryV2Runtime = require("./inventory-v2-runtime.service");
 const { SYSTEM_ACCOUNT_ROLES, resolveSystemAccountRole, resolveRequiredFinalSaleAccounts } = require("./company-bootstrap.service");
 const reservationFinancialResolver = require("./reservation-financial-resolver.service");
 const depositReceiptService = require("./reservation-deposit-receipt.service");
@@ -511,20 +512,12 @@ class ReservationService {
         reservedAt: createdAt,
         addedBy: createdBy
       }, { transaction });
-      await row.asset.update({ status: "reserved" }, { transaction });
-      await models.AssetEvent.create({
-        id: `EV-RES-${reservation.id}-${itemIndex}`,
-        assetId: row.asset.id,
-        action: "RESERVED",
-        date: createdAt.toISOString(),
-        user: createdBy,
-        branch: reservation.branch,
-        note: `Reserved by reservation ${reservation.id}`,
-        sourceDocument: reservation.id,
-        beforeState: "status:available",
-        afterState: "status:reserved",
-        severity: "info"
-      }, { transaction });
+      await inventoryV2Runtime.transitionAsset({
+        models, transaction, asset: row.asset,
+        context: { companyId, branchId: reservation.branchId, branchName: reservation.branch, actorId: user?.id || null, actorName: createdBy, occurredAt: createdAt },
+        toStatus: "RESERVED", eventType: "RESERVATION", movementType: "RESERVATION", sourceType: "RESERVATION", sourceId: reservation.id,
+        note: `Reserved by reservation ${reservation.id}`, idempotencyKey: `${idempotencyKey}:${row.asset.id}`,
+      });
       await audit(companyId, "reservation.item_reserved", {
         reservationId: reservation.id,
         branchId: reservation.branchId,
@@ -841,7 +834,12 @@ class ReservationService {
         stoneValue: 0
       }, { transaction });
       invoiceItems.push(invoiceItem.toJSON());
-      await row.asset.update({ status: "sold" }, { transaction });
+      await inventoryV2Runtime.transitionAsset({
+        models, transaction, asset: row.asset,
+        context: { companyId, branchId: reservation.branchId, branchName: branch?.name || reservation.branch, actorId: user?.id || null, actorName: actor, occurredAt: new Date() },
+        toStatus: "SOLD", eventType: "SALE", movementType: "RESERVATION_SALE", sourceType: "INVOICE", sourceId: invoiceId,
+        note: `Sold by final reservation invoice ${invoiceNumber}`, idempotencyKey: `reservation-sale:${reservation.id}:${row.asset.id}`,
+      });
       await row.item.update({ status: "sold" }, { transaction });
       await models.StockMovement.create({
         id: `SM-RES-SALE-${nowStamp()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -861,19 +859,6 @@ class ReservationService {
         customerId: reservation.customerId,
         branchId: reservation.branchId || null,
         createdBy: user?.id || actor
-      }, { transaction });
-      await models.AssetEvent.create({
-        id: `ASE-RES-COMP-${nowStamp()}-${Math.random().toString(36).slice(2, 6)}`,
-        assetId: row.asset.id,
-        action: "SALE",
-        date: nowStr.slice(0, 10),
-        user: actor,
-        branch: branch?.name || reservation.branch || "Main Branch",
-        note: `Sold by final reservation invoice ${invoiceNumber}`,
-        sourceDocument: invoiceId,
-        beforeState: "status:reserved",
-        afterState: "status:sold",
-        severity: "info"
       }, { transaction });
     }
 
@@ -1449,22 +1434,12 @@ class ReservationService {
     for (const item of activeItems) {
       if (!removalIds.has(item.id)) continue;
       const asset = assetsById.get(item.assetId);
-      if (asset && asset.status === "reserved") {
-        await asset.update({ status: "available" }, { transaction });
-        await models.AssetEvent.create({
-          id: uid("ASE-RES-AMEND-REL"),
-          assetId: asset.id,
-          action: "RESERVATION_ITEM_RELEASED",
-          date: now.toISOString().slice(0, 10),
-          user: actor,
-          branch: reservation.branch,
-          note: `Released from reservation ${reservation.id} by amendment ${amendmentId}: ${reason}`,
-          sourceDocument: reservation.id,
-          beforeState: "status:reserved",
-          afterState: "status:available",
-          severity: "info"
-        }, { transaction });
-      }
+      if (asset && inventoryV2Runtime.operationalStatusOf(asset) === "RESERVED") await inventoryV2Runtime.transitionAsset({
+        models, transaction, asset,
+        context: { companyId, branchId: reservation.branchId, branchName: reservation.branch, actorId: user?.id || null, actorName: actor, occurredAt: now },
+        toStatus: "AVAILABLE", eventType: "RESERVATION_ITEM_RELEASED", movementType: "RESERVATION_RELEASE", sourceType: "RESERVATION", sourceId: reservation.id,
+        note: `Released from reservation ${reservation.id} by amendment ${amendmentId}: ${reason}`, idempotencyKey: `reservation-amendment:${amendmentId}:${asset.id}`,
+      });
       const isReplacedOut = replacements.some((r) => r.removeItemId === item.id);
       await item.update({ status: "released", releasedAt: now, releaseReason: reason }, { transaction });
       amendmentDetails.push({
@@ -1525,20 +1500,12 @@ class ReservationService {
         reservedAt: now,
         addedBy: actor
       }, { transaction });
-      await asset.update({ status: "reserved" }, { transaction });
-      await models.AssetEvent.create({
-        id: uid("ASE-RES-AMEND-ADD"),
-        assetId: asset.id,
-        action: "RESERVED",
-        date: now.toISOString().slice(0, 10),
-        user: actor,
-        branch: reservation.branch,
-        note: `Added to reservation ${reservation.id} by amendment ${amendmentId}`,
-        sourceDocument: reservation.id,
-        beforeState: "status:available",
-        afterState: "status:reserved",
-        severity: "info"
-      }, { transaction });
+      await inventoryV2Runtime.transitionAsset({
+        models, transaction, asset,
+        context: { companyId, branchId: reservation.branchId, branchName: reservation.branch, actorId: user?.id || null, actorName: actor, occurredAt: now },
+        toStatus: "RESERVED", eventType: "RESERVATION", movementType: "RESERVATION", sourceType: "RESERVATION", sourceId: reservation.id,
+        note: `Added to reservation ${reservation.id} by amendment ${amendmentId}`, idempotencyKey: `reservation-amendment:${amendmentId}:${asset.id}`,
+      });
       const isReplacementIn = replacementInByAsset.has(aid);
       amendmentDetails.push({
         action: isReplacementIn ? "replaced_in" : "added",
@@ -1653,21 +1620,13 @@ class ReservationService {
     });
     for (const item of items) {
       const asset = await models.Asset.findOne({ where: { id: item.assetId, companyId }, transaction, lock: true });
-      if (asset && asset.status === "reserved") {
-        await asset.update({ status: "available" }, { transaction });
-        await models.AssetEvent.create({
-          id: uid("ASE-RES-REL"),
-          assetId: asset.id,
-          action: eventAction,
-          date: now.toISOString().slice(0, 10),
-          user: actor,
-          branch: reservation.branch,
-          note,
-          sourceDocument: reservation.id,
-          beforeState: "status:reserved",
-          afterState: "status:available",
-          severity: "info"
-        }, { transaction });
+      if (asset && inventoryV2Runtime.operationalStatusOf(asset) === "RESERVED") {
+        await inventoryV2Runtime.transitionAsset({
+          models, transaction, asset,
+          context: { companyId, branchId: reservation.branchId, branchName: reservation.branch, actorName: actor, occurredAt: now },
+          toStatus: "AVAILABLE", eventType: eventAction, movementType: "RESERVATION_RELEASE", sourceType: "RESERVATION", sourceId: reservation.id,
+          note, idempotencyKey: `${eventAction}:${reservation.id}:${asset.id}`,
+        });
         await audit(companyId, "reservation.item_released", {
           reservationId: reservation.id, branchId: reservation.branchId, user: actor,
           after: { assetId: asset.id, itemId: item.id }
@@ -2081,20 +2040,12 @@ class ReservationService {
         reservedAt: now,
         addedBy: actor
       }, { transaction });
-      await asset.update({ status: "reserved" }, { transaction });
-      await models.AssetEvent.create({
-        id: uid("ASE-RES-RENEW"),
-        assetId: asset.id,
-        action: "RESERVED",
-        date: now.toISOString().slice(0, 10),
-        user: actor,
-        branch: successor.branch,
-        note: `Reserved by renewal successor ${successor.id} of ${source.id}`,
-        sourceDocument: successor.id,
-        beforeState: "status:available",
-        afterState: "status:reserved",
-        severity: "info"
-      }, { transaction });
+      await inventoryV2Runtime.transitionAsset({
+        models, transaction, asset,
+        context: { companyId, branchId: successor.branchId, branchName: successor.branch, actorId: user?.id || null, actorName: actor, occurredAt: now },
+        toStatus: "RESERVED", eventType: "RESERVATION", movementType: "RESERVATION", sourceType: "RESERVATION", sourceId: successor.id,
+        note: `Reserved by renewal successor ${successor.id} of ${source.id}`, idempotencyKey: `reservation-renewal:${successor.id}:${asset.id}`,
+      });
     }
 
     const excessUnits = transferableUnits > successorTotalUnits ? transferableUnits - successorTotalUnits : 0n;

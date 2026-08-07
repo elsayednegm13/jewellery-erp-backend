@@ -186,6 +186,30 @@ const Asset = sequelize.define("Asset", {
   overrideBy: { type: DataTypes.STRING, allowNull: true, field: "override_by" },
   overrideAt: { type: DataTypes.DATE, allowNull: true, field: "override_at" },
   netGoldWeight: { type: DataTypes.DECIMAL(15, 4), allowNull: true, field: "net_gold_weight" }
+  ,
+  // Inventory Master V2 fields. These retain the existing Asset identity while
+  // making the operational profile/state model available to runtime services.
+  locationId: { type: DataTypes.STRING, allowNull: true, field: "location_id" },
+  // The database trigger supplies these for retained legacy writers. V2 routes
+  // set them explicitly; keeping the ORM nullable preserves that compatibility
+  // without weakening the database NOT NULL contract.
+  inventoryProfile: { type: DataTypes.STRING(40), allowNull: true, field: "inventory_profile" },
+  operationalStatus: { type: DataTypes.STRING(24), allowNull: true, field: "operational_status" },
+  condition: { type: DataTypes.STRING(8), allowNull: true },
+  conditionClassification: { type: DataTypes.STRING(48), allowNull: true, field: "condition_classification" },
+  tagState: { type: DataTypes.STRING(8), allowNull: true, field: "tag_state" },
+  tagStateClassification: { type: DataTypes.STRING(48), allowNull: true, field: "tag_state_classification" },
+  description: { type: DataTypes.TEXT, allowNull: true },
+  brand: { type: DataTypes.STRING(160), allowNull: true },
+  model: { type: DataTypes.STRING(160), allowNull: true },
+  modelNumber: { type: DataTypes.STRING(160), allowNull: true, field: "model_number" },
+  supplierId: { type: DataTypes.STRING, allowNull: true, field: "supplier_id" },
+  purchaseDate: { type: DataTypes.DATEONLY, allowNull: true, field: "purchase_date" },
+  createdBy: { type: DataTypes.STRING, allowNull: true, field: "created_by" },
+  updatedBy: { type: DataTypes.STRING, allowNull: true, field: "updated_by" },
+  retiredAt: { type: DataTypes.DATE, allowNull: true, field: "retired_at" },
+  retiredBy: { type: DataTypes.STRING, allowNull: true, field: "retired_by" },
+  retirementReason: { type: DataTypes.TEXT, allowNull: true, field: "retirement_reason" }
 }, {
   tableName: "assets",
   timestamps: true,

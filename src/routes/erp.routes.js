@@ -19,7 +19,17 @@ const { emitEntityChanged } = require("../services/realtime-helper.service");
 const notificationService = require("../services/notification.service");
 const idempotencyService = require("../services/idempotency.service");
 const customerCreditService = require("../services/customer-credit.service");
+const installmentOverpaymentReclassificationService = require("../services/installment-overpayment-reclassification.service");
+const installmentPrecisionRemediationService = require("../services/installment-precision-remediation.service");
 const barcodeIdentityService = require("../services/barcode-identity.service");
+const pearlSizeMasterDataService = require("../services/pearl-size-master-data.service");
+const profileMasterDataService = require("../services/profile-master-data.service");
+const inventoryMasterPolicy = require("../services/inventory-master-policy.service");
+const inventoryV2Runtime = require("../services/inventory-v2-runtime.service");
+const goldValuationService = require("../services/gold-valuation.service");
+const looseProfileFinanceService = require("../services/loose-profile-finance.service");
+const goldSalePricingService = require("../services/gold-sale-pricing.service");
+const inventoryAuditCanonicalService = require("../services/inventory-audit-canonical.service");
 const reservationService = require("../services/reservation.service");
 const reservationDepositReceiptService = require("../services/reservation-deposit-receipt.service");
 const reservationDepositSettingsService = require("../services/reservation-deposit-settings.service");
@@ -599,24 +609,19 @@ function setupCrud(resourceName, model, searchFields = ["name"]) {
   return controller;
 }
 
-// ─── Custom POS Checkout Endpoint ───────────────────────────────────────────
-router.post("/pos/checkout",
-  authMiddleware,
-  salesOperatorPolicy.requireSalesCommandAccess("pos.checkout", {
-    resolveBranchId: (req) => (req.body && req.body.branchId) || req.headers["x-branch-id"] || req.branchId
-  }),
-  async (req, res, next) => {
+// ─── Canonical Sale Orchestration ───────────────────────────────────────────
+async function executeCanonicalSale(req, res, next, { operation = "pos.checkout", requiredPermission = "pos.sell" } = {}) {
   const t = await models.sequelize.transaction();
   try {
     const body = req.body || {};
     const commandActor = commandActorContext.fromRequest(req, {
-      requiredPermission: "pos.sell",
-      requestedOperation: "pos.checkout",
+      requiredPermission,
+      requestedOperation: operation,
       authorizationResult: "allowed"
     });
     const actor = commandActor.employeeName || commandActor.technicalUserName || "System";
     const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
-    await salesOperatorPolicy.assertSalesOperatorPolicy(req, "pos.checkout", {
+    await salesOperatorPolicy.assertSalesOperatorPolicy(req, operation, {
       branchId: (body.branchId || req.headers["x-branch-id"] || req.branchId),
       transaction: t
     });
@@ -626,7 +631,7 @@ router.post("/pos/checkout",
       await t.rollback();
       return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لإتمام البيع" });
     }
-    const idemScope = "pos.checkout";
+    const idemScope = operation;
     const idemRequestHash = idempotencyService.hashRequest(idemScope, body);
     const idemClaim = await idempotencyService.claim({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash, transaction: t });
     if (!idemClaim.claimed) {
@@ -673,8 +678,13 @@ router.post("/pos/checkout",
       throw new ValidationError("لا يمكن البيع بدون منتجات في السلة");
     }
 
+    const settings = await settingsService.getCompanySettings(req.companyId, { transaction: t });
+    const invoiceId = `INV-ID-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
     const validatedItems = [];
     let subtotal = 0;
+    let totalGoldTax = 0;
+    let hasGoldPricing = false;
 
     for (const item of items) {
       const itemId = item.assetId || item.id;
@@ -723,6 +733,9 @@ router.post("/pos/checkout",
         if (!asset) {
           throw new ValidationError(`المنتج ذو الرمز ${itemId} غير موجود في المخزون`);
         }
+        if (Object.prototype.hasOwnProperty.call(item, "quantity") && Number(item.quantity) !== 1) {
+          throw new ValidationError("لا تقبل مبيعات الأصل المتسلسل كمية غير 1؛ اختر معرف أصل مستقل لكل قطعة");
+        }
         if (asset.status !== "available") {
           throw new ValidationError(`المنتج ${asset.name} (${asset.id}) غير متاح للبيع حالياً، حالته: ${asset.status}`);
         }
@@ -730,19 +743,93 @@ router.post("/pos/checkout",
           throw new ValidationError(`المنتج ${asset.name} (${asset.id}) تابع لفرع آخر وليس للفرع النشط`);
         }
 
-        validatedItems.push({
-          isProduct: false,
-          asset,
-          quantity: 1,
-          price: Number(item.price) || Number(asset.price) || 0,
-          weight: Number(asset.grossWeight) || 0,
-          cost: Number(asset.cost) || 0,
-          discount: Number(item.discount) || 0,
-          makingCharge: Number(item.makingCharge) || 0,
-          stoneValue: Number(item.stoneValue) || 0
-        });
+        const profile = asset.inventoryProfile || asset.profile;
+        if (goldSalePricingService.isSalePricingProfile(profile)) {
+          hasGoldPricing = true;
+          const goldPricing = await goldSalePricingService.calculateGoldSalePriceForAsset({
+            asset,
+            models,
+            companyId: req.companyId,
+            transaction: t,
+            itemInput: item,
+            configuredVatRate: settings.vatRate,
+          });
 
-        subtotal += Number(item.price) || Number(asset.price) || 0;
+          if (goldPricing.approvalRequired) {
+            const isSuperAdmin = req.user?.accountType === "super_admin";
+            const isAdmin = req.user && (isSuperAdmin || req.user.role === "admin" || req.user.role === "owner");
+            const hasApprovePerm = req.user && (isAdmin || await permissionService.userHasAnyPermission(req.user, ["sales.approve", "pos.discount.approve", "approvals.manage"]));
+
+            if (!hasApprovePerm) {
+              throw new AppError(goldPricing.approvalReason, 403, "BELOW_MINIMUM_APPROVAL_REQUIRED");
+            }
+
+            const approvalId = `APP-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+            await models.ApprovalRequest.create({
+              id: approvalId,
+              companyId: req.companyId,
+              type: "price-override",
+              requestedBy: commandActor.employeeId || req.user?.id || "System",
+              requestedAt: new Date().toISOString().slice(0, 16),
+              branch: branchRecord.name,
+              description: goldPricing.approvalReason,
+              amount: Number(goldPricing.makingTotal || goldPricing.certificateSaleAmount || goldPricing.proposedDiscount || 0),
+              status: "approved",
+              reviewedBy: actor,
+              reviewedAt: new Date().toISOString().slice(0, 16),
+              reason: goldPricing.approvalReason,
+              relatedId: invoiceId
+            }, { transaction: t });
+
+            await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
+              action: "pos.below_minimum.approve",
+              description: `Below minimum pricing approved for asset ${asset.id}: ${goldPricing.approvalReason}`,
+              place: branchRecord.name,
+              branch: branchRecord.name,
+              severity: "warning",
+              before: null,
+              after: JSON.stringify({ assetId: asset.id, goldPricing, branchId })
+            }, {
+              requiredPermission: "sales.approve",
+              requestedOperation: operation,
+              authorizationResult: "allowed"
+            }), { transaction: t });
+          }
+
+          const itemSubtotal = Number(goldPricing.subtotal);
+          const itemTax = Number(goldPricing.vatAmount);
+
+          validatedItems.push({
+            isProduct: false,
+            asset,
+            quantity: 1,
+            price: itemSubtotal,
+            weight: Number(goldPricing.netGoldWeight || asset.grossWeight || 0),
+            cost: Number(asset.cost) || 0,
+            // For GOLD_BY_PIECE: discount is baked into finalSalePrice (subtotal). Do not double-count.
+            discount: ["GOLD_BY_PIECE", "LOOSE_GEMSTONE", "LOOSE_PEARL"].includes(goldPricing.profile) ? 0 : (Number(item.discount) || 0),
+            makingCharge: Number(goldPricing.makingTotal || 0),
+            stoneValue: Number(item.stoneValue) || 0,
+            goldPricing,
+          });
+
+          subtotal += itemSubtotal;
+          totalGoldTax += itemTax;
+        } else {
+          validatedItems.push({
+            isProduct: false,
+            asset,
+            quantity: 1,
+            price: Number(item.price) || Number(asset.price) || 0,
+            weight: Number(asset.grossWeight) || 0,
+            cost: Number(asset.cost) || 0,
+            discount: Number(item.discount) || 0,
+            makingCharge: Number(item.makingCharge) || 0,
+            stoneValue: Number(item.stoneValue) || 0
+          });
+
+          subtotal += Number(item.price) || Number(asset.price) || 0;
+        }
       }
     }
     const discount = Number(body.discount) || 0;
@@ -770,9 +857,16 @@ router.post("/pos/checkout",
       }), { transaction: t });
     }
 
-    // 6. Settings + totals via the shared sales service (single source of truth)
-    const settings = await settingsService.getCompanySettings(req.companyId, { transaction: t });
-    const totals = salesService.computeTotals({ subtotal, makingCharge, stoneValue, discount, vatRatePercent: settings.vatRate });
+    // 6. Settings + totals calculation
+    let totals;
+    if (hasGoldPricing) {
+      const taxBase = Math.max(0, subtotal + makingCharge + stoneValue - discount);
+      const computedTax = Math.round(totalGoldTax * 10000) / 10000;
+      const total = Math.round((taxBase + computedTax) * 10000) / 10000;
+      totals = { subtotal, taxBase, tax: computedTax, total, vatRate: Number(settings.vatRate) || 0 };
+    } else {
+      totals = salesService.computeTotals({ subtotal, makingCharge, stoneValue, discount, vatRatePercent: settings.vatRate });
+    }
     const vatRatePercent = totals.vatRate;
     const computedTax = totals.tax;
     const total = totals.total;
@@ -792,12 +886,7 @@ router.post("/pos/checkout",
     // draft invoice_numbers too so POS and post-draft never reuse a number.
     // (Same INV-prefix-NNNNNN result as before; just collision-safe.)
     const prefix = settings.invoicePrefix || "INV-2026";
-    // Phase 16D — separate the customer-facing number (company-scoped, human)
-    // from the technical primary key (globally unique). Previously the PK reused
-    // the company-scoped number, so a second company's first POS sale collided on
-    // invoices_pkey. invoiceNumber keeps its existing format/value.
     const invoiceNumber = await nextInvoiceNumber(req.companyId, prefix, t);
-    const invoiceId = `INV-ID-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     // 8. Create Invoice
     const nowStr = new Date().toISOString().slice(0, 16).replace("T", " ");
@@ -905,22 +994,28 @@ router.post("/pos/checkout",
         }, { transaction: t });
         invoiceItems.push(invoiceItem.toJSON());
 
-        // Update asset status to sold
-        await asset.update({ status: "sold" }, { transaction: t });
-
-        // Create Asset Event in timeline
-        await models.AssetEvent.create({
-          id: `ASE-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          assetId: asset.id,
-          action: "SALE",
-          date: nowStr.slice(0, 10),
-          user: actor,
-          branch: branchRecord.name,
-          note: `تم البيع بموجب الفاتورة رقم ${invoiceNumber}`,
-          sourceDocument: invoiceId,
-          beforeState: "status:available",
-          afterState: "status:sold"
-        }, { transaction: t });
+        if (asset.inventoryProfile) {
+          await inventoryV2Runtime.linkInvoiceAsset({
+            models, transaction: t, invoiceItemId: invoiceItem.id, asset: asset.toJSON(), companyId: req.companyId,
+            ordinal: 1,
+            quoteSnapshot: {
+              price: vItem.price,
+              discount: vItem.discount,
+              makingCharge: vItem.makingCharge,
+              stoneValue: vItem.stoneValue,
+              vatRate: vItem.goldPricing ? vItem.goldPricing.vatRate : vatRatePercent,
+              cost: vItem.cost,
+              invoiceId,
+              ...(vItem.goldPricing || {})
+            },
+          });
+        }
+        await inventoryV2Runtime.transitionAsset({
+          models, transaction: t, asset,
+          context: { companyId: req.companyId, branchId, branchName: branchRecord.name, actorId: commandActor.technicalUserId || req.user?.id || null, actorName: actor, occurredAt: new Date() },
+          toStatus: "SOLD", eventType: "SALE", movementType: "SALE", sourceType: "INVOICE", sourceId: invoiceId,
+          note: `Sold under invoice ${invoiceNumber}`, idempotencyKey: `${idempotencyKey}:${asset.id}`,
+        });
       }
     }
 
@@ -1108,26 +1203,62 @@ router.post("/pos/checkout",
 
     return res.status(201).json(idemResponseBody);
   } catch (error) {
+    logger.error(`[ExecuteCanonicalSale Error] ${error.stack || error.message}`);
     await t.rollback();
     next(error);
   }
-});
+}
 
-// ─── Custom Sales Returns Endpoint ──────────────────────────────────────────
-router.post(
-  "/sales/returns",
+// Compatibility adapter for the historical immediately-posted invoice route.
+// It retains its authorization middleware and response envelope, but delegates
+// the durable sale to the very same canonical sale orchestration as POS.
+async function executeLegacyInstantInvoiceAdapter(req, res, next) {
+  const body = req.body || {};
+  const originalKey = req.headers["idempotency-key"];
+  const rawFingerprint = JSON.stringify({ companyId: req.companyId, branchId: body.branchId || req.branchId || null, body });
+  const key = String(originalKey || body.idempotencyKey || "").trim() || `legacy-invoice-${require("crypto").createHash("sha256").update(rawFingerprint).digest("hex").slice(0, 48)}`;
+  req.headers["idempotency-key"] = key;
+  try {
+    if (String(body.type || "sale").toLowerCase() === "return") {
+      const originalInvoiceId = body.originalInvoiceId || body.relatedInvoiceId;
+      const returnedAssetIds = Array.isArray(body.returnedAssetIds)
+        ? body.returnedAssetIds
+        : (Array.isArray(body.items) ? body.items.map((item) => item.assetId || item.id).filter(Boolean) : []);
+      if (!originalInvoiceId || !returnedAssetIds.length) {
+        throw new ValidationError("Legacy immediate return requires relatedInvoiceId/originalInvoiceId and exact returned Asset IDs.");
+      }
+      const originalBody = req.body;
+      req.body = { ...body, originalInvoiceId, returnedAssetIds, reason: body.reason || body.notes || "Legacy immediate return" };
+      try {
+        return await executeCanonicalReturn(req, res, next, { operation: "sales.legacy_immediate_post", requiredPermission: "sales.create" });
+      } finally {
+        req.body = originalBody;
+      }
+    }
+    return await executeCanonicalSale(req, res, next, { operation: "sales.legacy_immediate_post", requiredPermission: "sales.create" });
+  } finally {
+    if (originalKey === undefined) delete req.headers["idempotency-key"];
+    else req.headers["idempotency-key"] = originalKey;
+  }
+}
+
+router.post("/pos/checkout",
   authMiddleware,
-  salesOperatorPolicy.requireSalesCommandAccess("sales.return.execute", {
-    resolveBranchId: resolveAdjustmentInvoiceBranchId
+  salesOperatorPolicy.requireSalesCommandAccess("pos.checkout", {
+    resolveBranchId: (req) => (req.body && req.body.branchId) || req.headers["x-branch-id"] || req.branchId
   }),
-  async (req, res, next) => {
+  (req, res, next) => executeCanonicalSale(req, res, next)
+);
+
+// ─── Canonical Return Orchestration ─────────────────────────────────────────
+async function executeCanonicalReturn(req, res, next, { operation = "sales.return.execute", requiredPermission = "sales.returns.execute" } = {}) {
   const t = await models.sequelize.transaction();
   try {
     const body = req.body || {};
     const { originalInvoiceId, returnedAssetIds = [], reason = "" } = body;
     const commandActor = commandActorContext.fromRequest(req, {
-      requiredPermission: "sales.returns.execute",
-      requestedOperation: "sales.return.execute",
+      requiredPermission,
+      requestedOperation: operation,
       authorizationResult: "allowed"
     });
 
@@ -1137,7 +1268,7 @@ router.post(
       await t.rollback();
       return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لعملية المرتجع" });
     }
-    const idemScope = "sales.return";
+    const idemScope = operation;
     const idemRequestHash = idempotencyService.hashRequest(idemScope, idempotencyBodyWithActor(req, body, commandActor));
     const idemClaim = await idempotencyService.claim({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash, transaction: t });
     if (!idemClaim.claimed) {
@@ -1271,7 +1402,7 @@ router.post(
     if (!branchRecord) {
       throw new ValidationError("الفرع المحدد غير موجود أو غير نشط");
     }
-    await salesOperatorPolicy.assertSalesOperatorPolicy(req, "sales.return.execute", { branchId, transaction: t });
+    await salesOperatorPolicy.assertSalesOperatorPolicy(req, operation, { branchId, transaction: t });
 
     const settings = await settingsService.getCompanySettings(req.companyId, { transaction: t });
     const vatRatePercent = Number(originalInvoice.vatRate ?? settings.vatRate ?? 0);
@@ -1342,23 +1473,16 @@ router.post(
       returnItems.push(returnItem);
 
       if (line.kind === "asset") {
-        // Restore status to returned (not available blindly)
-        await line.asset.update({ status: "returned" }, { transaction: t });
-
-        // Create Asset Event
-        await models.AssetEvent.create({
-          id: `ASE-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          assetId: line.asset.id,
-          action: "RETURNED",
-          date: nowStr.slice(0, 10),
-          user: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
-          branch: branchRecord.name,
-          note: `تم الإرجاع للفاتورة: ${originalInvoice.id}. السبب: ${reason || "غير محدد"}`,
-          sourceDocument: originalInvoice.id,
-          beforeState: "status:sold",
-          afterState: "status:returned",
-          severity: "info"
-        }, { transaction: t });
+        // A returned V2 Asset keeps its immutable sale linkage and moves only
+        // to RETURNED. It never re-enters AVAILABLE without the separately
+        // governed Returned→Available approval extension.
+        await inventoryV2Runtime.transitionAsset({
+          models, transaction: t, asset: line.asset,
+          context: { companyId: req.companyId, branchId, branchName: branchRecord.name, actorId: commandActor.technicalUserId || req.user?.id || null, actorName: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System", occurredAt: new Date() },
+          toStatus: "RETURNED", eventType: "RETURN", movementType: "RETURN", sourceType: "RETURN_INVOICE", sourceId: returnInvoiceId,
+          note: `Returned from invoice ${originalInvoice.id}: ${reason || "unspecified"}`,
+          idempotencyKey: `${idempotencyKey}:${line.asset.id}`,
+        });
       } else {
         // Product full return: restock quantities/weight (mirror of the POS sale).
         const product = line.product;
@@ -1591,7 +1715,16 @@ router.post(
     await t.rollback();
     next(error);
   }
-});
+}
+
+router.post(
+  "/sales/returns",
+  authMiddleware,
+  salesOperatorPolicy.requireSalesCommandAccess("sales.return.execute", {
+    resolveBranchId: resolveAdjustmentInvoiceBranchId
+  }),
+  (req, res, next) => executeCanonicalReturn(req, res, next)
+);
 
 // ─── Exchange Preview Endpoint (read-only target policy) ─────────────────────
 router.post(
@@ -2183,6 +2316,14 @@ router.post(
       }, { transaction: t });
       exchangeItems.push(item);
 
+      if (it.itemType === "asset" && it.asset.inventoryProfile) {
+        await inventoryV2Runtime.linkInvoiceAsset({
+          models, transaction: t, invoiceItemId: item.id, asset: it.asset.toJSON(), companyId: req.companyId,
+          ordinal: 1,
+          quoteSnapshot: { price: it.unitPrice, discount: 0, makingCharge: it.makingCharge, stoneValue: it.stoneValue, vatRate: vatRatePercent, cost: it.unitCost, exchangeInvoiceId },
+        });
+      }
+
       if (it.itemType === "product") {
         // Product new item: decrement stock (mirror of the POS sale) + stock movement
         const product = it.product;
@@ -2215,21 +2356,13 @@ router.post(
 
     // 9. Update returned-item state + new asset statuses
     if (returnedAsset) {
-      await returnedAsset.update({ status: "returned" }, { transaction: t });
-      // 10a. Asset event for the returned asset
-      await models.AssetEvent.create({
-        id: `ASE-${Date.now()}-EX-OUT`,
-        assetId: returnedAsset.id,
-        action: "EXCHANGED_OUT",
-        date: nowStr.slice(0, 10),
-        user: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
-        branch: branchRecord.name,
-        note: `تم إرجاعه بالاستبدال للفاتورة: ${originalInvoice.id} بموجب سند الاستبدال ${exchangeInvoiceId}`,
-        sourceDocument: originalInvoice.id,
-        beforeState: "status:sold",
-        afterState: "status:returned",
-        severity: "info"
-      }, { transaction: t });
+        await inventoryV2Runtime.transitionAsset({
+          models, transaction: t, asset: returnedAsset,
+          context: { companyId: req.companyId, branchId, branchName: branchRecord.name, actorId: commandActor.technicalUserId || req.user?.id || null, actorName: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System", occurredAt: new Date() },
+          toStatus: "RETURNED", eventType: "EXCHANGE_RETURN", movementType: "EXCHANGE_RETURN", sourceType: "EXCHANGE", sourceId: exchangeInvoiceId,
+          note: `Returned through exchange ${exchangeInvoiceId} from invoice ${originalInvoice.id}`,
+          idempotencyKey: `${idempotencyKey}:return:${returnedAsset.id}`,
+        });
     } else {
       // 10a. Product full return: restock + stock movement (mirror of the POS sale)
       const product = returnedProduct;
@@ -2261,24 +2394,13 @@ router.post(
 
     const newAssetItems = newResolvedItems.filter((it) => it.itemType === "asset");
     for (const it of newAssetItems) {
-      await it.asset.update({ status: "sold" }, { transaction: t });
-    }
-
-    // 10. Record Asset Events for new assets (product movements are logged above)
-    for (const it of newAssetItems) {
-      await models.AssetEvent.create({
-        id: `ASE-${Date.now()}-EX-IN-${it.asset.id}`,
-        assetId: it.asset.id,
-        action: "EXCHANGED_IN",
-        date: nowStr.slice(0, 10),
-        user: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
-        branch: branchRecord.name,
-        note: `تم شراؤه بالاستبدال بموجب سند الاستبدال ${exchangeInvoiceId}`,
-        sourceDocument: exchangeInvoiceId,
-        beforeState: "status:available",
-        afterState: "status:sold",
-        severity: "info"
-      }, { transaction: t });
+        await inventoryV2Runtime.transitionAsset({
+          models, transaction: t, asset: it.asset,
+          context: { companyId: req.companyId, branchId, branchName: branchRecord.name, actorId: commandActor.technicalUserId || req.user?.id || null, actorName: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System", occurredAt: new Date() },
+          toStatus: "SOLD", eventType: "EXCHANGE_SALE", movementType: "EXCHANGE_SALE", sourceType: "EXCHANGE", sourceId: exchangeInvoiceId,
+          note: `Sold as exchange replacement under ${exchangeInvoiceId}`,
+          idempotencyKey: `${idempotencyKey}:replacement:${it.asset.id}`,
+        });
     }
 
     // 11. Create balanced Accounting Entry
@@ -2327,23 +2449,23 @@ router.post(
     }
 
     if (returnedValue > 0) {
-      lines.push({ accountCode: "4100", debit: returnedValue, credit: 0, description: "عكس إيراد مبيعات أصل قديم" });
+      lines.push({ mappingRole: "SALES_REVENUE", debit: returnedValue, credit: 0, description: "عكس إيراد مبيعات أصل قديم" });
     }
     if (newAssetsValue > 0) {
-      lines.push({ accountCode: "4100", debit: 0, credit: newAssetsValue, description: "إيراد بيع أصل بديل" });
+      lines.push({ mappingRole: "SALES_REVENUE", debit: 0, credit: newAssetsValue, description: "إيراد بيع أصل بديل" });
     }
 
     if (newTax > 0) {
-      lines.push({ accountCode: "2200", debit: 0, credit: newTax, description: "ضريبة عناصر الاستبدال الجديدة" });
+      lines.push({ mappingRole: "VAT_PAYABLE", debit: 0, credit: newTax, description: "ضريبة عناصر الاستبدال الجديدة" });
     }
 
     if (newAssetsCost > 0) {
-      lines.push({ accountCode: "5000", debit: newAssetsCost, credit: 0, description: "تكلفة مبيعات بديلة" });
-      lines.push({ accountCode: "1200", debit: 0, credit: newAssetsCost, description: "تخفيض مخزون بديل" });
+      lines.push({ mappingRole: "COST_OF_GOODS_SOLD", debit: newAssetsCost, credit: 0, description: "تكلفة مبيعات بديلة" });
+      lines.push({ mappingRole: "INVENTORY_ASSET", debit: 0, credit: newAssetsCost, description: "تخفيض مخزون بديل" });
     }
     if (returnedCost > 0) {
-      lines.push({ accountCode: "1200", debit: returnedCost, credit: 0, description: "إرجاع أصل قديم للمخزن" });
-      lines.push({ accountCode: "5000", debit: 0, credit: returnedCost, description: "عكس تكلفة أصل قديم" });
+      lines.push({ mappingRole: "INVENTORY_ASSET", debit: returnedCost, credit: 0, description: "إرجاع أصل قديم للمخزن" });
+      lines.push({ mappingRole: "COST_OF_GOODS_SOLD", debit: 0, credit: returnedCost, description: "عكس تكلفة أصل قديم" });
     }
 
     let journalEntry = null;
@@ -2577,6 +2699,12 @@ router.post("/customers/:id/gold/deposit", authMiddleware, async (req, res, next
 
     // 2. Create scrap gold asset in inventory
     const assetId = `AST-SCRAP-${timestamp.toString().slice(-6)}`;
+    const scrapBarcode = await barcodeIdentityService.generateBarcodeForAsset({
+      companyId: req.companyId,
+      assetType: "gold-weight",
+      karat: Number(karat),
+      transaction: t,
+    });
     const scrapAsset = await models.Asset.create({
       id: assetId,
       companyId: req.companyId,
@@ -2593,7 +2721,7 @@ router.post("/customers/:id/gold/deposit", authMiddleware, async (req, res, next
       branchId,
       location: "Melt Room",
       status: "available",
-      barcode: String(timestamp).slice(-13).padStart(13, "6"),
+      ...scrapBarcode,
       source: `شراء مستعمل من العميل ${customer.name}`
     }, { transaction: t });
 
@@ -2990,6 +3118,11 @@ router.post("/customers/:id/gold/use-in-sale", authMiddleware, async (req, res, 
 
 // ─── Custom Manufacturing Process Endpoint ──────────────────────────────────
 router.post("/manufacturing-orders/process", authMiddleware, requirePermission("inventory.adjust"), async (req, res, next) => {
+  // Compatibility surface only.  The legacy handler below is retained in this
+  // source file temporarily for historical review, but it is unreachable: all
+  // durable work now flows through the canonical transformation orchestration.
+  return executeLegacyManufacturingAdapter(req, res, next);
+
   const t = await models.sequelize.transaction();
   try {
     const {
@@ -3050,12 +3183,9 @@ router.post("/manufacturing-orders/process", authMiddleware, requirePermission("
     // 3. Consume raw input asset
     const remainingWeight = Math.round((Number(parentAsset.grossWeight) - inW) * 100) / 100;
     const isMelted = remainingWeight <= 0.01;
-    const newParentStatus = isMelted ? "melted" : parentAsset.status;
-
     await parentAsset.update({
       grossWeight: remainingWeight,
-      netWeight: remainingWeight,
-      status: newParentStatus
+      netWeight: remainingWeight
     }, { transaction: t });
 
     // Create parent asset event
@@ -3080,6 +3210,12 @@ router.post("/manufacturing-orders/process", authMiddleware, requirePermission("
 
     // 5. Create produced asset
     const finishedAssetId = `AST-MFG-${timestamp.toString().slice(-6)}`;
+    const finishedBarcode = await barcodeIdentityService.generateBarcodeForAsset({
+      companyId: req.companyId,
+      assetType: outputType,
+      karat: Number(outputKarat) || parentAsset.karat,
+      transaction: t,
+    });
     const finishedAsset = await models.Asset.create({
       id: finishedAssetId,
       companyId: req.companyId,
@@ -3096,7 +3232,7 @@ router.post("/manufacturing-orders/process", authMiddleware, requirePermission("
       branchId,
       location: "Showroom",
       status: "available",
-      barcode: String(timestamp).slice(-13).padStart(13, "6"),
+      ...finishedBarcode,
       source: `تصنيع محلي من أصل ${parentAsset.id}`,
       parentAssetId: parentAsset.id
     }, { transaction: t });
@@ -3141,8 +3277,8 @@ router.post("/manufacturing-orders/process", authMiddleware, requirePermission("
 
     // 7. Create accounting journal entry
     const glLines = [
-      { accountCode: "1200", debit: manufacturingCost, credit: 0, description: `إدخال منتج مصنع ${finishedAssetId}` },
-      { accountCode: "1200", debit: 0, credit: rawGoldCost, description: `استهلاك خام ذهب ${parentAsset.id}` }
+      { mappingRole: "INVENTORY_ASSET", debit: manufacturingCost, credit: 0, description: `إدخال منتج مصنع ${finishedAssetId}` },
+      { mappingRole: "INVENTORY_ASSET", debit: 0, credit: rawGoldCost, description: `استهلاك خام ذهب ${parentAsset.id}` }
     ];
     if (labor > 0) {
       glLines.push({ mappingRole: "CASH_TREASURY", debit: 0, credit: labor, description: `أجور صياغة مدفوعة نقداً` });
@@ -3232,6 +3368,37 @@ router.get("/stock-audits", authMiddleware, requireBusinessPermission("inventory
 
 // 2. Create stock audit session
 router.post("/stock-audits", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  // Compatibility adapter: durable lifecycle belongs only to the canonical
+  // Inventory V2 audit service. The historical implementation below is
+  // intentionally unreachable and retained temporarily for source review.
+  const adapterTransaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"] || req.body?.branchId, { required: true });
+    const existing = await models.StockAudit.findOne({ where: { companyId: req.companyId, branchId, status: "in-progress" }, transaction: adapterTransaction, lock: true });
+    if (existing) {
+      await adapterTransaction.commit();
+      return res.status(200).json({ success: true, ...existing.toJSON(), data: existing.toJSON() });
+    }
+    const auditNumber = String(req.body?.auditNumber || `LEGACY-AUD-${Date.now()}`);
+    const actor = { id: req.user?.id || null, name: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System" };
+    const created = await inventoryAuditCanonicalService.createAudit({
+      models, companyId: req.companyId, branchId, auditNumber,
+      auditMethod: req.body?.auditMethod || "RFID_SCAN", notes: req.body?.notes || null,
+      actor, transaction: adapterTransaction,
+      recordAudit: (audit, auditMethod) => auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
+        action: "inventory_v2.audit_created", description: `Inventory audit ${audit.auditNumber} created.`, sourceDocument: audit.id, metadata: { auditMethod, branchId },
+      }), { transaction: adapterTransaction }),
+    });
+    const started = await inventoryAuditCanonicalService.startAudit({ models, companyId: req.companyId, branchId, auditId: created.audit.id, transaction: adapterTransaction });
+    await adapterTransaction.commit();
+    const result = started.audit.toJSON();
+    result.itemsCount = started.expectedCount;
+    return res.status(201).json({ success: true, ...result, data: result });
+  } catch (error) {
+    await adapterTransaction.rollback();
+    return next(error);
+  }
+
   const t = await models.sequelize.transaction();
   try {
     const branchId = req.headers["x-branch-id"] || req.body.branchId;
@@ -3330,6 +3497,31 @@ router.get("/stock-audits/:id", authMiddleware, requireBusinessPermission("inven
 
 // 4. Store scanned items in the session (update statuses)
 router.post("/stock-audits/:id/items", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  // Compatibility adapter. Observation is persisted only by the canonical
+  // audit service; this route keeps the legacy request and response envelope.
+  const adapterTransaction = await models.sequelize.transaction();
+  try {
+    const audit = await models.StockAudit.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: adapterTransaction, lock: true });
+    if (!audit) throw new NotFoundError("جلسة الجرد غير موجودة");
+    await inventoryAuditCanonicalService.observeAudit({
+      models, companyId: req.companyId, branchId: audit.branchId, auditId: audit.id,
+      assetIds: Array.isArray(req.body?.scannedAssetIds) ? req.body.scannedAssetIds : [],
+      barcodes: Array.isArray(req.body?.barcodes) ? req.body.barcodes : [],
+      rfidNumbers: Array.isArray(req.body?.rfidNumbers) ? req.body.rfidNumbers : [],
+      method: req.body?.method || audit.auditMethod,
+      transaction: adapterTransaction,
+    });
+    const updated = await models.StockAudit.findOne({
+      where: { id: audit.id }, transaction: adapterTransaction,
+      include: [{ model: models.StockAuditItem, as: "items", include: [{ model: models.Asset, as: "asset" }] }],
+    });
+    await adapterTransaction.commit();
+    return res.status(200).json({ success: true, ...updated.toJSON(), data: updated.toJSON() });
+  } catch (error) {
+    await adapterTransaction.rollback();
+    return next(error);
+  }
+
   const t = await models.sequelize.transaction();
   try {
     const { scannedAssetIds = [] } = req.body || {};
@@ -3414,6 +3606,25 @@ router.post("/stock-audits/:id/items", authMiddleware, requireBusinessPermission
 
 // 5. Complete stock audit session (apply inventory adjustments)
 router.post("/stock-audits/:id/complete", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  // Compatibility adapter. Complete and close are one atomic legacy operation
+  // so a legacy caller never observes a partially terminal canonical audit.
+  const adapterTransaction = await models.sequelize.transaction();
+  try {
+    const audit = await models.StockAudit.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: adapterTransaction, lock: true });
+    if (!audit) throw new NotFoundError("جلسة الجرد غير موجودة");
+    const actor = { id: req.user?.id || null, name: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System" };
+    const completed = await inventoryAuditCanonicalService.completeAudit({ models, companyId: req.companyId, branchId: audit.branchId, auditId: audit.id, transaction: adapterTransaction });
+    const closed = await inventoryAuditCanonicalService.closeAudit({ models, companyId: req.companyId, branchId: audit.branchId, auditId: audit.id, actor, transaction: adapterTransaction });
+    const items = await models.StockAuditItem.findAll({ where: { stockAuditId: audit.id }, transaction: adapterTransaction });
+    const missingCount = items.filter((item) => item.status === "missing").length;
+    const unexpectedCount = items.filter((item) => item.status === "unexpected").length;
+    await adapterTransaction.commit();
+    return res.status(200).json({ success: true, audit: closed.audit, missingCount, unexpectedCount, replayed: completed.replayed && closed.replayed });
+  } catch (error) {
+    await adapterTransaction.rollback();
+    return next(error);
+  }
+
   const t = await models.sequelize.transaction();
   try {
     const audit = await models.StockAudit.findOne({
@@ -3446,80 +3657,39 @@ router.post("/stock-audits/:id/complete", authMiddleware, requireBusinessPermiss
     let missingCount = 0;
     let unexpectedCount = 0;
 
-    // Apply adjustments
+    // An audit is observation only.  Corrections require the explicit
+    // request/approve/apply adjustment workflow; this compatibility endpoint
+    // must never archive an Asset or silently move it between branches.
     for (const item of audit.items) {
       const asset = item.asset;
       if (!asset) continue;
 
       if (item.status === "missing") {
         missingCount++;
-        // Archive missing asset
-        const beforeState = `status:${asset.status}`;
-        await asset.update({ status: "archived" }, { transaction: t });
-
-        // Create Asset Event
-        await models.AssetEvent.create({
-          id: `ASE-${Date.now()}-LOST-${asset.id}`,
-          assetId: asset.id,
-          action: "LOST_RFID_AUDIT",
-          date: nowStr.slice(0, 10),
-          user: actor,
-          branch: branchRecord.name,
-          note: `تم اعتبار الأصل مفقوداً وضائعاً بناءً على تقرير جرد RFID رقم ${audit.id}`,
-          sourceDocument: audit.id,
-          beforeState,
-          afterState: "status:archived",
-          severity: "critical"
-        }, { transaction: t });
-
-        // Record Audit Log
         await auditService.record(req.companyId, {
-          action: "adjustment",
-          description: `تم تحديث حالة الأصل المفقود في جرد RFID رقم ${audit.id} للأصل ${asset.id}`,
-          user: actor,
-          userId: req.user ? req.user.id : null,
-          place: branchRecord.name,
-          sourceDocument: "stock_audit",
-          severity: "critical",
-          before: beforeState,
-          after: "status:archived"
-        }, { transaction: t });
-
-      } else if (item.status === "unexpected") {
-        unexpectedCount++;
-        // Re-assign branch
-        const beforeState = `branch:${asset.branch || "unknown"} (branchId:${asset.branchId || "unknown"})`;
-        await asset.update({
-          branchId: audit.branchId,
-          branch: branchRecord.name
-        }, { transaction: t });
-
-        // Create Asset Event
-        await models.AssetEvent.create({
-          id: `ASE-${Date.now()}-LOC-${asset.id}`,
-          assetId: asset.id,
-          action: "LOCATION_RFID_AUDIT",
-          date: nowStr.slice(0, 10),
-          user: actor,
-          branch: branchRecord.name,
-          note: `تحديث موقع الفرع بعد فحص جرد RFID رقم ${audit.id}`,
-          sourceDocument: audit.id,
-          beforeState,
-          afterState: `branch:${branchRecord.name} (branchId:${audit.branchId})`,
-          severity: "warning"
-        }, { transaction: t });
-
-        // Record Audit Log
-        await auditService.record(req.companyId, {
-          action: "adjustment",
-          description: `تم تحديث فرع الأصل بعد فحص جرد RFID رقم ${audit.id} للأصل ${asset.id}`,
+          action: "inventory.audit_missing_observed",
+          description: `تم رصد الأصل المفقود في جرد RFID رقم ${audit.id} للأصل ${asset.id} دون تعديل حالته`,
           user: actor,
           userId: req.user ? req.user.id : null,
           place: branchRecord.name,
           sourceDocument: "stock_audit",
           severity: "warning",
-          before: beforeState,
-          after: `branch:${branchRecord.name}`
+          before: `status:${asset.status}`,
+          after: "observation:MISSING"
+        }, { transaction: t });
+
+      } else if (item.status === "unexpected") {
+        unexpectedCount++;
+        await auditService.record(req.companyId, {
+          action: "inventory.audit_extra_observed",
+          description: `تم رصد أصل إضافي في جرد RFID رقم ${audit.id} للأصل ${asset.id} دون نقل الفرع`,
+          user: actor,
+          userId: req.user ? req.user.id : null,
+          place: branchRecord.name,
+          sourceDocument: "stock_audit",
+          severity: "warning",
+          before: `branch:${asset.branch || "unknown"} (branchId:${asset.branchId || "unknown"})`,
+          after: "observation:EXTRA"
         }, { transaction: t });
       }
     }
@@ -3857,6 +4027,7 @@ router.get("/assets/:id/attachments", authMiddleware, requireBusinessPermission(
 // 2. Upload an attachment for an asset
 router.post("/assets/:id/attachments", authMiddleware, requireAnyBusinessPermission(["inventory.attachments.manage", "inventory.adjust"], { touch: true }), uploadMiddleware.single("file"), async (req, res, next) => {
   const t = await models.sequelize.transaction();
+  let transactionFinalized = false;
   try {
     if (!req.file) {
       throw new ValidationError("الملف مطلوب");
@@ -3868,6 +4039,33 @@ router.post("/assets/:id/attachments", authMiddleware, requireAnyBusinessPermiss
     });
     if (!asset) {
       throw new NotFoundError("الأصل غير موجود أو لا ينتمي لشركتك");
+    }
+
+    // The receipt screen uploads evidence after the Asset has been created.
+    // Preserve the legacy unkeyed endpoint, but make a supplied key a real
+    // durable replay boundary so retries cannot create a second attachment.
+    const idempotencyKey = String(req.headers["idempotency-key"] || "").trim();
+    let idempotencyRequest = null;
+    if (idempotencyKey) {
+      const fileFingerprint = require("crypto").createHash("sha256").update(fs.readFileSync(req.file.path)).digest("hex");
+      const scope = "asset.attachment.upload";
+      const requestHash = idempotencyService.hashRequest(scope, {
+        assetId: asset.id,
+        name: req.file.originalname,
+        type: req.file.mimetype,
+        size: req.file.size,
+        fileFingerprint,
+      });
+      const claim = await idempotencyService.claim({ models, companyId: req.companyId, scope, key: idempotencyKey, requestHash, transaction: t });
+      if (!claim.claimed) {
+        await t.rollback();
+        transactionFinalized = true;
+        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope, key: idempotencyKey, requestHash });
+        if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+        throw new ConflictError(prior.message || "Idempotency-Key body conflict.");
+      }
+      idempotencyRequest = claim.request;
     }
 
     // Save file to backend/uploads/attachments (respecting UPLOAD_DIR)
@@ -3912,7 +4110,11 @@ router.post("/assets/:id/attachments", authMiddleware, requireAnyBusinessPermiss
       after: JSON.stringify({ attachmentId, name: req.file.originalname })
     }, { transaction: t });
 
+    const serialized = serializeAssetAttachment(attachment);
+    const responseBody = { success: true, ...serialized, data: serialized };
+    if (idempotencyRequest) await idempotencyService.succeed({ request: idempotencyRequest, statusCode: 201, responseBody, transaction: t });
     await t.commit();
+    transactionFinalized = true;
     emitEntityChanged(req.companyId, {
       entity: "Attachment",
       action: "upload",
@@ -3922,10 +4124,9 @@ router.post("/assets/:id/attachments", authMiddleware, requireAnyBusinessPermiss
         assetIds: [asset.id]
       }
     });
-    const serialized = serializeAssetAttachment(attachment);
-    return res.status(201).json({ success: true, ...serialized, data: serialized });
+    return res.status(201).json(responseBody);
   } catch (error) {
-    await t.rollback();
+    if (!transactionFinalized) await t.rollback();
     if (req.file && fs.existsSync(req.file.path)) {
       try { fs.unlinkSync(req.file.path); } catch (_) { }
     }
@@ -4053,18 +4254,20 @@ router.post("/transfers", authMiddleware, requireBusinessPermission("inventory.a
       notes
     }, { transaction: t });
 
-    // Mark assets as reserved during the transfer request
+    // Every transfer surface uses the same pending-transfer state and the same
+    // normalized item evidence.  The legacy endpoint is only a payload adapter.
     for (const asset of assets) {
-      await asset.update({ status: "reserved" }, { transaction: t });
-      await models.AssetEvent.create({
-        id: `ASE-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        assetId: asset.id,
-        companyId: req.companyId,
-        type: "transfer_request",
-        description: `طلب تحويل إلى ${toBranchRecord.name} بموجب مستند رقم ${transferId}`,
-        date: new Date().toISOString().slice(0, 10),
-        user: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System"
-      }, { transaction: t });
+        await models.sequelize.query(`INSERT INTO transfer_items
+          (id,transfer_id,asset_id,company_id,from_branch_id,to_branch_id,status,created_at,updated_at)
+          VALUES (:id,:transferId,:assetId,:companyId,:fromBranchId,:toBranchId,'PENDING',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, {
+          replacements: { id: `TRI-${transferId}-${asset.id}`, transferId, assetId: asset.id, companyId: req.companyId, fromBranchId, toBranchId }, transaction: t,
+        });
+        await inventoryV2Runtime.transitionAsset({
+          models, transaction: t, asset,
+          context: { companyId: req.companyId, branchId: fromBranchId, branchName: fromBranchRecord.name, actorId: req.user?.id || null, actorName: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System", occurredAt: new Date() },
+          toStatus: "PENDING_TRANSFER", eventType: "TRANSFER_REQUEST", movementType: "TRANSFER_REQUEST", sourceType: "TRANSFER", sourceId: transferId,
+          note: `Transfer requested to ${toBranchRecord.name}`, idempotencyKey: `transfer-request:${transferId}:${asset.id}`,
+        });
     }
 
     await t.commit();
@@ -4126,15 +4329,13 @@ router.patch("/transfers/:id", authMiddleware, requireBusinessPermission("invent
       }, { transaction: t });
 
       for (const asset of assets) {
-        await models.AssetEvent.create({
-          id: `ASE-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          assetId: asset.id,
-          companyId: req.companyId,
-          type: "transfer_approved",
-          description: `تمت الموافقة على التحويل إلى ${transfer.toBranch} (شحنة قيد النقل)`,
-          date: nowStr.slice(0, 10),
-          user: actor
-        }, { transaction: t });
+          const event = await inventoryV2Runtime.recordAssetEvent({
+            models, transaction: t, asset: asset.toJSON(), context: { companyId: req.companyId, branchId: transfer.fromBranchId, branchName: transfer.fromBranch, actorId: req.user?.id || null, actorName: actor, occurredAt: new Date() },
+            eventType: "TRANSFER_OUT", oldStatus: "PENDING_TRANSFER", newStatus: "PENDING_TRANSFER", sourceType: "TRANSFER", sourceId: transfer.id,
+            note: `Transfer dispatched to ${transfer.toBranch}`, idempotencyKey: `transfer-out:${transfer.id}:${asset.id}`,
+          });
+          await inventoryV2Runtime.recordMovement({ models, transaction: t, asset: asset.toJSON(), context: { companyId: req.companyId, actorId: req.user?.id || null, occurredAt: new Date() }, movementType: "TRANSFER_OUT", sourceType: "TRANSFER", sourceId: transfer.id, eventId: event.id, fromBranchId: transfer.fromBranchId, toBranchId: transfer.toBranchId });
+          await models.sequelize.query("UPDATE transfer_items SET status='IN_TRANSIT',dispatched_at=:now,dispatched_by=:actor,updated_at=CURRENT_TIMESTAMP WHERE transfer_id=:transferId AND asset_id=:assetId", { replacements: { now: new Date(), actor, transferId: transfer.id, assetId: asset.id }, transaction: t });
       }
     } else if (status === "received") {
       if (transfer.status !== "in-transit" && transfer.status !== "approved" && transfer.status !== "pending") {
@@ -4147,21 +4348,14 @@ router.patch("/transfers/:id", authMiddleware, requireBusinessPermission("invent
       }, { transaction: t });
 
       for (const asset of assets) {
-        await asset.update({
-          branchId: transfer.toBranchId,
-          branch: transfer.toBranch,
-          status: "available"
-        }, { transaction: t });
-
-        await models.AssetEvent.create({
-          id: `ASE-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          assetId: asset.id,
-          companyId: req.companyId,
-          type: "transfer_received",
-          description: `تم استلام الأصل في فرع ${transfer.toBranch}`,
-          date: nowStr.slice(0, 10),
-          user: actor
-        }, { transaction: t });
+          await inventoryV2Runtime.transitionAsset({
+            models, transaction: t, asset,
+            context: { companyId: req.companyId, branchId: transfer.toBranchId, branchName: transfer.toBranch, actorId: req.user?.id || null, actorName: actor, occurredAt: new Date() },
+            toStatus: "AVAILABLE", eventType: "TRANSFER_IN", movementType: "TRANSFER_IN", sourceType: "TRANSFER", sourceId: transfer.id,
+            note: `Transfer received in ${transfer.toBranch}`, idempotencyKey: `transfer-in:${transfer.id}:${asset.id}`, toBranchId: transfer.toBranchId,
+          });
+          await asset.update({ branch: transfer.toBranch }, { transaction: t });
+          await models.sequelize.query("UPDATE transfer_items SET status='RECEIVED',received_at=:now,received_by=:actor,updated_at=CURRENT_TIMESTAMP WHERE transfer_id=:transferId AND asset_id=:assetId", { replacements: { now: new Date(), actor, transferId: transfer.id, assetId: asset.id }, transaction: t });
       }
     } else if (status === "cancelled") {
       if (transfer.status === "received" || transfer.status === "cancelled") {
@@ -4173,17 +4367,13 @@ router.patch("/transfers/:id", authMiddleware, requireBusinessPermission("invent
       }, { transaction: t });
 
       for (const asset of assets) {
-        await asset.update({ status: "available" }, { transaction: t });
-
-        await models.AssetEvent.create({
-          id: `ASE-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          assetId: asset.id,
-          companyId: req.companyId,
-          type: "transfer_cancelled",
-          description: `تم إلغاء التحويل: ${cancelReason || "إلغاء"}`,
-          date: nowStr.slice(0, 10),
-          user: actor
-        }, { transaction: t });
+          await inventoryV2Runtime.transitionAsset({
+            models, transaction: t, asset,
+            context: { companyId: req.companyId, branchId: transfer.fromBranchId, branchName: transfer.fromBranch, actorId: req.user?.id || null, actorName: actor, occurredAt: new Date() },
+            toStatus: "AVAILABLE", eventType: "TRANSFER_CANCELLED", movementType: "TRANSFER_CANCEL", sourceType: "TRANSFER", sourceId: transfer.id,
+            note: `Transfer cancelled: ${cancelReason || "cancelled"}`, idempotencyKey: `transfer-cancel:${transfer.id}:${asset.id}`,
+          });
+          await models.sequelize.query("UPDATE transfer_items SET status='CANCELLED',updated_at=CURRENT_TIMESTAMP WHERE transfer_id=:transferId AND asset_id=:assetId", { replacements: { transferId: transfer.id, assetId: asset.id }, transaction: t });
       }
     } else {
       await transfer.update(req.body, { transaction: t });
@@ -4773,6 +4963,1049 @@ router.post("/employees/:id/reactivate", authMiddleware, requireAnyPermission(em
 setupCrud("customers", models.Customer, ["name", "phone", "email"]);
 setupCrud("suppliers", models.Supplier, ["name", "phone", "email", "category"]);
 setupCrud("employees", models.Employee, ["name", "phone", "email", "role"]);
+
+// Inventory Master V2 read and evidence endpoints. These deliberately use the
+// normalized V2 tables; the legacy generic assets CRUD remains compatibility
+// only and is not a quantity-stock authority for these routes.
+function inventoryV2Context(req, branchId) {
+  return {
+    companyId: req.companyId,
+    branchId,
+    branchName: req.branchName || null,
+    actorId: req.user?.id || null,
+    actorName: req.user ? `${req.user.firstName || ""} ${req.user.lastName || ""}`.trim() || req.user.email || "System" : "System",
+    occurredAt: new Date(),
+  };
+}
+
+function requireInventoryV2IdempotencyKey(req) {
+  const key = String(req.headers["idempotency-key"] || "").trim();
+  if (!key) throw new ValidationError("Idempotency-Key is required for Inventory V2 mutations.");
+  return key;
+}
+
+async function findScopedInventoryV2Asset(req, assetId, branchId, transaction, { lock = false } = {}) {
+  const asset = await models.Asset.findOne({
+    where: { id: assetId, companyId: req.companyId, branchId },
+    transaction,
+    ...(lock ? { lock: true } : {}),
+  });
+  if (!asset || !asset.inventoryProfile || !asset.operationalStatus) throw new NotFoundError("Inventory V2 Asset not found in the authorized Branch.");
+  return asset;
+}
+
+router.get("/inventory-v2/assets", authMiddleware, requireBusinessPermission("inventory.view"), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.headers["x-branch-id"], { required: true });
+    const filters = ["a.company_id=:companyId", "a.branch_id=:branchId"];
+    const replacements = { companyId: req.companyId, branchId, limit: Math.min(Math.max(Number(req.query.limit) || 50, 1), 200), offset: Math.max(Number(req.query.offset) || 0, 0) };
+    for (const [queryKey, column] of [["profile", "a.inventory_profile"], ["status", "a.operational_status"], ["condition", "a.condition"], ["tagState", "a.tag_state"], ["locationId", "a.location_id"], ["supplierId", "a.supplier_id"]]) {
+      if (req.query[queryKey]) { filters.push(`${column}=:${queryKey}`); replacements[queryKey] = String(req.query[queryKey]); }
+    }
+    if (req.query.search) {
+      // Canonical All Items search queries only serialized Assets and their
+      // normalized identity relations; Products never provide stock results.
+      filters.push(`(a.id ILIKE :search OR a.name ILIKE :search OR a.description ILIKE :search
+        OR a.barcode ILIKE :search OR a.rfid ILIKE :search OR a.brand ILIKE :search
+        OR a.model ILIKE :search OR a.model_number ILIKE :search
+        OR EXISTS (SELECT 1 FROM suppliers supplier_search WHERE supplier_search.id=a.supplier_id AND supplier_search.name ILIKE :search)
+        OR EXISTS (SELECT 1 FROM asset_certificates certificate_search WHERE certificate_search.asset_id=a.id AND (certificate_search.certificate_number ILIKE :search OR certificate_search.issuer ILIKE :search)))`);
+      replacements.search = `%${String(req.query.search).trim()}%`;
+    }
+    const sortMap = { createdAt: "a.created_at", barcode: "a.barcode", profile: "a.inventory_profile", status: "a.operational_status", purchaseDate: "a.purchase_date" };
+    const sort = sortMap[req.query.sort] || sortMap.createdAt;
+    const direction = String(req.query.direction || "DESC").toUpperCase() === "ASC" ? "ASC" : "DESC";
+    const where = filters.join(" AND ");
+    const [items, [total]] = await Promise.all([
+      models.sequelize.query(`SELECT a.id,a.name,a.description,a.brand,a.model,a.model_number AS \"modelNumber\",a.barcode,a.inventory_profile AS \"inventoryProfile\",a.operational_status AS \"operationalStatus\",a.condition,a.tag_state AS \"tagState\",a.branch_id AS \"branchId\",b.name AS \"branchName\",a.location_id AS \"locationId\",a.location,a.supplier_id AS \"supplierId\",supplier.name AS \"supplierName\",a.purchase_date AS \"purchaseDate\",a.gross_weight AS \"grossWeight\",a.net_weight AS \"netWeight\",a.karat,a.created_at AS \"createdAt\",r.rfid_number AS \"rfid\" FROM assets a LEFT JOIN asset_rfid_assignments r ON r.asset_id=a.id AND r.is_current=true LEFT JOIN suppliers supplier ON supplier.id=a.supplier_id LEFT JOIN branches b ON b.id=a.branch_id WHERE ${where} ORDER BY ${sort} ${direction},a.id ASC LIMIT :limit OFFSET :offset`, { replacements, type: require("sequelize").QueryTypes.SELECT }),
+      models.sequelize.query(`SELECT COUNT(*)::int AS total FROM assets a WHERE ${where}`, { replacements, type: require("sequelize").QueryTypes.SELECT }),
+    ]);
+    return res.status(200).json({ success: true, data: { items, total: total.total, pieceTotal: total.total, limit: replacements.limit, offset: replacements.offset } });
+  } catch (error) { return next(error); }
+});
+
+// The profile registry is the single server-side authority.  The intake UI
+// consumes this read-only contract for presentation and lets the receipt path
+// remain the authoritative validator.
+router.get("/inventory-v2/profiles", authMiddleware, requireBusinessPermission("inventory.view"), async (req, res, next) => {
+  try {
+    const profiles = Object.entries(inventoryMasterPolicy.PROFILE_REGISTRY).map(([key, contract]) => ({
+      key,
+      aliases: contract.aliases,
+      assetType: contract.assetType,
+      family: contract.family,
+      required: contract.required,
+      optional: contract.optional,
+      condition: contract.condition,
+      weightApplicable: contract.weightApplicable,
+      certificateSupported: contract.certificateSupported,
+      componentsSupported: contract.componentsSupported,
+      rfidAllowed: contract.rfidAllowed,
+      locationOptional: contract.locationOptional,
+      looseDetails: contract.looseDetails || null,
+      masterDataCategories: profileMasterDataService.categoriesForProfile(key),
+      goldValuation: contract.goldValuation || { enabled: false },
+    }));
+    return res.status(200).json({ success: true, data: { profiles } });
+  } catch (error) { return next(error); }
+});
+
+// Pearl Size is canonical company Master Data.  Receive operators only read
+// active values; administration reuses the established settings/inventory
+// maintenance permissions and never creates values inline from Receive.
+const pearlSizeMasterReadGuard = requireAnyBusinessPermission(["settings.view", "inventory.view"]);
+const pearlSizeMasterWriteGuard = requireAnyBusinessPermission(["settings.update", "inventory.adjust"], { touch: true });
+
+async function auditPearlSizeMasterData(req, action, row, before, transaction) {
+  await auditService.record(req.companyId, {
+    action,
+    description: `Pearl Size Master Data ${row.displayValue} mm ${before ? "updated" : "created"}`,
+    user: actorName(req), userId: req.user?.id, place: req.branchId || "System Settings",
+    sourceDocument: row.id, severity: "info", before: before ? JSON.stringify(before) : null,
+    after: JSON.stringify(pearlSizeMasterDataService.serialize(row)),
+  }, { transaction });
+}
+
+router.get("/pearl-size-master-data", authMiddleware, pearlSizeMasterReadGuard, async (req, res, next) => {
+  try {
+    const values = await pearlSizeMasterDataService.list({ models, companyId: req.companyId, activeOnly: req.query.includeInactive !== "true" });
+    return res.status(200).json({ success: true, data: { unit: "MM", values } });
+  } catch (error) { return next(error); }
+});
+
+router.post("/pearl-size-master-data", authMiddleware, pearlSizeMasterWriteGuard, async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const result = await pearlSizeMasterDataService.create({ models, companyId: req.companyId, value: req.body?.value, actorId: req.user?.id || null, transaction });
+    if (result.created) await auditPearlSizeMasterData(req, "pearl_size_master_data.create", result.row, null, transaction);
+    await transaction.commit();
+    if (result.created) emitEntityChanged(req.companyId, { entity: "PearlSizeMasterData", action: "create", id: result.row.id });
+    return res.status(result.created ? 201 : 200).json({ success: true, data: pearlSizeMasterDataService.serialize(result.row), replayed: !result.created });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.patch("/pearl-size-master-data/:id", authMiddleware, pearlSizeMasterWriteGuard, async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const row = await models.PearlSizeMasterData.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction, lock: transaction.LOCK.UPDATE });
+    if (!row) throw new NotFoundError("Pearl Size Master Data value not found.");
+    const before = pearlSizeMasterDataService.serialize(row);
+    if (req.body?.isActive !== undefined) await row.update({ isActive: Boolean(req.body.isActive), updatedBy: req.user?.id || null }, { transaction });
+    await auditPearlSizeMasterData(req, "pearl_size_master_data.update", row, before, transaction);
+    await transaction.commit();
+    emitEntityChanged(req.companyId, { entity: "PearlSizeMasterData", action: "update", id: row.id });
+    return res.status(200).json({ success: true, data: pearlSizeMasterDataService.serialize(row) });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+// Typed source-backed lists for Loose Pearl and Loose Gemstone. Pearl Size is
+// intentionally excluded: its numeric MM table above remains its sole owner.
+router.get("/profile-master-data", authMiddleware, pearlSizeMasterReadGuard, async (req, res, next) => {
+  try {
+    const categories = String(req.query.categories || "").split(",").map((entry) => entry.trim()).filter(Boolean);
+    const values = await profileMasterDataService.list({ models, companyId: req.companyId, categories, activeOnly: req.query.includeInactive !== "true" });
+    return res.status(200).json({ success: true, data: { values } });
+  } catch (error) { return next(error); }
+});
+
+router.post("/profile-master-data", authMiddleware, pearlSizeMasterWriteGuard, async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const result = await profileMasterDataService.create({ models, companyId: req.companyId, category: req.body?.category, value: req.body?.value, actorId: req.user?.id || null, transaction });
+    if (result.created) await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "profile_master_data.create", description: `Profile Master Data ${result.row.category} ${result.row.label} created`, sourceDocument: result.row.id, after: JSON.stringify(result.row) }), { transaction });
+    await transaction.commit();
+    if (result.created) emitEntityChanged(req.companyId, { entity: "ProfileMasterData", action: "create", id: result.row.id });
+    return res.status(result.created ? 201 : 200).json({ success: true, data: result.row, replayed: !result.created });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.patch("/profile-master-data/:id", authMiddleware, pearlSizeMasterWriteGuard, async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const result = await profileMasterDataService.update({ models, companyId: req.companyId, id: req.params.id, value: req.body?.value, isActive: req.body?.isActive, actorId: req.user?.id || null, transaction });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "profile_master_data.update", description: `Profile Master Data ${result.row.category} updated`, sourceDocument: result.row.id, before: JSON.stringify(result.before), after: JSON.stringify(result.row) }), { transaction });
+    await transaction.commit();
+    emitEntityChanged(req.companyId, { entity: "ProfileMasterData", action: "update", id: result.row.id });
+    return res.status(200).json({ success: true, data: result.row });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.get("/inventory-v2/assets/:id", authMiddleware, requireBusinessPermission("inventory.view"), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const asset = await findScopedInventoryV2Asset(req, req.params.id, branchId);
+    const replacements = { assetId: asset.id, companyId: req.companyId };
+    const [origin, cost, valuation, goldDetails, pricing, components, rfid, certificates, attachments, history, movements, links, profileMasterReferences, saleLinks, returnReviews] = await Promise.all([
+      models.sequelize.query("SELECT * FROM asset_origins WHERE asset_id=:assetId", { replacements, type: require("sequelize").QueryTypes.SELECT }),
+      models.sequelize.query("SELECT * FROM asset_purchase_cost_revisions WHERE asset_id=:assetId AND is_current=true", { replacements, type: require("sequelize").QueryTypes.SELECT }),
+      models.sequelize.query("SELECT * FROM asset_current_valuations WHERE asset_id=:assetId", { replacements, type: require("sequelize").QueryTypes.SELECT }),
+      models.sequelize.query("SELECT * FROM asset_gold_details WHERE asset_id=:assetId", { replacements, type: require("sequelize").QueryTypes.SELECT }),
+      models.sequelize.query("SELECT * FROM asset_pricing_policies WHERE asset_id=:assetId", { replacements, type: require("sequelize").QueryTypes.SELECT }),
+      inventoryV2Runtime.fetchAssetComponents({ models, assetId: asset.id }),
+      models.sequelize.query("SELECT * FROM asset_rfid_assignments WHERE asset_id=:assetId ORDER BY assigned_at DESC", { replacements, type: require("sequelize").QueryTypes.SELECT }),
+      models.sequelize.query("SELECT id,type,issuer,certificate_number AS \"certificateNumber\",issue_date AS \"issueDate\",url FROM asset_certificates WHERE asset_id=:assetId ORDER BY created_at ASC", { replacements, type: require("sequelize").QueryTypes.SELECT }),
+      models.sequelize.query("SELECT id,name,type,url,uploaded_at AS \"uploadedAt\",uploaded_by AS \"uploadedBy\" FROM asset_attachments WHERE asset_id=:assetId ORDER BY created_at ASC", { replacements, type: require("sequelize").QueryTypes.SELECT }),
+      models.sequelize.query("SELECT * FROM asset_events WHERE asset_id=:assetId ORDER BY occurred_at DESC NULLS LAST,created_at DESC", { replacements, type: require("sequelize").QueryTypes.SELECT }),
+      models.sequelize.query("SELECT * FROM inventory_asset_movements WHERE asset_id=:assetId ORDER BY occurred_at DESC", { replacements, type: require("sequelize").QueryTypes.SELECT }),
+      models.sequelize.query("SELECT 'PURCHASE_ORDER' AS type,purchase_order_item_id::text AS id FROM purchase_order_item_asset_links WHERE asset_id=:assetId UNION ALL SELECT 'INVOICE',invoice_item_id::text FROM invoice_item_asset_links WHERE asset_id=:assetId", { replacements, type: require("sequelize").QueryTypes.SELECT }),
+      models.sequelize.query("SELECT r.category_key AS \"category\",r.master_data_id AS \"masterDataId\",r.value_snapshot AS \"value\",r.label_snapshot AS \"label\",m.is_active AS \"isActive\" FROM asset_profile_master_data_references r JOIN profile_master_data m ON m.id=r.master_data_id WHERE r.asset_id=:assetId ORDER BY r.category_key", { replacements, type: require("sequelize").QueryTypes.SELECT }),
+      models.sequelize.query("SELECT invoice_item_id, quote_snapshot FROM invoice_item_asset_links WHERE asset_id=:assetId", { replacements, type: require("sequelize").QueryTypes.SELECT }),
+      models.sequelize.query("SELECT id,return_invoice_id AS \"returnInvoiceId\",condition_outcome AS \"conditionOutcome\",note,reviewed_by AS \"reviewedBy\",reviewed_at AS \"reviewedAt\",approved_by AS \"approvedBy\",approved_at AS \"approvedAt\" FROM asset_return_reviews WHERE asset_id=:assetId ORDER BY reviewed_at DESC", { replacements, type: require("sequelize").QueryTypes.SELECT }),
+    ]);
+    const rawQuote = saleLinks[0]?.quote_snapshot;
+    const salePricing = rawQuote ? (typeof rawQuote === "string" ? JSON.parse(rawQuote) : rawQuote) : null;
+    const looseProfiles = new Set(["LOOSE_DIAMOND", "LOOSE_GEMSTONE", "LOOSE_PEARL"]);
+    const looseDetailComponent = looseProfiles.has(asset.inventoryProfile) ? components.find((component) => component.role === "PRIMARY_SUBJECT") || null : null;
+    const looseDetails = looseDetailComponent ? {
+      ...looseDetailComponent,
+      ...(looseDetailComponent.diamondDetails || looseDetailComponent.gemstoneDetails || looseDetailComponent.pearlDetails || {}),
+      carat: looseDetailComponent.component_carat || null,
+      totalPearlWeight: looseDetailComponent.component_weight || null,
+      unit: looseDetailComponent.measurement_unit || null,
+    } : null;
+    const looseMeasurement = inventoryMasterPolicy.describeLooseMeasurement(asset.inventoryProfile, looseDetails);
+    // The immutable event stream is the lifecycle authority.  Movement rows
+    // are deliberately exposed beside it for the physical trail; they are not
+    // client-created history and retain any event link the runtime recorded.
+    const timeline = [
+      ...history.map((event) => ({ kind: "EVENT", occurredAt: event.occurred_at || event.occurredAt || event.created_at || event.createdAt, id: event.id, eventType: event.event_type || event.eventType || event.action, note: event.notes || event.note, oldStatus: event.before_state || event.beforeState, newStatus: event.after_state || event.afterState, sourceType: event.source_type || event.sourceType, sourceId: event.source_id || event.sourceId, actor: event.employee_name || event.employeeName || event.user, branch: event.branch })),
+      ...movements.map((movement) => ({ kind: "MOVEMENT", occurredAt: movement.occurred_at || movement.occurredAt, id: movement.id, eventId: movement.asset_event_id || movement.assetEventId || null, eventType: movement.movement_type || movement.movementType, sourceType: movement.source_type || movement.sourceType, sourceId: movement.source_id || movement.sourceId, fromBranchId: movement.from_branch_id || movement.fromBranchId || null, toBranchId: movement.to_branch_id || movement.toBranchId || null, fromLocationId: movement.from_location_id || movement.fromLocationId || null, toLocationId: movement.to_location_id || movement.toLocationId || null })),
+    ].sort((left, right) => new Date(right.occurredAt || 0).getTime() - new Date(left.occurredAt || 0).getTime());
+    return res.status(200).json({ success: true, data: { asset: asset.toJSON(), origin: origin[0] || null, currentPurchaseCost: cost[0] || null, currentValuation: valuation[0] || null, goldDetails: goldDetails[0] || null, pricingPolicy: pricing[0] || null, components: looseDetailComponent ? components.filter((component) => component.id !== looseDetailComponent.id) : components, looseDetails: looseDetails ? { ...looseDetails, measurement: looseMeasurement, masterDataReferences: profileMasterReferences } : null, rfidAssignments: rfid, certificates, attachments, history, movements, timeline, documentLinks: links, salePricing, returnReviews, legalActions: Array.from(inventoryV2Runtime.TRANSITIONS[asset.operationalStatus] || []) } });
+  } catch (error) { return next(error); }
+});
+
+const RETURN_REVIEW_OUTCOMES = new Set(["GOOD", "NEEDS_INSPECTION", "DAMAGED", "BROKEN", "NEEDS_REPAIR"]);
+async function claimReturnedRestockIdempotency(req, transaction, scope, body) {
+  const key = req.headers["idempotency-key"] || body.idempotencyKey;
+  if (!key) throw new ValidationError("مفتاح منع التكرار (Idempotency-Key) مطلوب لمراجعة القطعة المرتجعة");
+  const requestHash = idempotencyService.hashRequest(scope, idempotencyBodyWithActor(req, body, commandActorContext.fromRequest(req)));
+  const claim = await idempotencyService.claim({ models, companyId: req.companyId, scope, key, requestHash, transaction });
+  if (!claim.claimed) {
+    await transaction.rollback();
+    const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope, key, requestHash });
+    const error = new AppError(prior.message || "طلب مراجعة سابق", prior.statusCode || 409, prior.state === "replay" ? "IDEMPOTENCY_REPLAY" : "IDEMPOTENCY_CONFLICT");
+    error.idempotencyReplay = prior;
+    throw error;
+  }
+  return { key, request: claim.request };
+}
+
+async function completedReturnForAsset({ assetId, companyId, transaction }) {
+  const rows = await models.sequelize.query(`SELECT i.id FROM invoices i JOIN invoice_items ii ON ii.invoice_id=i.id
+    WHERE i.company_id=:companyId AND ii.asset_id=:assetId AND i.type='return' AND i.status='returned' AND i.posting_status='posted'
+    ORDER BY i.posted_at DESC NULLS LAST LIMIT 1 FOR UPDATE`, { replacements: { assetId, companyId }, transaction, type: require("sequelize").QueryTypes.SELECT });
+  if (!rows.length) throw new ValidationError("لا توجد عملية مرتجع مالية مكتملة لهذا الأصل");
+  return rows[0].id;
+}
+
+router.post("/inventory-v2/assets/:id/return-review", authMiddleware, requireBusinessPermission("inventory.returns.approve_restock", { touch: true, operation: "inventory.returns.approve_restock" }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const body = req.body || {};
+    const claimed = await claimReturnedRestockIdempotency(req, transaction, "inventory.returned.review", body);
+    const branch = await resolveAuthorizedBranch(req, body.branchId || req.headers["x-branch-id"] || req.branchId, { required: true });
+    const asset = await models.Asset.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction, lock: transaction.LOCK.UPDATE });
+    if (!asset || asset.branchId !== branch.id) throw new NotFoundError("Returned Asset not found in the authorized Branch.");
+    if (inventoryV2Runtime.operationalStatusOf(asset) !== "RETURNED") throw new ValidationError("لا يمكن مراجعة إعادة الإدخال إلا لأصل حالته مرتجع");
+    const conditionOutcome = String(body.conditionOutcome || "").trim().toUpperCase();
+    if (!RETURN_REVIEW_OUTCOMES.has(conditionOutcome)) throw new ValidationError("نتيجة مراجعة المرتجع غير معتمدة");
+    const returnInvoiceId = await completedReturnForAsset({ assetId: asset.id, companyId: req.companyId, transaction });
+    const existing = await models.AssetReturnReview.findOne({ where: { assetId: asset.id, returnInvoiceId }, transaction, lock: transaction.LOCK.UPDATE });
+    if (existing) throw new ConflictError("تم تسجيل مراجعة هذا المرتجع مسبقاً");
+    const now = new Date();
+    const review = await models.AssetReturnReview.create({ id: inventoryV2Runtime.newId("IMRETREV"), assetId: asset.id, returnInvoiceId, companyId: req.companyId, branchId: branch.id, conditionOutcome, note: body.note ? String(body.note).trim() : null, reviewedBy: req.user.id, reviewedAt: now }, { transaction });
+    const context = { ...inventoryV2Context(req, branch.id), branchName: branch.name, occurredAt: now };
+    await inventoryV2Runtime.recordAssetEvent({ models, transaction, asset: asset.toJSON(), context, eventType: "RETURN_REVIEW_RECORDED", oldStatus: "RETURNED", newStatus: "RETURNED", sourceType: "RETURN_INVOICE", sourceId: returnInvoiceId, note: `Return review: ${conditionOutcome}${review.note ? ` — ${review.note}` : ""}`, idempotencyKey: claimed.key });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory.returned.review", description: `Returned Asset ${asset.id} reviewed as ${conditionOutcome}`, sourceDocument: returnInvoiceId, after: JSON.stringify({ reviewId: review.id, conditionOutcome }) }, { requiredPermission: "inventory.returns.approve_restock", requestedOperation: "inventory.returns.approve_restock", authorizationResult: "allowed" }), { transaction });
+    const responseBody = { success: true, data: { reviewId: review.id, assetId: asset.id, returnInvoiceId, conditionOutcome, restockEligible: conditionOutcome === "GOOD" } };
+    await idempotencyService.succeed({ request: claimed.request, statusCode: 201, responseBody, transaction });
+    await transaction.commit();
+    return res.status(201).json(responseBody);
+  } catch (error) {
+    if (error.idempotencyReplay) return res.status(error.idempotencyReplay.statusCode || 200).json(error.idempotencyReplay.responseBody);
+    if (!transaction.finished) await transaction.rollback();
+    return next(error);
+  }
+});
+
+router.post("/inventory-v2/assets/:id/return-review/approve-restock", authMiddleware, requireBusinessPermission("inventory.returns.approve_restock", { touch: true, operation: "inventory.returns.approve_restock" }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const body = req.body || {};
+    const claimed = await claimReturnedRestockIdempotency(req, transaction, "inventory.returned.approve_restock", body);
+    const branch = await resolveAuthorizedBranch(req, body.branchId || req.headers["x-branch-id"] || req.branchId, { required: true });
+    const asset = await models.Asset.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction, lock: transaction.LOCK.UPDATE });
+    if (!asset || asset.branchId !== branch.id) throw new NotFoundError("Returned Asset not found in the authorized Branch.");
+    if (inventoryV2Runtime.operationalStatusOf(asset) !== "RETURNED") throw new ValidationError("لا يمكن اعتماد إعادة الإدخال إلا لأصل حالته مرتجع");
+    const returnInvoiceId = await completedReturnForAsset({ assetId: asset.id, companyId: req.companyId, transaction });
+    const review = await models.AssetReturnReview.findOne({ where: { assetId: asset.id, returnInvoiceId, companyId: req.companyId }, transaction, lock: transaction.LOCK.UPDATE });
+    if (!review) throw new ValidationError("يجب تسجيل مراجعة القطعة المرتجعة قبل اعتمادها");
+    if (review.conditionOutcome !== "GOOD") throw new ValidationError("إعادة القطعة إلى المتاح تتطلب حالة Good");
+    if (review.approvedAt) throw new ConflictError("تم اعتماد إعادة هذه القطعة للمخزون مسبقاً");
+    const now = new Date();
+    await review.update({ approvedBy: req.user.id, approvedAt: now }, { transaction });
+    const context = { ...inventoryV2Context(req, branch.id), branchName: branch.name, occurredAt: now };
+    await inventoryV2Runtime.transitionAsset({ models, transaction, asset, context, toStatus: "AVAILABLE", eventType: "RETURNED_RESTOCK_APPROVED", movementType: "RETURNED_RESTOCK", sourceType: "RETURN_INVOICE", sourceId: returnInvoiceId, note: review.note || "Returned Asset reviewed GOOD and approved for restock", idempotencyKey: claimed.key });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory.returned.approve_restock", description: `Returned Asset ${asset.id} approved back to available inventory`, sourceDocument: returnInvoiceId, before: "RETURNED", after: "AVAILABLE" }, { requiredPermission: "inventory.returns.approve_restock", requestedOperation: "inventory.returns.approve_restock", authorizationResult: "allowed" }), { transaction });
+    const responseBody = { success: true, data: { assetId: asset.id, returnInvoiceId, reviewId: review.id, operationalStatus: "AVAILABLE", financialSideEffectCount: 0 } };
+    await idempotencyService.succeed({ request: claimed.request, statusCode: 200, responseBody, transaction });
+    await transaction.commit();
+    return res.status(200).json(responseBody);
+  } catch (error) {
+    if (error.idempotencyReplay) return res.status(error.idempotencyReplay.statusCode || 200).json(error.idempotencyReplay.responseBody);
+    if (!transaction.finished) await transaction.rollback();
+    return next(error);
+  }
+});
+
+// Current valuation is a controlled, non-financial Asset fact.  It updates the
+// normalized valuation row only; purchase cost revisions remain immutable
+// historical receipt evidence.
+router.put("/inventory-v2/assets/:id/current-valuation", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const idempotencyKey = requireInventoryV2IdempotencyKey(req);
+    const scope = "inventory-v2.current-valuation";
+    const requestHash = idempotencyService.hashRequest(scope, req.body || {});
+    const claim = await idempotencyService.claim({ models, companyId: req.companyId, scope, key: idempotencyKey, requestHash, transaction });
+    if (!claim.claimed) {
+      try { await transaction.rollback(); } catch (_) { /* unique claim may already abort the transaction */ }
+      const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope, key: idempotencyKey, requestHash });
+      if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+      return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+    }
+    const asset = await findScopedInventoryV2Asset(req, req.params.id, branchId, transaction, { lock: true });
+    const expectedVersion = req.body?.expectedVersion;
+    if (expectedVersion !== undefined && (!Number.isInteger(Number(expectedVersion)) || Number(expectedVersion) < 0)) throw new ValidationError("Current valuation expectedVersion must be a non-negative integer.");
+    const configuredVatRate = await goldValuationService.resolveConfiguredVatRate({ models, companyId: req.companyId, transaction });
+    let valuation;
+    if (goldValuationService.isTargetProfile(asset.inventoryProfile)) {
+      const [goldRows] = await models.sequelize.query("SELECT * FROM asset_gold_details WHERE asset_id=:assetId FOR UPDATE", { replacements: { assetId: asset.id }, transaction });
+      const goldDetails = goldRows[0];
+      if (!goldDetails) throw new ValidationError("Gold weight evidence is required before current valuation.");
+      valuation = goldValuationService.calculateCurrentGoldValuation({ profile: asset.inventoryProfile, goldDetails, input: req.body?.goldValuation, configuredVatRate });
+    } else if (looseProfileFinanceService.isLooseProfile(asset.inventoryProfile)) {
+      valuation = looseProfileFinanceService.calculateCurrent({ profile: asset.inventoryProfile, input: req.body?.looseValuation || req.body, configuredVatRate });
+    } else {
+      throw new ValidationError("Current valuation is available only for supported profile Assets.");
+    }
+    const [updated] = await models.sequelize.query(`UPDATE asset_current_valuations SET
+      rate_source=:rateSource,gold_rate=:goldRate,gold_value=:goldValue,making_value=:makingValue,
+      certificate_value=:certificateValue,component_value=:componentValue,vat_rate=:vatRate,
+      vat_rate_source=:vatRateSource,vat_base=:vatBase,vat_amount=:vatAmount,total_value=:totalValue,
+      as_of=CURRENT_TIMESTAMP,input_version=input_version+1,version=version+1,override_reason=:reason,
+      override_by=:actor,updated_at=CURRENT_TIMESTAMP
+      WHERE asset_id=:assetId AND company_id=:companyId AND branch_id=:branchId AND (:expectedVersion IS NULL OR version=:expectedVersion) RETURNING *`, {
+      replacements: { assetId: asset.id, companyId: req.companyId, branchId, expectedVersion: expectedVersion === undefined ? null : Number(expectedVersion), reason: req.body?.reason ? String(req.body.reason).trim() : null, actor: req.user?.id || null, ...valuation }, transaction,
+    });
+    if (!updated[0]) {
+      if (expectedVersion !== undefined) throw new ConflictError("Current valuation has changed; refresh before retrying.");
+      throw new NotFoundError("Current valuation evidence not found for Asset.");
+    }
+    await inventoryV2Runtime.recordAssetEvent({ models, transaction, asset: asset.toJSON(), context: { ...inventoryV2Context(req, branchId), branchName: asset.branch }, eventType: "CURRENT_VALUATION_UPDATED", oldStatus: asset.operationalStatus, newStatus: asset.operationalStatus, sourceType: "CURRENT_VALUATION", sourceId: asset.id, note: req.body?.reason ? String(req.body.reason).trim() : "Current valuation updated", idempotencyKey });
+    const output = { success: true, data: updated[0] };
+    await idempotencyService.succeed({ request: claim.request, statusCode: 200, responseBody: output, transaction });
+    await transaction.commit();
+    return res.status(200).json(output);
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.put("/inventory-v2/assets/:id/components", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const idempotencyKey = requireInventoryV2IdempotencyKey(req);
+    const scope = "inventory-v2.update-components";
+    const requestHash = idempotencyService.hashRequest(scope, req.body || {});
+    const claim = await idempotencyService.claim({ models, companyId: req.companyId, scope, key: idempotencyKey, requestHash, transaction });
+    if (!claim.claimed) {
+      try { await transaction.rollback(); } catch (_) {}
+      const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope, key: idempotencyKey, requestHash });
+      if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+      return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+    }
+    const asset = await findScopedInventoryV2Asset(req, req.params.id, branchId, transaction, { lock: true });
+    if (!Array.isArray(req.body?.components)) throw new ValidationError("components must be an array.");
+    const updatedComponents = await inventoryV2Runtime.updateAssetComponents({
+      models,
+      transaction,
+      asset,
+      context: { ...inventoryV2Context(req, branchId), branchName: asset.branch },
+      components: req.body.components,
+    });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
+      action: "inventory_v2.components_updated",
+      description: `Components updated for Asset ${asset.id}`,
+      sourceDocument: asset.id,
+      metadata: { assetId: asset.id, componentCount: updatedComponents.length },
+    }), { transaction });
+    const output = { success: true, data: { assetId: asset.id, components: updatedComponents } };
+    await idempotencyService.succeed({ request: claim.request, statusCode: 200, responseBody: output, transaction });
+    await transaction.commit();
+    return res.status(200).json(output);
+  } catch (error) {
+    await transaction.rollback();
+    return next(error);
+  }
+});
+
+router.post("/inventory-v2/assets/:id/rfid", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const idempotencyKey = requireInventoryV2IdempotencyKey(req);
+    if (!String(req.body?.rfidNumber || "").trim()) throw new ValidationError("RFID number is required.");
+    const asset = await findScopedInventoryV2Asset(req, req.params.id, branchId, transaction, { lock: true });
+    const replay = await models.sequelize.query("SELECT source_id FROM asset_events WHERE company_id=:companyId AND idempotency_key=:idempotencyKey", { replacements: { companyId: req.companyId, idempotencyKey }, transaction, type: require("sequelize").QueryTypes.SELECT });
+    if (replay.length) {
+      const [assignment] = await models.sequelize.query("SELECT id,rfid_number AS \"rfidNumber\" FROM asset_rfid_assignments WHERE id=:id", { replacements: { id: replay[0].source_id }, transaction, type: require("sequelize").QueryTypes.SELECT });
+      if (!assignment || assignment.rfidNumber !== String(req.body?.rfidNumber || "").trim()) throw new ConflictError("Idempotency-Key body conflict.");
+      await transaction.commit();
+      return res.status(200).json({ success: true, replayed: true, data: assignment });
+    }
+    let data;
+    try {
+      data = await inventoryV2Runtime.assignRfid({ models, transaction, asset, context: { ...inventoryV2Context(req, branchId), branchName: asset.branch }, rfidNumber: req.body?.rfidNumber, reason: req.body?.reason || null, sourceId: null, idempotencyKey });
+    } catch (error) {
+      if (String(error?.message || "").startsWith("INVENTORY_V2_RFID_REUSE_FORBIDDEN")) throw new ConflictError("RFID reuse is forbidden.");
+      throw error;
+    }
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory_v2.rfid_assigned", description: `RFID assigned to Asset ${asset.id}`, sourceDocument: data.assignmentId, metadata: { assetId: asset.id, rfidNumber: data.rfidNumber } }), { transaction });
+    await transaction.commit();
+    return res.status(201).json({ success: true, data });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/rfid/scan", authMiddleware, requireBusinessPermission("inventory.view", { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    if (!String(req.body?.rfidNumber || "").trim()) throw new ValidationError("RFID number is required.");
+    const data = await inventoryV2Runtime.recordRfidScan({ models, transaction, context: inventoryV2Context(req, branchId), rfidNumber: req.body?.rfidNumber, sourceType: req.body?.sourceType || "RFID_SCAN", sourceId: req.body?.sourceId || null, deviceId: req.body?.deviceId || null });
+    const asset = await findScopedInventoryV2Asset(req, data.assetId, branchId, transaction);
+    await transaction.commit();
+    return res.status(200).json({ success: true, data: { ...data, asset: asset.toJSON() } });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/assets/:id/tags/print", authMiddleware, requireBusinessPermission("inventory.print", { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const idempotencyKey = requireInventoryV2IdempotencyKey(req);
+    const printKind = String(req.body?.printKind || "").toUpperCase();
+    if (!["INITIAL", "REPRINT"].includes(printKind)) throw new ValidationError("Inventory V2 print kind must be INITIAL or REPRINT.");
+    if (printKind === "REPRINT" && !String(req.body?.reason || "").trim()) throw new ValidationError("A reprint reason is required.");
+    const asset = await findScopedInventoryV2Asset(req, req.params.id, branchId, transaction, { lock: true });
+    const replay = await models.sequelize.query("SELECT p.id,p.print_kind AS \"printKind\",p.template_name AS \"templateName\",p.template_version AS \"templateVersion\",p.printer_name AS \"printerName\",p.device_id AS \"deviceId\",p.reason,a.barcode FROM asset_tag_print_events p JOIN assets a ON a.id=p.asset_id WHERE p.company_id=:companyId AND p.idempotency_key=:idempotencyKey", { replacements: { companyId: req.companyId, idempotencyKey }, transaction, type: require("sequelize").QueryTypes.SELECT });
+    if (replay.length) {
+      const previous = replay[0];
+      const sameRequest = previous.printKind === printKind
+        && (previous.templateName || null) === (req.body?.templateName || null)
+        && (previous.templateVersion || null) === (req.body?.templateVersion || null)
+        && (previous.printerName || null) === (req.body?.printerName || null)
+        && (previous.deviceId || null) === (req.body?.deviceId || null)
+        && (previous.reason || null) === (req.body?.reason || null);
+      if (!sameRequest) throw new ConflictError("Idempotency-Key body conflict.");
+      await transaction.commit();
+      return res.status(200).json({ success: true, replayed: true, data: previous });
+    }
+    const data = await inventoryV2Runtime.recordTagPrint({ models, transaction, asset, context: { ...inventoryV2Context(req, branchId), branchName: asset.branch }, printKind, templateName: req.body?.templateName, templateVersion: req.body?.templateVersion, printerName: req.body?.printerName, deviceId: req.body?.deviceId, reason: req.body?.reason, idempotencyKey });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory_v2.tag_printed", description: `${data.printKind} tag print for Asset ${asset.id}`, sourceDocument: data.id, metadata: { assetId: asset.id, barcode: asset.barcode } }), { transaction });
+    await transaction.commit();
+    return res.status(201).json({ success: true, data });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/workshop-orders", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const idempotencyKey = requireInventoryV2IdempotencyKey(req);
+    const assetIds = [...new Set(Array.isArray(req.body?.assetIds) ? req.body.assetIds.map(String) : [])];
+    if (!assetIds.length) throw new ValidationError("Workshop requires one or more exact Asset IDs.");
+    const existing = await models.sequelize.query("SELECT source_id FROM asset_events WHERE company_id=:companyId AND idempotency_key=:idempotencyKey LIMIT 1", { replacements: { companyId: req.companyId, idempotencyKey: `${idempotencyKey}:0` }, transaction, type: require("sequelize").QueryTypes.SELECT });
+    if (existing.length) { await transaction.commit(); return res.status(200).json({ success: true, replayed: true, data: { workshopOrderId: existing[0].source_id } }); }
+    const orderId = inventoryV2Runtime.newId("IMWORK");
+    const context = inventoryV2Context(req, branchId);
+    await models.sequelize.query(`INSERT INTO inventory_workshop_orders
+      (id,company_id,branch_id,order_number,provider_name,status,expected_return_at,created_by)
+      VALUES (:id,:companyId,:branchId,:orderNumber,:providerName,'SENT',:expectedReturnAt,:createdBy)`, {
+      replacements: { id: orderId, companyId: req.companyId, branchId, orderNumber: req.body?.orderNumber || orderId, providerName: req.body?.providerName || null, expectedReturnAt: req.body?.expectedReturnAt || null, createdBy: context.actorId || null }, transaction,
+    });
+    const assets = [];
+    for (let ordinal = 0; ordinal < assetIds.length; ordinal += 1) {
+      const asset = await findScopedInventoryV2Asset(req, assetIds[ordinal], branchId, transaction, { lock: true });
+      if (asset.operationalStatus !== "AVAILABLE") throw new ConflictError(`Asset ${asset.id} is not available for workshop.`);
+      await models.sequelize.query(`INSERT INTO inventory_workshop_items
+        (id,workshop_order_id,asset_id,company_id,from_location_id,prior_operational_status,status,sent_at,sent_by)
+        VALUES (:id,:orderId,:assetId,:companyId,:fromLocationId,'AVAILABLE','SENT',:sentAt,:sentBy)`, {
+        replacements: { id: inventoryV2Runtime.newId("IMWORKITEM"), orderId, assetId: asset.id, companyId: req.companyId, fromLocationId: asset.locationId || null, sentAt: context.occurredAt, sentBy: context.actorId || null }, transaction,
+      });
+      await inventoryV2Runtime.transitionAsset({ models, transaction, asset, context: { ...context, branchName: asset.branch }, toStatus: "WORKSHOP", eventType: "WORKSHOP_SENT", movementType: "WORKSHOP_OUT", sourceType: "WORKSHOP_ORDER", sourceId: orderId, note: req.body?.notes || "Asset sent to workshop", idempotencyKey: `${idempotencyKey}:${ordinal}` });
+      assets.push(asset.id);
+    }
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory_v2.workshop_sent", description: `Workshop order ${orderId} sent with ${assets.length} Asset(s).`, sourceDocument: orderId, metadata: { assets } }), { transaction });
+    await transaction.commit();
+    return res.status(201).json({ success: true, data: { workshopOrderId: orderId, assetIds: assets } });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/workshop-orders/:id/return", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const idempotencyKey = requireInventoryV2IdempotencyKey(req);
+    const [order] = await models.sequelize.query("SELECT * FROM inventory_workshop_orders WHERE id=:id AND company_id=:companyId AND branch_id=:branchId FOR UPDATE", { replacements: { id: req.params.id, companyId: req.companyId, branchId }, transaction, type: require("sequelize").QueryTypes.SELECT });
+    if (!order) throw new NotFoundError("Inventory V2 workshop order not found.");
+    if (order.status === "RETURNED") { await transaction.commit(); return res.status(200).json({ success: true, replayed: true, data: { workshopOrderId: order.id } }); }
+    const items = await models.sequelize.query("SELECT * FROM inventory_workshop_items WHERE workshop_order_id=:orderId AND status='SENT' ORDER BY created_at", { replacements: { orderId: order.id }, transaction, type: require("sequelize").QueryTypes.SELECT });
+    if (!items.length) throw new ConflictError("Workshop order has no sent Asset items to return.");
+    const context = inventoryV2Context(req, branchId);
+    for (let ordinal = 0; ordinal < items.length; ordinal += 1) {
+      const item = items[ordinal];
+      const asset = await findScopedInventoryV2Asset(req, item.asset_id, branchId, transaction, { lock: true });
+      if (asset.operationalStatus !== "WORKSHOP") throw new ConflictError(`Asset ${asset.id} is not in workshop.`);
+      await inventoryV2Runtime.transitionAsset({ models, transaction, asset, context: { ...context, branchName: asset.branch }, toStatus: "AVAILABLE", eventType: "WORKSHOP_RETURNED", movementType: "WORKSHOP_IN", sourceType: "WORKSHOP_ORDER", sourceId: order.id, note: req.body?.notes || "Asset returned from workshop", idempotencyKey: `${idempotencyKey}:${ordinal}` });
+      await models.sequelize.query("UPDATE inventory_workshop_items SET status='RETURNED',returned_at=:returnedAt,returned_by=:returnedBy,updated_at=CURRENT_TIMESTAMP WHERE id=:id", { replacements: { id: item.id, returnedAt: context.occurredAt, returnedBy: context.actorId || null }, transaction });
+    }
+    await models.sequelize.query("UPDATE inventory_workshop_orders SET status='RETURNED',updated_at=CURRENT_TIMESTAMP WHERE id=:id", { replacements: { id: order.id }, transaction });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory_v2.workshop_returned", description: `Workshop order ${order.id} returned.`, sourceDocument: order.id }), { transaction });
+    await transaction.commit();
+    return res.status(200).json({ success: true, data: { workshopOrderId: order.id, returnedAssets: items.map((item) => item.asset_id) } });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/assets/:id/missing", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const idempotencyKey = requireInventoryV2IdempotencyKey(req);
+    if (!String(req.body?.reason || "").trim()) throw new ValidationError("A missing-case reason is required.");
+    const asset = await findScopedInventoryV2Asset(req, req.params.id, branchId, transaction, { lock: true });
+    const replay = await models.sequelize.query("SELECT source_id FROM asset_events WHERE company_id=:companyId AND idempotency_key=:idempotencyKey", { replacements: { companyId: req.companyId, idempotencyKey }, transaction, type: require("sequelize").QueryTypes.SELECT });
+    if (replay.length) { await transaction.commit(); return res.status(200).json({ success: true, replayed: true, data: { missingCaseId: replay[0].source_id } }); }
+    if (asset.operationalStatus !== "AVAILABLE") throw new ConflictError("Only an available Asset can be marked missing.");
+    const missingCaseId = inventoryV2Runtime.newId("IMMISSING");
+    const context = inventoryV2Context(req, branchId);
+    await models.sequelize.query(`INSERT INTO asset_missing_cases
+      (id,asset_id,company_id,branch_id,status,prior_operational_status,prior_location_id,discovered_at,discovered_by,reason)
+      VALUES (:id,:assetId,:companyId,:branchId,'OPEN','AVAILABLE',:priorLocationId,:discoveredAt,:discoveredBy,:reason)`, {
+      replacements: { id: missingCaseId, assetId: asset.id, companyId: req.companyId, branchId, priorLocationId: asset.locationId || null, discoveredAt: context.occurredAt, discoveredBy: context.actorId || null, reason: String(req.body.reason).trim() }, transaction,
+    });
+    await inventoryV2Runtime.transitionAsset({ models, transaction, asset, context: { ...context, branchName: asset.branch }, toStatus: "MISSING", eventType: "MISSING_REPORTED", movementType: "MISSING_REPORTED", sourceType: "ASSET_MISSING_CASE", sourceId: missingCaseId, note: String(req.body.reason).trim(), idempotencyKey });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory_v2.missing_reported", description: `Asset ${asset.id} reported missing.`, sourceDocument: missingCaseId, metadata: { assetId: asset.id } }), { transaction });
+    await transaction.commit();
+    return res.status(201).json({ success: true, data: { missingCaseId, assetId: asset.id } });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/audits", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  const adapterTransaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const context = inventoryV2Context(req, branchId);
+    const result = await inventoryAuditCanonicalService.createAudit({
+      models, companyId: req.companyId, branchId, auditNumber: req.body?.auditNumber,
+      auditMethod: req.body?.auditMethod, locationId: req.body?.locationId || null, notes: req.body?.notes || null,
+      actor: { id: context.actorId || null, name: context.actorName || null }, transaction: adapterTransaction,
+      recordAudit: (audit, auditMethod) => auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
+        action: "inventory_v2.audit_created", description: `Inventory audit ${audit.auditNumber} created.`, sourceDocument: audit.id, metadata: { auditMethod, branchId },
+      }), { transaction: adapterTransaction }),
+    });
+    await adapterTransaction.commit();
+    return res.status(result.replayed ? 200 : 201).json({ success: true, ...(result.replayed ? { replayed: true } : {}), data: result.audit.toJSON() });
+  } catch (error) {
+    await adapterTransaction.rollback();
+    return next(error);
+  }
+
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const auditNumber = String(req.body?.auditNumber || "").trim();
+    const auditMethod = String(req.body?.auditMethod || "").toUpperCase();
+    if (!auditNumber) throw new ValidationError("Inventory V2 auditNumber is required for durable replay.");
+    if (!["MANUAL_COUNT", "BARCODE_SCAN", "RFID_SCAN"].includes(auditMethod)) throw new ValidationError("Inventory V2 audit method is invalid.");
+    const existing = await models.StockAudit.findOne({ where: { companyId: req.companyId, auditNumber }, transaction, lock: true });
+    if (existing) {
+      if (existing.branchId !== branchId || existing.auditMethod !== auditMethod) throw new ConflictError("Audit number body conflict.");
+      await transaction.commit();
+      return res.status(200).json({ success: true, replayed: true, data: existing.toJSON() });
+    }
+    const context = inventoryV2Context(req, branchId);
+    const audit = await models.StockAudit.create({ id: inventoryV2Runtime.newId("IMAUD"), companyId: req.companyId, branchId, status: "draft", createdBy: context.actorId || context.actorName, auditNumber, auditDate: new Date().toISOString().slice(0, 10), auditMethod, locationId: req.body?.locationId || null, notes: req.body?.notes || null }, { transaction });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory_v2.audit_created", description: `Inventory audit ${auditNumber} created.`, sourceDocument: audit.id, metadata: { auditMethod, branchId } }), { transaction });
+    await transaction.commit();
+    return res.status(201).json({ success: true, data: audit.toJSON() });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/audits/:id/start", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  const adapterTransaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const result = await inventoryAuditCanonicalService.startAudit({ models, companyId: req.companyId, branchId, auditId: req.params.id, transaction: adapterTransaction });
+    await adapterTransaction.commit();
+    return res.status(200).json({ success: true, ...(result.replayed ? { replayed: true } : {}), data: { ...result.audit.toJSON(), expectedCount: result.expectedCount } });
+  } catch (error) {
+    await adapterTransaction.rollback();
+    return next(error);
+  }
+
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const audit = await models.StockAudit.findOne({ where: { id: req.params.id, companyId: req.companyId, branchId }, transaction, lock: true });
+    if (!audit) throw new NotFoundError("Inventory V2 audit not found.");
+    if (audit.status === "in-progress") { await transaction.commit(); return res.status(200).json({ success: true, replayed: true, data: audit.toJSON() }); }
+    if (audit.status !== "draft") throw new ConflictError("Only a DRAFT audit can start.");
+    const assets = await models.Asset.findAll({ where: { companyId: req.companyId, branchId, operationalStatus: { [Op.notIn]: ["SOLD", "MELTED"] } }, transaction });
+    for (const asset of assets) await models.StockAuditItem.create({ id: inventoryV2Runtime.newId("IMAUDITEM"), stockAuditId: audit.id, assetId: asset.id, expectedBranchId: branchId, status: "missing", result: null }, { transaction });
+    await audit.update({ status: "in-progress" }, { transaction });
+    await transaction.commit();
+    return res.status(200).json({ success: true, data: { ...audit.toJSON(), expectedCount: assets.length } });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/audits/:id/observe", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  const adapterTransaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const result = await inventoryAuditCanonicalService.observeAudit({
+      models, companyId: req.companyId, branchId, auditId: req.params.id,
+      assetIds: req.body?.assetIds || [], barcodes: req.body?.barcodes || [], rfidNumbers: req.body?.rfidNumbers || [],
+      method: req.body?.method || null, transaction: adapterTransaction,
+    });
+    await adapterTransaction.commit();
+    return res.status(200).json({ success: true, data: { auditId: result.audit.id, observed: result.observed } });
+  } catch (error) {
+    await adapterTransaction.rollback();
+    return next(error);
+  }
+
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const audit = await models.StockAudit.findOne({ where: { id: req.params.id, companyId: req.companyId, branchId }, transaction, lock: true });
+    if (!audit) throw new NotFoundError("Inventory V2 audit not found.");
+    if (audit.status !== "in-progress") throw new ConflictError("Only an IN_PROGRESS audit can accept observations.");
+    const method = String(req.body?.method || audit.auditMethod).toUpperCase();
+    const requested = [...new Set([...(req.body?.assetIds || []).map(String), ...(req.body?.barcodes || []).map(String), ...(req.body?.rfidNumbers || []).map(String)])];
+    if (!requested.length) throw new ValidationError("At least one Asset ID, barcode, or RFID number is required.");
+    const assets = await models.Asset.findAll({ where: { companyId: req.companyId, [Op.or]: [{ id: requested }, { barcode: requested }, { rfid: requested }] }, transaction, lock: true });
+    if (!assets.length) throw new ValidationError("No scanned Inventory V2 Asset was found.");
+    const observed = [];
+    for (const asset of assets) {
+      const expected = await models.StockAuditItem.findOne({ where: { stockAuditId: audit.id, assetId: asset.id }, transaction, lock: true });
+      if (expected) await expected.update({ status: "matched", result: "MATCHED", observedAt: new Date(), scanMethod: method, scannedBranchId: branchId }, { transaction });
+      else await models.StockAuditItem.create({ id: inventoryV2Runtime.newId("IMAUDITEM"), stockAuditId: audit.id, assetId: asset.id, expectedBranchId: asset.branchId, scannedBranchId: branchId, status: "unexpected", result: "EXTRA", observedAt: new Date(), scanMethod: method }, { transaction });
+      observed.push({ assetId: asset.id, result: expected ? "MATCHED" : "EXTRA" });
+    }
+    await transaction.commit();
+    return res.status(200).json({ success: true, data: { auditId: audit.id, observed } });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/audits/:id/complete", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  const adapterTransaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const result = await inventoryAuditCanonicalService.completeAudit({ models, companyId: req.companyId, branchId, auditId: req.params.id, transaction: adapterTransaction });
+    await adapterTransaction.commit();
+    return res.status(200).json({ success: true, ...(result.replayed ? { replayed: true } : {}), data: result.audit.toJSON(), note: "Observations do not mutate Asset state or apply adjustments." });
+  } catch (error) {
+    await adapterTransaction.rollback();
+    return next(error);
+  }
+
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const audit = await models.StockAudit.findOne({ where: { id: req.params.id, companyId: req.companyId, branchId }, transaction, lock: true });
+    if (!audit) throw new NotFoundError("Inventory V2 audit not found.");
+    if (audit.status === "completed") { await transaction.commit(); return res.status(200).json({ success: true, replayed: true, data: audit.toJSON() }); }
+    if (audit.status !== "in-progress") throw new ConflictError("Only an IN_PROGRESS audit can complete.");
+    await models.StockAuditItem.update({ status: "missing", result: "MISSING", observedAt: new Date() }, { where: { stockAuditId: audit.id, result: null }, transaction });
+    await audit.update({ status: "completed", completedAt: new Date().toISOString() }, { transaction });
+    await transaction.commit();
+    return res.status(200).json({ success: true, data: audit.toJSON(), note: "Observations do not mutate Asset state or apply adjustments." });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/audits/:id/close", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  const adapterTransaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const context = inventoryV2Context(req, branchId);
+    const result = await inventoryAuditCanonicalService.closeAudit({ models, companyId: req.companyId, branchId, auditId: req.params.id, actor: { id: context.actorId || null, name: context.actorName || null }, transaction: adapterTransaction });
+    await adapterTransaction.commit();
+    return res.status(200).json({ success: true, ...(result.replayed ? { replayed: true } : {}), data: result.audit.toJSON() });
+  } catch (error) {
+    await adapterTransaction.rollback();
+    return next(error);
+  }
+
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const audit = await models.StockAudit.findOne({ where: { id: req.params.id, companyId: req.companyId, branchId }, transaction, lock: true });
+    if (!audit) throw new NotFoundError("Inventory V2 audit not found.");
+    if (audit.status === "closed") { await transaction.commit(); return res.status(200).json({ success: true, replayed: true, data: audit.toJSON() }); }
+    if (audit.status !== "completed") throw new ConflictError("Only a COMPLETED audit can close.");
+    await audit.update({ status: "closed", closedAt: new Date(), closedBy: req.user?.id || null }, { transaction });
+    await transaction.commit();
+    return res.status(200).json({ success: true, data: audit.toJSON() });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/adjustments", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const idempotencyKey = requireInventoryV2IdempotencyKey(req);
+    const reason = String(req.body?.reason || "").trim();
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (!reason || !items.length) throw new ValidationError("Adjustment reason and exact Asset items are required.");
+    const existing = await models.sequelize.query("SELECT * FROM inventory_adjustments WHERE company_id=:companyId AND idempotency_key=:idempotencyKey", { replacements: { companyId: req.companyId, idempotencyKey }, transaction, type: require("sequelize").QueryTypes.SELECT });
+    if (existing.length) {
+      const priorItems = await models.sequelize.query("SELECT asset_id,old_context,new_context FROM inventory_adjustment_items WHERE adjustment_id=:adjustmentId ORDER BY asset_id", { replacements: { adjustmentId: existing[0].id }, transaction, type: require("sequelize").QueryTypes.SELECT });
+      const parseContext = (value) => {
+        if (!value || typeof value === "object") return value || {};
+        try { return JSON.parse(value); } catch (_) { return {}; }
+      };
+      const requested = items.map((item) => ({
+        assetId: String(item?.assetId || ""),
+        expectedOperationalStatus: item?.expectedOperationalStatus == null ? null : String(item.expectedOperationalStatus).toUpperCase(),
+        newOperationalStatus: String(item?.newOperationalStatus || "").toUpperCase(),
+        evidence: item?.evidence || null,
+        reference: item?.reference || null,
+      })).sort((left, right) => left.assetId.localeCompare(right.assetId));
+      const stored = priorItems.map((item) => {
+        const oldContext = parseContext(item.old_context);
+        const newContext = parseContext(item.new_context);
+        return {
+          assetId: String(item.asset_id),
+          expectedOperationalStatus: String(oldContext.operationalStatus || "").toUpperCase(),
+          newOperationalStatus: String(newContext.operationalStatus || "").toUpperCase(),
+          evidence: newContext.evidence || null,
+          reference: newContext.reference || null,
+        };
+      });
+      const sameItems = requested.length === stored.length && requested.every((item, index) =>
+        item.assetId === stored[index].assetId
+        && item.newOperationalStatus === stored[index].newOperationalStatus
+        && (item.expectedOperationalStatus === null || item.expectedOperationalStatus === stored[index].expectedOperationalStatus)
+        && item.evidence === stored[index].evidence
+        && item.reference === stored[index].reference);
+      if (String(existing[0].reason || "") !== reason || !sameItems) throw new ConflictError("Idempotency-Key body conflict.");
+      await transaction.commit(); return res.status(200).json({ success: true, replayed: true, data: existing[0] });
+    }
+    const context = inventoryV2Context(req, branchId);
+    const adjustmentId = inventoryV2Runtime.newId("IMADJ");
+    await models.sequelize.query(`INSERT INTO inventory_adjustments
+      (id,company_id,branch_id,status,reason,requested_by,requested_at,idempotency_key)
+      VALUES (:id,:companyId,:branchId,'REQUESTED',:reason,:requestedBy,:requestedAt,:idempotencyKey)`, { replacements: { id: adjustmentId, companyId: req.companyId, branchId, reason, requestedBy: context.actorId || context.actorName, requestedAt: context.occurredAt, idempotencyKey }, transaction });
+    const seen = new Set();
+    for (const item of items) {
+      const assetId = String(item?.assetId || "");
+      const toStatus = String(item?.newOperationalStatus || "").toUpperCase();
+      if (!assetId || seen.has(assetId)) throw new ValidationError("Adjustment items must contain unique exact Asset IDs.");
+      if (!inventoryV2Runtime.TRANSITIONS[toStatus]) throw new ValidationError("Adjustment target operational status is invalid.");
+      seen.add(assetId);
+      const asset = await findScopedInventoryV2Asset(req, assetId, branchId, transaction, { lock: true });
+      const expected = String(item.expectedOperationalStatus || asset.operationalStatus).toUpperCase();
+      if (asset.operationalStatus !== expected) throw new ConflictError(`Asset ${asset.id} pre-state conflict.`);
+      await models.sequelize.query(`INSERT INTO inventory_adjustment_items
+        (id,adjustment_id,asset_id,company_id,old_context,new_context)
+        VALUES (:id,:adjustmentId,:assetId,:companyId,:oldContext,:newContext)`, { replacements: { id: inventoryV2Runtime.newId("IMADJITEM"), adjustmentId, assetId, companyId: req.companyId, oldContext: JSON.stringify({ operationalStatus: asset.operationalStatus, version: asset.updatedAt }), newContext: JSON.stringify({ operationalStatus: toStatus, evidence: item.evidence || null, reference: item.reference || null }) }, transaction });
+    }
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory_v2.adjustment_requested", description: `Inventory adjustment ${adjustmentId} requested.`, sourceDocument: adjustmentId }), { transaction });
+    await transaction.commit();
+    return res.status(201).json({ success: true, data: { adjustmentId, status: "REQUESTED" } });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/adjustments/:id/approve", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const [adjustment] = await models.sequelize.query("SELECT * FROM inventory_adjustments WHERE id=:id AND company_id=:companyId AND branch_id=:branchId FOR UPDATE", { replacements: { id: req.params.id, companyId: req.companyId, branchId }, transaction, type: require("sequelize").QueryTypes.SELECT });
+    if (!adjustment) throw new NotFoundError("Inventory V2 adjustment not found.");
+    if (adjustment.status === "APPROVED") { await transaction.commit(); return res.status(200).json({ success: true, replayed: true, data: adjustment }); }
+    if (adjustment.status !== "REQUESTED") throw new ConflictError("Only a REQUESTED adjustment can approve.");
+    const approverId = req.user?.id;
+    if (!approverId || approverId === adjustment.requested_by) throw new ForbiddenError("Adjustment requester cannot approve the same adjustment.");
+    await models.sequelize.query("UPDATE inventory_adjustments SET status='APPROVED',approved_by=:approvedBy,approved_at=:approvedAt,updated_at=CURRENT_TIMESTAMP WHERE id=:id", { replacements: { id: adjustment.id, approvedBy: approverId, approvedAt: new Date() }, transaction });
+    await transaction.commit();
+    return res.status(200).json({ success: true, data: { adjustmentId: adjustment.id, status: "APPROVED" } });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/adjustments/:id/apply", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const [adjustment] = await models.sequelize.query("SELECT * FROM inventory_adjustments WHERE id=:id AND company_id=:companyId AND branch_id=:branchId FOR UPDATE", { replacements: { id: req.params.id, companyId: req.companyId, branchId }, transaction, type: require("sequelize").QueryTypes.SELECT });
+    if (!adjustment) throw new NotFoundError("Inventory V2 adjustment not found.");
+    if (adjustment.status === "APPLIED") { await transaction.commit(); return res.status(200).json({ success: true, replayed: true, data: { adjustmentId: adjustment.id, status: "APPLIED" } }); }
+    if (adjustment.status !== "APPROVED") throw new ConflictError("Only an APPROVED adjustment can apply.");
+    const items = await models.sequelize.query("SELECT * FROM inventory_adjustment_items WHERE adjustment_id=:adjustmentId ORDER BY created_at", { replacements: { adjustmentId: adjustment.id }, transaction, type: require("sequelize").QueryTypes.SELECT });
+    const context = inventoryV2Context(req, branchId);
+    for (let ordinal = 0; ordinal < items.length; ordinal += 1) {
+      const item = items[ordinal];
+      const oldContext = item.old_context;
+      const newContext = item.new_context;
+      const asset = await findScopedInventoryV2Asset(req, item.asset_id, branchId, transaction, { lock: true });
+      if (asset.operationalStatus !== oldContext.operationalStatus) throw new ConflictError(`Adjustment ${adjustment.id} is stale for Asset ${asset.id}.`);
+      await inventoryV2Runtime.transitionAsset({ models, transaction, asset, context: { ...context, branchName: asset.branch }, toStatus: newContext.operationalStatus, eventType: "INVENTORY_ADJUSTMENT_APPLIED", movementType: "INVENTORY_ADJUSTMENT", sourceType: "INVENTORY_ADJUSTMENT", sourceId: adjustment.id, note: adjustment.reason, idempotencyKey: `${adjustment.id}:${ordinal}` });
+    }
+    await models.sequelize.query("UPDATE inventory_adjustments SET status='APPLIED',applied_by=:appliedBy,applied_at=:appliedAt,updated_at=CURRENT_TIMESTAMP WHERE id=:id", { replacements: { id: adjustment.id, appliedBy: req.user?.id || null, appliedAt: new Date() }, transaction });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory_v2.adjustment_applied", description: `Inventory adjustment ${adjustment.id} applied.`, sourceDocument: adjustment.id }), { transaction });
+    await transaction.commit();
+    return res.status(200).json({ success: true, data: { adjustmentId: adjustment.id, status: "APPLIED" } });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+// The historical manufacturing surface accepts a smaller payload than the
+// Inventory Master command.  It is deliberately an adapter: partial-weight
+// consumption is rejected because it changes a physical identity in place.
+// The supplied legacy measurement fields are copied into immutable command
+// evidence; the adapter never creates an Asset, Barcode, event, movement, or
+// journal itself.
+async function executeLegacyManufacturingAdapter(req, res, next) {
+  try {
+    const body = req.body || {};
+    const inputAssetId = String(body.inputAssetId || "").trim();
+    const outputName = String(body.outputName || "").trim();
+    const inputWeight = Number(body.inputWeight);
+    const outputWeight = Number(body.outputWeight);
+    const laborCost = Number(body.laborCost || 0);
+    if (!inputAssetId || !outputName || !Number.isFinite(inputWeight) || inputWeight <= 0 || !Number.isFinite(outputWeight) || outputWeight <= 0 || !Number.isFinite(laborCost) || laborCost < 0) {
+      throw new ValidationError("Legacy manufacturing requires one input Asset and valid measured input/output weights.");
+    }
+    const branchId = req.headers["x-branch-id"] || body.branchId || req.branchId;
+    if (!branchId) throw new ValidationError("The active Branch is required for manufacturing.");
+    const input = await models.Asset.findOne({ where: { id: inputAssetId, companyId: req.companyId, branchId } });
+    if (!input) throw new NotFoundError("Legacy manufacturing input Asset was not found in the authorized Branch.");
+    if (Math.abs(Number(input.grossWeight) - inputWeight) > 0.000001) {
+      throw new ValidationError("Partial legacy manufacturing is no longer safe: submit the exact whole input Asset to the canonical transformation workflow.");
+    }
+    const rawFingerprint = JSON.stringify({ inputAssetId, inputWeight, outputName, outputWeight, outputKarat: body.outputKarat || null, outputType: body.outputType || null, laborCost, notes: body.notes || "" });
+    const key = String(req.headers["idempotency-key"] || "").trim() || `legacy-manufacturing-${require("crypto").createHash("sha256").update(rawFingerprint).digest("hex").slice(0, 48)}`;
+    const originalBody = req.body;
+    const originalKey = req.headers["idempotency-key"];
+    const originalJson = res.json.bind(res);
+    req.headers["idempotency-key"] = key;
+    req.body = {
+      inputAssetIds: [inputAssetId],
+      reason: String(body.notes || `Legacy manufacturing of ${outputName}`).trim(),
+      outputs: [{
+        name: outputName,
+        category: body.category || "تصنيع محلي",
+        // The legacy route has always described weighed gold work.  This
+        // nullable-condition profile avoids inventing a NEW condition.
+        profile: String(body.inventoryProfile || "GOLD_BY_WEIGHT_JEWELLERY").toUpperCase(),
+        grossWeight: outputWeight,
+        stoneWeight: Number(body.stoneWeight || 0),
+        karat: Number(body.outputKarat || input.karat || 21),
+        purchaseCost: Number(input.cost || 0) + laborCost,
+        goldValue: Number(body.goldValue || 0),
+        certificateCost: Number(body.certificateCost || 0),
+        vatRate: Number(body.vatRate || 0),
+        physicalEvidence: String(body.physicalEvidence || `legacy-measurement:${outputName}:${outputWeight}:${body.outputKarat || input.karat || "unknown"}`),
+        metadata: { legacyManufacturingAdapter: true, legacyOutputType: body.outputType || "gold-piece", legacyInputWeight: inputWeight, laborCost },
+      }],
+    };
+    res.json = (payload) => {
+      if (!payload?.success || !payload.data?.manufacturingOrderId) return originalJson(payload);
+      const data = payload.data;
+      return originalJson({
+        success: true,
+        mo: { id: data.manufacturingOrderId, status: "completed", type: "manufacturing" },
+        finishedAsset: data.outputAssetIds?.[0] ? { id: data.outputAssetIds[0] } : null,
+        parentAsset: { id: inputAssetId },
+        journalEntry: null,
+        data,
+      });
+    };
+    try {
+      return await executeInventoryV2Transformation(req, res, next, "manufacturing");
+    } finally {
+      req.body = originalBody;
+      if (originalKey === undefined) delete req.headers["idempotency-key"];
+      else req.headers["idempotency-key"] = originalKey;
+      res.json = originalJson;
+    }
+  } catch (error) {
+    return next(error);
+  }
+}
+
+// Canonical transformation orchestration for manufacturing and melt.  Routes
+// are adapters only and never write state, identity, lineage, or finance.
+async function executeInventoryV2Transformation(req, res, next, orderType) {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const branch = await models.Branch.findOne({ where: { id: branchId, companyId: req.companyId, isActive: true }, transaction });
+    if (!branch) throw new NotFoundError("Authorized Branch not found.");
+    const idempotencyKey = requireInventoryV2IdempotencyKey(req);
+    const reason = String(req.body?.reason || "").trim();
+    const inputAssetIds = [...new Set(Array.isArray(req.body?.inputAssetIds) ? req.body.inputAssetIds.map(String) : [])];
+    if (!reason || !inputAssetIds.length) throw new ValidationError("Transformation reason and exact input Asset IDs are required.");
+    const rawOutputs = Array.isArray(req.body?.outputs) ? req.body.outputs : [];
+    if (orderType === "manufacturing" && !rawOutputs.length) throw new ValidationError("Manufacturing requires explicit physical output pieces.");
+    const outputs = rawOutputs.map((raw) => {
+      if (!String(raw?.physicalEvidence || "").trim()) throw new ValidationError("Every physical output requires physical evidence.");
+      if (raw?.assetId || raw?.barcode) throw new ValidationError("Output Asset IDs and Barcodes are server-generated and cannot be reused.");
+      const piece = inventoryV2Runtime.normalizeReceiptPiece(raw);
+      if (raw.postWeight !== undefined && Number(raw.postWeight) !== Number(piece.grossWeight)) throw new ValidationError("Output postWeight must equal the recorded physical grossWeight.");
+      return piece;
+    });
+    const requestFingerprint = JSON.stringify({ orderType, reason, inputAssetIds: [...inputAssetIds].sort(), outputs: rawOutputs });
+    const existing = await models.sequelize.query("SELECT source_id FROM asset_events WHERE company_id=:companyId AND idempotency_key=:idempotencyKey LIMIT 1", { replacements: { companyId: req.companyId, idempotencyKey: `${idempotencyKey}:input:0` }, transaction, type: require("sequelize").QueryTypes.SELECT });
+    if (existing.length) {
+      const existingOrder = await models.ManufacturingOrder.findOne({ where: { id: existing[0].source_id, companyId: req.companyId }, transaction });
+      if (!existingOrder || existingOrder.inputAssets?.[0]?.requestFingerprint !== requestFingerprint) throw new ConflictError("Idempotency-Key body conflict.");
+      await transaction.commit();
+      return res.status(200).json({ success: true, replayed: true, data: { manufacturingOrderId: existingOrder.id, outputAssetIds: (existingOrder.outputAssets || []).map((item) => item.id) } });
+    }
+    const totalOutputWeight = outputs.reduce((sum, piece) => sum + Number(piece.grossWeight), 0);
+    const context = { ...inventoryV2Context(req, branchId), branchName: branch.name };
+    const orderedInputIds = [...inputAssetIds].sort();
+    const inputs = [];
+    for (const assetId of orderedInputIds) {
+      const asset = await findScopedInventoryV2Asset(req, assetId, branchId, transaction, { lock: true });
+      if (asset.operationalStatus !== "AVAILABLE") throw new ConflictError(`Asset ${asset.id} is not available for ${orderType}.`);
+      inputs.push(asset);
+    }
+    const totalInputWeight = inputs.reduce((sum, asset) => sum + Number(asset.grossWeight), 0);
+    if (outputs.length && totalOutputWeight > totalInputWeight) throw new ValidationError("Output physical weight cannot exceed the known input weight.");
+    const orderId = inventoryV2Runtime.newId(orderType === "melting" ? "IMMELT" : "IMMFG");
+    const now = context.occurredAt;
+    await models.ManufacturingOrder.create({
+      id: orderId, companyId: req.companyId, status: "completed", type: orderType === "melting" ? "melting" : "manufacturing",
+      inputAssets: inputs.map((asset, ordinal) => ({ id: asset.id, ordinal, preWeight: asset.grossWeight, operationalStatus: asset.operationalStatus, requestFingerprint: ordinal === 0 ? requestFingerprint : undefined })),
+      outputAssets: [], expectedOutputWeight: totalInputWeight, actualOutputWeight: totalOutputWeight || null,
+      processLoss: Math.max(0, totalInputWeight - totalOutputWeight), wastage: Math.max(0, totalInputWeight - totalOutputWeight),
+      branch: branch.name, notes: reason, startedAt: now.toISOString(), completedAt: now.toISOString(), createdBy: context.actorId || context.actorName, approvedBy: context.actorId || context.actorName,
+    }, { transaction });
+    for (let ordinal = 0; ordinal < inputs.length; ordinal += 1) {
+      const asset = inputs[ordinal];
+      await models.sequelize.query(`INSERT INTO manufacturing_order_inputs
+        (id,manufacturing_order_id,asset_id,company_id,ordinal,pre_weight,disposition)
+        VALUES (:id,:orderId,:assetId,:companyId,:ordinal,:preWeight,'MELTED')`, { replacements: { id: inventoryV2Runtime.newId("IMMFGIN"), orderId, assetId: asset.id, companyId: req.companyId, ordinal, preWeight: asset.grossWeight }, transaction });
+      await inventoryV2Runtime.transitionAsset({ models, transaction, asset, context, toStatus: "MELTED", eventType: orderType === "melting" ? "MELTED" : "MANUFACTURING_CONSUMED", movementType: orderType === "melting" ? "MELT_OUT" : "MANUFACTURING_OUT", sourceType: "MANUFACTURING_ORDER", sourceId: orderId, note: reason, idempotencyKey: `${idempotencyKey}:input:${ordinal}` });
+    }
+    const outputAssets = [];
+    for (let ordinal = 0; ordinal < outputs.length; ordinal += 1) {
+      const piece = outputs[ordinal];
+      const barcodeIdentity = await barcodeIdentityService.generateBarcodeForAsset({ companyId: req.companyId, assetType: piece.type, inventoryCode: piece.inventoryCode, itemCode: piece.itemCode, karat: piece.karat, inventorySubtype: piece.inventorySubtype || inventoryV2Runtime.legacySubtypeForProfile(piece.profile), transaction });
+      const asset = await models.Asset.create({
+        id: inventoryV2Runtime.newId("ASTV2MFG"), companyId: req.companyId, name: piece.name || `${orderType === "melting" ? "Melt" : "Manufactured"} output ${ordinal + 1}`,
+        type: piece.type, category: piece.category || "V2 transformation", karat: piece.karat, purity: piece.weights?.purityRatio ?? null,
+        grossWeight: piece.grossWeight, netWeight: piece.weights?.netGoldWeight ?? piece.grossWeight, goldWeight: piece.weights?.netGoldWeight ?? piece.grossWeight,
+        price: piece.salePrice ?? piece.purchaseCost, cost: piece.purchaseCost, branch: branch.name, branchId, location: piece.location || "", status: "available", ...barcodeIdentity,
+        inventorySubtype: piece.inventorySubtype || inventoryV2Runtime.legacySubtypeForProfile(piece.profile), metadataSchemaVersion: piece.metadataSchemaVersion || 1, metadata: { ...(piece.metadata || {}), physicalEvidence: piece.physicalEvidence },
+        source: orderType === "melting" ? "inventory_v2_melt_output" : "inventory_v2_manufacturing_output", manufacturingOrderId: orderId,
+        inventoryProfile: piece.profile, operationalStatus: "AVAILABLE", condition: piece.condition, conditionClassification: piece.condition === null ? "V2_PROFILE_NULLABLE" : "V2_EXPLICIT", tagState: "PENDING", tagStateClassification: "V2_TRANSFORMATION_INITIAL", description: piece.description || null, brand: piece.brand || null, model: piece.model || null, modelNumber: piece.modelNumber || null, purchaseDate: now.toISOString().slice(0, 10), createdBy: context.actorId || null, updatedBy: context.actorId || null,
+      }, { transaction });
+      const event = await inventoryV2Runtime.recordAssetEvent({ models, transaction, asset: asset.toJSON(), context, eventType: orderType === "melting" ? "MELT_OUTPUT_CREATED" : "MANUFACTURED", newStatus: "AVAILABLE", sourceType: "MANUFACTURING_ORDER", sourceId: orderId, note: reason, idempotencyKey: `${idempotencyKey}:output:${ordinal}` });
+      await inventoryV2Runtime.recordMovement({ models, transaction, asset: asset.toJSON(), context, movementType: orderType === "melting" ? "MELT_IN" : "MANUFACTURING_IN", sourceType: "MANUFACTURING_ORDER", sourceId: orderId, eventId: event.id, toBranchId: branchId, toLocationId: asset.locationId || null });
+      await inventoryV2Runtime.persistManufacturingEvidence({ models, transaction, asset: asset.toJSON(), piece, context, manufacturingOrderId: orderId });
+      await models.sequelize.query(`INSERT INTO manufacturing_order_outputs
+        (id,manufacturing_order_id,asset_id,company_id,ordinal,post_weight,process_loss)
+        VALUES (:id,:orderId,:assetId,:companyId,:ordinal,:postWeight,:processLoss)`, { replacements: { id: inventoryV2Runtime.newId("IMMFGOUT"), orderId, assetId: asset.id, companyId: req.companyId, ordinal, postWeight: piece.grossWeight, processLoss: null }, transaction });
+      for (const input of inputs) await models.sequelize.query(`INSERT INTO asset_lineage_links
+        (id,company_id,parent_asset_id,child_asset_id,relation_type,source_type,source_id,occurred_at)
+        VALUES (:id,:companyId,:parentAssetId,:childAssetId,:relationType,'MANUFACTURING_ORDER',:orderId,:occurredAt)`, { replacements: { id: inventoryV2Runtime.newId("IMLINEAGE"), companyId: req.companyId, parentAssetId: input.id, childAssetId: asset.id, relationType: orderType === "melting" ? "MELT_OUTPUT" : "MANUFACTURING_OUTPUT", orderId, occurredAt: now }, transaction });
+      outputAssets.push(asset);
+    }
+    await models.ManufacturingOrder.update({ outputAssets: outputAssets.map((asset, ordinal) => ({ id: asset.id, ordinal, postWeight: asset.grossWeight })) }, { where: { id: orderId }, transaction });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: `inventory_v2.${orderType}_completed`, description: `${orderType} order ${orderId} completed with ${inputs.length} inputs and ${outputAssets.length} outputs.`, sourceDocument: orderId, metadata: { inputAssetIds: inputs.map((asset) => asset.id), outputAssetIds: outputAssets.map((asset) => asset.id) } }), { transaction });
+    await transaction.commit();
+    return res.status(201).json({ success: true, data: { manufacturingOrderId: orderId, inputAssetIds: inputs.map((asset) => asset.id), outputAssetIds: outputAssets.map((asset) => asset.id), financialEffect: "NONE_DEFINED" } });
+  } catch (error) { await transaction.rollback(); return next(error); }
+}
+
+router.post("/inventory-v2/manufacturing-orders", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), (req, res, next) => executeInventoryV2Transformation(req, res, next, "manufacturing"));
+router.post("/inventory-v2/melt-orders", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), (req, res, next) => executeInventoryV2Transformation(req, res, next, "melting"));
+
+// A CGP document line remains the authority.  Conversion is permitted only
+// when the caller supplies matching physical-piece evidence; aggregate source
+// material is deliberately retained as a disposition with no invented Asset.
+router.post("/inventory-v2/cgp-items/:id/disposition", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const idempotencyKey = requireInventoryV2IdempotencyKey(req);
+    const disposition = String(req.body?.disposition || "").toUpperCase();
+    if (!["PENDING", "CONVERTED_TO_ASSET", "TRANSFER", "TRANSIT", "MELTED", "MISSING"].includes(disposition)) throw new ValidationError("CGP disposition is invalid.");
+    const item = await models.CustomerGoldPurchaseItem.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction, lock: true });
+    if (!item) throw new NotFoundError("Customer Gold Purchase item not found.");
+    const document = await models.CustomerGoldPurchaseDocument.findOne({ where: { id: item.documentId, companyId: req.companyId, branchId }, transaction, lock: true });
+    if (!document) throw new NotFoundError("CGP source document is not in the authorized Branch.");
+    if (document.status !== "approved") throw new ConflictError("Only an approved CGP source document can be disposed.");
+    const existing = await models.sequelize.query("SELECT * FROM cgp_item_dispositions WHERE cgp_item_id=:cgpItemId FOR UPDATE", { replacements: { cgpItemId: item.id }, transaction, type: require("sequelize").QueryTypes.SELECT });
+    const requestFingerprint = JSON.stringify({ disposition, physicalPiece: req.body?.physicalPiece || null, evidence: req.body?.evidence || null });
+    if (existing.length) {
+      let prior = null; try { prior = JSON.parse(existing[0].evidence); } catch { /* legacy text is non-replayable evidence */ }
+      if (prior?.idempotencyKey === idempotencyKey && prior?.requestFingerprint === requestFingerprint) { await transaction.commit(); return res.status(200).json({ success: true, replayed: true, data: existing[0] }); }
+      throw new ConflictError("CGP source item already has an immutable disposition.");
+    }
+    const context = inventoryV2Context(req, branchId);
+    let asset = null;
+    if (disposition === "CONVERTED_TO_ASSET") {
+      const rawPiece = req.body?.physicalPiece;
+      if (!rawPiece || !String(rawPiece.physicalEvidence || "").trim()) throw new ValidationError("CGP conversion requires exact physical-piece evidence.");
+      if (rawPiece.assetId || rawPiece.barcode) throw new ValidationError("CGP conversion Asset ID and Barcode are server-generated.");
+      if (String(rawPiece.profile || "").toUpperCase() === "CGP_CUSTOMER_GOLD_PURCHASE") throw new ValidationError("CGP source profile cannot fabricate a physical Asset profile; choose the verified target profile.");
+      const grossMatches = Number(rawPiece.grossWeight) === Number(item.grossWeight);
+      const stoneMatches = Number(rawPiece.stoneWeight ?? 0) === Number(item.stoneWeight);
+      const karatMatches = Number(rawPiece.karat) === Number(item.karat);
+      if (!grossMatches || !stoneMatches || !karatMatches) throw new ConflictError("CGP physical evidence must match the approved source line exactly.");
+      if (item.proposedRate === null || item.proposedRate === undefined) throw new ConflictError("CGP source has no approved economic rate.");
+      const derivedCost = Number(item.netWeight) * Number(item.proposedRate);
+      const piece = inventoryV2Runtime.normalizeReceiptPiece({ ...rawPiece, purchaseCost: derivedCost, goldValue: derivedCost });
+      const branch = await models.Branch.findOne({ where: { id: branchId, companyId: req.companyId, isActive: true }, transaction });
+      if (!branch) throw new NotFoundError("Authorized Branch not found.");
+      const barcodeIdentity = await barcodeIdentityService.generateBarcodeForAsset({ companyId: req.companyId, assetType: piece.type, inventoryCode: piece.inventoryCode, itemCode: piece.itemCode, karat: piece.karat, inventorySubtype: piece.inventorySubtype || inventoryV2Runtime.legacySubtypeForProfile(piece.profile), transaction });
+      asset = await models.Asset.create({
+        id: inventoryV2Runtime.newId("ASTV2CGP"), companyId: req.companyId, name: piece.name || `CGP conversion ${item.id}`, type: piece.type, category: piece.category || "CGP conversion", karat: piece.karat, purity: piece.weights?.purityRatio ?? null,
+        grossWeight: piece.grossWeight, netWeight: piece.weights?.netGoldWeight ?? piece.grossWeight, goldWeight: piece.weights?.netGoldWeight ?? piece.grossWeight, price: piece.salePrice ?? piece.purchaseCost, cost: piece.purchaseCost,
+        branch: branch.name, branchId, location: piece.location || "", status: "available", ...barcodeIdentity, inventorySubtype: piece.inventorySubtype || inventoryV2Runtime.legacySubtypeForProfile(piece.profile), metadataSchemaVersion: piece.metadataSchemaVersion || 1, metadata: { ...(piece.metadata || {}), physicalEvidence: piece.physicalEvidence, cgpItemId: item.id }, source: "inventory_v2_cgp_conversion",
+        inventoryProfile: piece.profile, operationalStatus: "AVAILABLE", condition: piece.condition, conditionClassification: piece.condition === null ? "V2_PROFILE_NULLABLE" : "V2_EXPLICIT", tagState: "PENDING", tagStateClassification: "V2_CGP_CONVERSION_INITIAL", purchaseDate: context.occurredAt.toISOString().slice(0, 10), createdBy: context.actorId || null, updatedBy: context.actorId || null,
+      }, { transaction });
+      const event = await inventoryV2Runtime.recordAssetEvent({ models, transaction, asset: asset.toJSON(), context: { ...context, branchName: branch.name }, eventType: "CGP_CONVERTED_TO_ASSET", newStatus: "AVAILABLE", sourceType: "CGP_ITEM", sourceId: item.id, note: String(rawPiece.physicalEvidence), idempotencyKey });
+      await inventoryV2Runtime.recordMovement({ models, transaction, asset: asset.toJSON(), context, movementType: "CGP_CONVERSION_IN", sourceType: "CGP_ITEM", sourceId: item.id, eventId: event.id, toBranchId: branchId, toLocationId: asset.locationId || null });
+      await inventoryV2Runtime.persistManufacturingEvidence({ models, transaction, asset: asset.toJSON(), piece, context, cgpItemId: item.id, originType: "CGP" });
+    }
+    const evidence = JSON.stringify({ idempotencyKey, requestFingerprint, evidence: req.body?.evidence || null, physicalEvidence: req.body?.physicalPiece?.physicalEvidence || null, sourceDocumentId: document.id });
+    const dispositionId = inventoryV2Runtime.newId("IMCGPDISP");
+    await models.sequelize.query(`INSERT INTO cgp_item_dispositions
+      (id,cgp_item_id,company_id,branch_id,disposition,asset_id,gold_pool_id,evidence,decided_at,decided_by)
+      VALUES (:id,:cgpItemId,:companyId,:branchId,:disposition,:assetId,NULL,:evidence,:decidedAt,:decidedBy)`, { replacements: { id: dispositionId, cgpItemId: item.id, companyId: req.companyId, branchId, disposition, assetId: asset?.id || null, evidence, decidedAt: context.occurredAt, decidedBy: context.actorId || null }, transaction });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory_v2.cgp_disposition", description: `CGP item ${item.id} disposition ${disposition}.`, sourceDocument: item.documentId, metadata: { cgpItemId: item.id, disposition, assetId: asset?.id || null } }), { transaction });
+    await transaction.commit();
+    return res.status(201).json({ success: true, data: { dispositionId, cgpItemId: item.id, disposition, assetId: asset?.id || null, financialEffect: "NONE_DEFINED" } });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+// This guard is deliberately registered before generic CRUD. A completed V2
+// audit is evidence, and a closed one is immutable; neither may be erased by
+// the older stock-audit management surface.
+router.delete("/stock-audits/:id", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  try {
+    const audit = await models.StockAudit.findOne({ where: { id: req.params.id, companyId: req.companyId } });
+    if (!audit) throw new NotFoundError("Stock audit not found.");
+    if (["completed", "closed"].includes(audit.status)) throw new ConflictError("Completed and closed inventory audits are immutable evidence.");
+    return next();
+  } catch (error) { return next(error); }
+});
+
 setupCrud("assets", models.Asset, ["name", "barcode", "rfid", "category", "location"]);
 setupCrud("companies", models.Company, ["businessName", "workspace"]);
 setupCrud("products", models.Product, ["productName", "productCode", "description"]);
@@ -6123,9 +7356,10 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       if (!Number.isFinite(quantity) || quantity <= 0) throw new ValidationError(`كمية البند رقم ${index + 1} غير صحيحة`);
       if (!Number.isInteger(quantity)) throw new ValidationError(`كمية البند رقم ${index + 1} يجب أن تكون رقمًا صحيحًا`);
       if (!Number.isFinite(weightPerUnit) || weightPerUnit <= 0) throw new ValidationError(`وزن الوحدة للبند رقم ${index + 1} غير صحيح`);
-      if (!Number.isFinite(unitCost) || unitCost < 0) throw new ValidationError(`سعر التكلفة للبند رقم ${index + 1} غير صحيح`);
+      const isV2PieceItem = body.inventoryV2 === true || Array.isArray(item.perPiece);
+      if (!Number.isFinite(unitCost) || unitCost < 0 || (!isV2PieceItem && unitCost === 0)) throw new ValidationError(`سعر التكلفة للبند رقم ${index + 1} غير صحيح`);
       if (karat !== null && !validKarats.has(karat)) throw new ValidationError(`عيار البند رقم ${index + 1} غير صحيح`);
-      if (unitCost === 0) {
+      if (!isV2PieceItem && unitCost === 0) {
         throw new ValidationError(`بيانات البند رقم ${index + 1} غير صحيحة`);
       }
 
@@ -6153,6 +7387,47 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       };
     });
 
+    // Inventory Master V2 has an explicit serialized-piece contract.  It is
+    // deliberately opt-in for compatibility, but once requested it cannot
+    // fall back to Product quantity stock or inferred repeated item data.
+    const settings = await settingsService.getCompanySettings(req.companyId, { transaction: t });
+    const inventoryV2Target = body.inventoryV2 === true || normalizedItems.some((item) => Array.isArray(item.perPiece));
+    if (inventoryV2Target) {
+      if (normalizedItems.some((item) => item.productCode || item.productId)) {
+        throw new ValidationError("Inventory V2 receipt must not use Product identity for physical pieces.");
+      }
+      const vatRateDefault = await goldValuationService.resolveConfiguredVatRate({ models, companyId: req.companyId, transaction: t });
+      let rawPieceSets;
+      try {
+        rawPieceSets = inventoryV2Runtime.requireV2ReceiptPieces(normalizedItems, { vatRateDefault });
+      } catch (error) {
+        throw new ValidationError(error.message || "Inventory V2 receipt piece validation failed.");
+      }
+      // Resolve the selected canonical Pearl Size while the receipt transaction
+      // is still open.  The normalized component stores the approved display
+      // value, not an unchecked free-text value from the Receive form.
+      const pieceSets = await Promise.all(rawPieceSets.map(async (pieces) => Promise.all(pieces.map(async (piece) => {
+        if (piece.profile !== "LOOSE_PEARL") return piece;
+        if (!piece.looseDetails?.pearlSizeId && !piece.looseDetails?.pearlSize) return piece;
+        const master = await pearlSizeMasterDataService.requireActive({
+          models, companyId: req.companyId,
+          pearlSizeId: piece.looseDetails?.pearlSizeId,
+          pearlSize: piece.looseDetails?.pearlSize,
+          transaction: t,
+        });
+        return Object.freeze({ ...piece, looseDetails: Object.freeze({ ...piece.looseDetails, pearlSize: master.displayValue, pearlSizeId: master.id, pearlSizeMaster: master }) });
+      }))));
+      normalizedItems.forEach((item, itemIndex) => {
+        const pieces = pieceSets[itemIndex];
+        item.v2Pieces = pieces;
+        item.totalCost = Math.round(pieces.reduce((sum, piece) => sum + piece.purchaseCost, 0) * 100) / 100;
+        item.unitCost = item.totalCost / pieces.length;
+        item.cost = item.unitCost;
+        item.totalWeight = Math.round(pieces.reduce((sum, piece) => sum + piece.grossWeight, 0) * 10000) / 10000;
+        item.weightPerUnit = item.totalWeight / pieces.length;
+      });
+    }
+
     const goodsTotal = Math.round(normalizedItems.reduce((sum, item) => sum + item.totalCost, 0) * 100) / 100;
     const totalWeight = Math.round(normalizedItems.reduce((sum, item) => sum + item.totalWeight, 0) * 10000) / 10000;
 
@@ -6161,7 +7436,6 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
     // a DRC/RCM flag) AND vatEnabled in settings; otherwise the default path is
     // byte-identical to before (no VAT, Case A). Settings supply the defaults for
     // the requested values. `goodsTotal` (sum of item costs) is the pre-VAT base.
-    const settings = await settingsService.getCompanySettings(req.companyId, { transaction: t });
     const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
     const rcmRequested = Boolean(body.isRcm || body.isDRC || body.reverseVat || body.useReverseCharge);
     const vatRequested = (rcmRequested || body.applyVat === true) && settings.vatEnabled !== false;
@@ -6169,6 +7443,16 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
     let taxBaseSnap = 0, vatRateSnap = 0, inputVatSnap = 0, taxIncludedSnap = false;
     let isRecoverableSnap = true, isRcmSnap = false, rcmVatSnap = 0, rcmRateSnap = 0;
     let total = goodsTotal; // amount payable to the supplier (gross for normal VAT; taxBase for RCM/no-VAT)
+    // V2 piece contracts may carry server-calculated VAT facts.  They are
+    // already included in `piece.purchaseCost`; re-applying the header VAT
+    // would double-tax the supplier payable.  Accept only one exact rate for a
+    // single PO until the canonical document model supports per-line tax rates.
+    const v2PieceVat = inventoryV2Target ? normalizedItems.flatMap((item) => item.v2Pieces || []).map((piece) => piece.vat).filter(Boolean) : [];
+    const explicitV2Vat = vatRequested && !rcmRequested && v2PieceVat.length > 0 && v2PieceVat.every((vat) => Number(vat.vatRate) > 0);
+    if (explicitV2Vat) {
+      const rates = new Set(v2PieceVat.map((vat) => Number(vat.vatRate).toFixed(8)));
+      if (rates.size !== 1) throw new ValidationError("Inventory V2 receipt requires one VAT rate per purchase document.");
+    }
 
     if (vatRequested && rcmRequested) {
       // Case D — RCM/DRC: supplier price carries NO VAT; buyer self-accounts (net-zero).
@@ -6184,6 +7468,13 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       rcmVatSnap = r2(taxBaseSnap * rcmRate / 100);
       inputVatSnap = 0;
       total = taxBaseSnap; // PO.total = taxBase (no VAT paid to supplier under RCM)
+    } else if (explicitV2Vat) {
+      vatRateSnap = Number(v2PieceVat[0].vatRate);
+      taxIncludedSnap = true;
+      isRecoverableSnap = Boolean(body.isRecoverable ?? settings.purchaseVatRecoverableDefault ?? true);
+      inputVatSnap = r2(v2PieceVat.reduce((sum, vat) => sum + Number(vat.vatAmount || 0), 0));
+      taxBaseSnap = r2(goodsTotal - inputVatSnap);
+      total = goodsTotal;
     } else if (vatRequested) {
       // Case B/C — ordinary purchase VAT.
       const vatRate = Number(body.vatRate ?? settings.purchaseVatRate ?? settings.vatRate ?? 0);
@@ -6351,7 +7642,7 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
         : (Number(item.goldWeight ?? item.netWeight ?? item.weightPerUnit) || 0);
       const itemKarat = item.karat == null || item.karat === "" ? null : item.karat;
       const itemPerGram = await perGramFor(itemKarat);
-      if (item.productCode) {
+      if (item.productCode && !inventoryV2Target) {
         hasProducts = true;
         const productCode = String(item.productCode).trim();
         let product = await models.Product.findOne({
@@ -6453,65 +7744,105 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
         // for the asset path, so it applies to both the Asset and its poItem).
         // Phase 15G — currentCost = capitalised per-piece cost (legacy unless
         // non-recoverable VAT capitalisation applies).
-        const assetSnap = await governSnapshot(goldCostService.buildGoldCostSnapshot({
-          goldCostSource, weight: perUnitGoldWeight, karat: itemKarat,
-          perGram: itemPerGram, currentCost: capUnitCost,
-        }), item, itemIndex);
         for (let qtyIndex = 0; qtyIndex < item.quantity; qtyIndex++) {
+          const v2Piece = inventoryV2Target ? item.v2Pieces[qtyIndex] : null;
+          // Recoverable V2 input VAT is a tax receivable, not Asset book cost.
+          // The immutable purchase revision retains the gross source evidence;
+          // the operational Asset/COGS cost remains the canonical net basis.
+          const effectiveCost = v2Piece
+            ? (isRecoverableSnap && !isRcmSnap ? Number(v2Piece.purchaseCost) - Number(v2Piece.vat?.vatAmount || 0) : v2Piece.purchaseCost)
+            : capUnitCost;
+          const assetSnap = await governSnapshot(goldCostService.buildGoldCostSnapshot({
+            goldCostSource, weight: v2Piece?.weights?.netGoldWeight ?? perUnitGoldWeight, karat: v2Piece?.karat ?? itemKarat,
+            perGram: itemPerGram, currentCost: effectiveCost,
+          }), item, itemIndex);
           const sequence = item.quantity > 1 ? `-${qtyIndex + 1}` : "";
           const assetId = item.quantity === 1 && item.assetId
             ? item.assetId
             : `AST-PUR-${Date.now()}-${itemIndex + 1}-${qtyIndex + 1}-${Math.random().toString(36).slice(2, 6)}`;
           const barcodeIdentity = await barcodeIdentityService.generateBarcodeForAsset({
             companyId: req.companyId,
-            assetType: item.type,
-            inventoryCode: item.inventoryCode,
-            itemCode: item.itemCode,
-            karat: item.karat,
-            inventorySubtype: item.inventorySubtype,
+            assetType: v2Piece?.type || item.type,
+            inventoryCode: v2Piece?.inventoryCode || item.inventoryCode,
+            itemCode: v2Piece?.itemCode || item.itemCode,
+            karat: v2Piece?.karat ?? item.karat,
+            inventorySubtype: v2Piece?.inventorySubtype || item.inventorySubtype,
             transaction: t,
           });
           const asset = await models.Asset.create({
             id: assetId,
             companyId: req.companyId,
-            name: item.quantity > 1 ? `${item.name} ${qtyIndex + 1}` : item.name,
-            type: item.type,
-            category: item.category,
-            karat: item.karat || null,
-            purity: item.purity || null,
-            grossWeight: item.weightPerUnit,
-            netWeight: item.netWeight,
-            goldWeight: item.goldWeight || item.netWeight,
-            price: item.price,
+            name: v2Piece?.name || (item.quantity > 1 ? `${item.name} ${qtyIndex + 1}` : item.name),
+            type: v2Piece?.type || item.type,
+            category: v2Piece?.category || item.category,
+            karat: v2Piece?.karat ?? item.karat ?? null,
+            purity: v2Piece?.weights?.purityRatio ?? item.purity ?? null,
+            grossWeight: v2Piece?.grossWeight ?? item.weightPerUnit,
+            netWeight: v2Piece?.weights?.netGoldWeight ?? v2Piece?.grossWeight ?? item.netWeight,
+            goldWeight: v2Piece?.weights?.netGoldWeight ?? v2Piece?.grossWeight ?? item.goldWeight ?? item.netWeight,
+            price: v2Piece?.salePrice ?? item.price,
             // Phase 15G — capitalised book cost (legacy unless non-recoverable VAT).
-            cost: capUnitCost,
+            cost: effectiveCost,
             branch: branch.name,
             branchId: branch.id,
-            location: item.location,
+            location: v2Piece?.location || item.location || "",
+            locationId: v2Piece?.locationId || null,
             status: "available",
             ...barcodeIdentity,
-            inventorySubtype: item.inventorySubtype || null,
-            metadataSchemaVersion: item.metadataSchemaVersion || 1,
-            metadata: item.metadata || {},
+            inventorySubtype: v2Piece?.inventorySubtype || inventoryV2Runtime.legacySubtypeForProfile(v2Piece?.profile) || item.inventorySubtype || null,
+            metadataSchemaVersion: v2Piece?.metadataSchemaVersion || item.metadataSchemaVersion || 1,
+            metadata: v2Piece ? {
+              ...(v2Piece.metadata || item.metadata || {}),
+              profileContract: {
+                goldColor: v2Piece.goldColor,
+                supplierReference: v2Piece.supplierReference,
+                locationId: v2Piece.locationId,
+                rfid: v2Piece.rfid,
+                certificate: v2Piece.certificate,
+              },
+            } : (item.metadata || {}),
             source: "supplier_purchase",
-            notes: [item.notes, body.notes, `Supplier: ${supplier.name}`, `Purchase: ${purchaseOrderId}`, drcNote].filter(Boolean).join(" | "),
+            notes: [v2Piece?.notes, item.notes, body.notes, `Supplier: ${supplier.name}`, `Purchase: ${purchaseOrderId}`, drcNote].filter(Boolean).join(" | "),
+            ...(v2Piece ? {
+              inventoryProfile: v2Piece.profile,
+              operationalStatus: "AVAILABLE",
+              condition: v2Piece.condition,
+              conditionClassification: v2Piece.condition === null ? "V2_PROFILE_NULLABLE" : "V2_EXPLICIT",
+              tagState: "PENDING",
+              tagStateClassification: "V2_RECEIPT_INITIAL",
+              description: v2Piece.description,
+              brand: v2Piece.brand || null,
+              model: v2Piece.model || null,
+              modelNumber: v2Piece.modelNumber || null,
+              supplierId: supplier.id,
+              purchaseDate: dateStr,
+              createdBy: req.user?.id || null,
+              updatedBy: req.user?.id || null,
+            } : {}),
             // Phase 15E snapshot + Phase 15F governed override (legacy Asset.cost
             // unchanged).
             ...assetSnap
           }, { transaction: t });
           createdAssets.push(asset.toJSON());
 
-          await models.AssetEvent.create({
-            id: `ASE-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            assetId,
-            action: "PURCHASE_RECEIVED",
-            date: dateStr,
-            user: actor,
-            branch: branch.name,
-            note: `تم استلام الأصل من المورد ${supplier.name} بموجب أمر الشراء ${purchaseOrderId}`,
-            sourceDocument: purchaseOrderId,
-            severity: "info"
-          }, { transaction: t });
+          const receiptEvent = v2Piece
+            ? await inventoryV2Runtime.recordAssetEvent({
+              models, transaction: t, asset: asset.toJSON(),
+              context: { companyId: req.companyId, branchId: branch.id, branchName: branch.name, actorId: req.user?.id || null, actorName: actor, occurredAt: now },
+              eventType: "PURCHASE_RECEIVED", newStatus: "AVAILABLE", sourceType: "PURCHASE_ORDER", sourceId: purchaseOrderId,
+              note: `Received V2 Asset from supplier ${supplier.name} under PO ${purchaseOrderId}`, idempotencyKey: `${idempotencyKey}:${assetId}`,
+            })
+            : await models.AssetEvent.create({
+              id: `ASE-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              assetId,
+              action: "PURCHASE_RECEIVED",
+              date: dateStr,
+              user: actor,
+              branch: branch.name,
+              note: `تم استلام الأصل من المورد ${supplier.name} بموجب أمر الشراء ${purchaseOrderId}`,
+              sourceDocument: purchaseOrderId,
+              severity: "info"
+            }, { transaction: t });
 
           const poItem = await models.PurchaseOrderItem.create({
             id: `POI-${Date.now()}-${itemIndex + 1}-${qtyIndex + 1}`,
@@ -6528,6 +7859,11 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
             // snapshot as the asset; item.cost === item.unitCost here).
             ...assetSnap
           }, { transaction: t });
+          if (v2Piece) {
+            const evidenceContext = { companyId: req.companyId, branchId: branch.id, branchName: branch.name, supplierId: supplier.id, purchaseDate: dateStr, currency: settings.currency, vatRateDefault: settings.purchaseVatRate ?? settings.vatRate ?? null, actorId: req.user?.id || null, actorName: actor, occurredAt: now };
+            await inventoryV2Runtime.persistReceiptEvidence({ models, transaction: t, asset: asset.toJSON(), poItem: poItem.toJSON(), piece: v2Piece, context: evidenceContext });
+            await inventoryV2Runtime.recordMovement({ models, transaction: t, asset: asset.toJSON(), context: evidenceContext, movementType: "PURCHASE_RECEIVE", sourceType: "PURCHASE_ORDER", sourceId: purchaseOrderId, eventId: receiptEvent.id, toBranchId: branch.id, toLocationId: asset.locationId || null });
+          }
           createdItems.push(poItem.toJSON());
         }
       }
@@ -8317,6 +9653,156 @@ function normalizeCustomerCreditApplyPayload(req, defaultCurrency = "AED") {
   };
 }
 
+// Historical installment overpayment remediation: derives the exact overage
+// from the immutable original collection history. The client supplies only the
+// original payment reference; no client amount or Treasury movement is allowed.
+router.post("/installment-collections/:paymentId/reclassify-overpayment", authMiddleware, requireBusinessPermission("accounting.post", { touch: true }), async (req, res, next) => {
+  try {
+    const effectiveBranchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"] || req.branchId, { required: true });
+    const originalPaymentId = String(req.params.paymentId || "").trim();
+    if (!originalPaymentId) throw new ValidationError("Original collection event is required.");
+    const idempotencyKey = req.headers["idempotency-key"];
+    if (!idempotencyKey || !String(idempotencyKey).trim()) {
+      return res.status(400).json({ success: false, message: "Idempotency-Key is required for overpayment reclassification." });
+    }
+    const idemScope = "installment.overpayment_reclassification";
+    const idemRequestHash = idempotencyService.hashRequest(idemScope, {
+      companyId: req.companyId,
+      branchId: effectiveBranchId,
+      originalPaymentId,
+    }, req.params);
+    const actor = { id: req.user?.id || null, name: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System" };
+    let idemResponseBody = null;
+    try {
+      await models.sequelize.transaction(async (t) => {
+        const claim = await idempotencyService.claim({ models, companyId: req.companyId, scope: idemScope, key: String(idempotencyKey).trim(), requestHash: idemRequestHash, transaction: t });
+        if (!claim.claimed) {
+          const duplicate = new Error("__IDEM_DUPLICATE__");
+          duplicate.__idemDuplicate = true;
+          throw duplicate;
+        }
+        const result = await installmentOverpaymentReclassificationService.reclassifyInstallmentOverpayment({
+          models,
+          companyId: req.companyId,
+          branchId: effectiveBranchId,
+          originalPaymentId,
+          transaction: t,
+          actor,
+        });
+        idemResponseBody = {
+          success: true,
+          data: {
+            customerCreditTransaction: result.creditRow,
+            source: "installment_overpayment_reclassification",
+            treasuryDelta: "0.0000",
+          },
+        };
+        await idempotencyService.succeed({ request: claim.request, statusCode: 201, responseBody: idemResponseBody, transaction: t });
+      });
+    } catch (error) {
+      if (error?.__idemDuplicate) {
+        const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope: idemScope, key: String(idempotencyKey).trim(), requestHash: idemRequestHash });
+        if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+        return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+      }
+      throw error;
+    }
+    emitEntityChanged(req.companyId, {
+      entity: "CustomerCreditTransaction",
+      action: "installment-overpayment-reclassification",
+      id: idemResponseBody?.data?.customerCreditTransaction?.id,
+      branchId: effectiveBranchId,
+    });
+    return res.status(201).json(idemResponseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Historical installment precision remediation. The client supplies only the
+// immutable original Payment reference. The service derives and validates the
+// exact mismatch, mapped Treasury account, AR account, and correction Journal;
+// no Treasury row or original financial row is rewritten.
+router.post("/installment-collections/:paymentId/remediate-precision", authMiddleware, requireBusinessPermission("accounting.post", { touch: true }), async (req, res, next) => {
+  try {
+    const effectiveBranchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"] || req.branchId, { required: true });
+    const originalPaymentId = String(req.params.paymentId || "").trim();
+    if (!originalPaymentId) throw new ValidationError("Original collection event is required.");
+    const idempotencyKey = req.headers["idempotency-key"];
+    if (!idempotencyKey || !String(idempotencyKey).trim()) {
+      return res.status(400).json({ success: false, message: "Idempotency-Key is required for installment precision remediation." });
+    }
+
+    const idemScope = "installment.precision_remediation";
+    const reason = String(req.body?.reason || "").trim().slice(0, 200);
+    const idemRequestHash = idempotencyService.hashRequest(idemScope, {
+      companyId: req.companyId,
+      branchId: effectiveBranchId,
+      originalPaymentId,
+      reason,
+    }, req.params);
+    const actor = { id: req.user?.id || null, name: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System" };
+    let idemResponseBody = null;
+    try {
+      await models.sequelize.transaction(async (t) => {
+        const claim = await idempotencyService.claim({
+          models,
+          companyId: req.companyId,
+          scope: idemScope,
+          key: String(idempotencyKey).trim(),
+          requestHash: idemRequestHash,
+          transaction: t,
+        });
+        if (!claim.claimed) {
+          const duplicate = new Error("__IDEM_DUPLICATE__");
+          duplicate.__idemDuplicate = true;
+          throw duplicate;
+        }
+
+        const result = await installmentPrecisionRemediationService.remediateInstallmentPrecision({
+          models,
+          companyId: req.companyId,
+          branchId: effectiveBranchId,
+          originalPaymentId,
+          transaction: t,
+          actor,
+        });
+        idemResponseBody = {
+          success: true,
+          data: {
+            ...result,
+            reason: "installment precision remediation",
+          },
+        };
+        await idempotencyService.succeed({ request: claim.request, statusCode: 201, responseBody: idemResponseBody, transaction: t });
+      });
+    } catch (error) {
+      if (error?.__idemDuplicate) {
+        const prior = await idempotencyService.resolveExisting({
+          models,
+          companyId: req.companyId,
+          scope: idemScope,
+          key: String(idempotencyKey).trim(),
+          requestHash: idemRequestHash,
+        });
+        if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+        return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+      }
+      throw error;
+    }
+
+    emitEntityChanged(req.companyId, {
+      entity: "JournalEntry",
+      action: "installment-precision-remediation",
+      id: idemResponseBody?.data?.journalEntryId,
+      branchId: effectiveBranchId,
+    });
+    return res.status(201).json(idemResponseBody);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post("/customers/:id/credit/deposit", authMiddleware, requireBusinessPermission("treasury.update", { touch: true }), async (req, res, next) => {
   try {
     const settings = await settingsService.getCompanySettings(req.companyId);
@@ -8953,6 +10439,23 @@ router.post("/invoices/:id/apply-customer-credit", authMiddleware, requireBusine
 // status="posted" → included, which is the correct net financial effect.
 // ─────────────────────────────────────────────────────────────────────────────
 const round4 = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
+
+// Monetary collection values are stored as DECIMAL(15,4). Keep installment
+// validation in integer ten-thousandths so a binary floating-point tolerance
+// can never accept more than the persisted outstanding amount.
+const MONEY_TEN_THOUSANDTHS = 10000n;
+const MONEY_DECIMAL_15_4 = /^(?:0|[1-9]\d*)(?:\.\d{1,4})?$/;
+function moneyToTenThousandths(value) {
+  const text = String(value ?? "").trim();
+  if (!MONEY_DECIMAL_15_4.test(text)) return null;
+  const [whole, fraction = ""] = text.split(".");
+  return BigInt(whole) * MONEY_TEN_THOUSANDTHS + BigInt(`${fraction}0000`.slice(0, 4));
+}
+function moneyFromTenThousandths(units) {
+  const whole = units / MONEY_TEN_THOUSANDTHS;
+  const fraction = (units % MONEY_TEN_THOUSANDTHS).toString().padStart(4, "0");
+  return `${whole}.${fraction}`;
+}
 const isValidYmd = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(new Date(s).getTime());
 const safeJson = (value) => {
   if (!value) return null;
@@ -11577,6 +13080,10 @@ router.post(
     resolveBranchId: (req) => (req.body && req.body.branchId) || req.headers["x-branch-id"] || req.branchId
   }),
   async (req, res, next) => {
+  // Compatibility adapter only; the former route-local sale/return writes
+  // below are retained temporarily as unreachable historical reference.
+  return executeLegacyInstantInvoiceAdapter(req, res, next);
+
   try {
     const body = req.body || {};
     const commandActor = commandActorContext.fromRequest(req, {
@@ -11685,10 +13192,8 @@ router.post(
         stoneValue: item.stoneValue || 0
       });
       if (item.assetId || item.id) {
-        await models.Asset.update(
-          { status: "sold" },
-          { where: { id: item.assetId || item.id, companyId: req.companyId } }
-        );
+        // The legacy body remains only for response/history compatibility.
+        // The reachable adapter above owns the Asset sale transition.
       }
     }
 
@@ -12235,13 +13740,16 @@ router.post(
         }, { transaction: t });
       } else {
         const asset = v.asset;
-        await asset.update({ status: "sold" }, { transaction: t });
-        await models.AssetEvent.create({
-          id: `ASE-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          assetId: asset.id, action: "SALE", date: nowStr.slice(0, 10), user: actor,
-          branch: branchRecord.name, note: `تم البيع بموجب الفاتورة رقم ${invoice.id}`,
-          sourceDocument: invoice.id, beforeState: "status:available", afterState: "status:sold"
-        }, { transaction: t });
+        if (asset.inventoryProfile) await inventoryV2Runtime.linkInvoiceAsset({
+          models, transaction: t, invoiceItemId: v.di.id, asset: asset.toJSON(), companyId: req.companyId, ordinal: 1,
+          quoteSnapshot: { price: v.price, discount: v.di.discount, makingCharge: v.di.makingCharge, stoneValue: v.di.stoneValue, vatRate: totals.vatRate, cost: v.cost, invoiceId: invoice.id },
+        });
+        await inventoryV2Runtime.transitionAsset({
+          models, transaction: t, asset,
+          context: { companyId: req.companyId, branchId, branchName: branchRecord.name, actorId: commandActor.technicalUserId || req.user?.id || null, actorName: actor, occurredAt: new Date() },
+          toStatus: "SOLD", eventType: "SALE", movementType: "SALE", sourceType: "INVOICE", sourceId: invoice.id,
+          note: `Sold under posted draft invoice ${invoice.id}`, idempotencyKey: `invoice-post:${invoice.id}:${asset.id}`,
+        });
       }
     }
 
@@ -13040,33 +14548,14 @@ router.post(
       req.params
     );
 
-    if (inst.status === "paid") {
-      return res.status(409).json({ success: false, message: "القسط مدفوع بالفعل" });
-    }
-
-    const remaining = round4(parseFloat(inst.amount) - parseFloat(inst.paidAmount || 0));
-
-    // Phase 10P: strict amount validation BEFORE any update/create/posting. The
-    // old `Number(req.body.amount) || due` shortcut treated 0 / NaN / missing as
-    // a full payment, which (now that a Payment row is created) could record a
-    // Payment of the wrong value. amount must be an explicit finite number > 0,
-    // and a full payment must send amount = remaining explicitly (no shortcut).
-    const amount = Number(req.body.amount);
-    if (
-      req.body.amount === undefined ||
-      req.body.amount === null ||
-      req.body.amount === "" ||
-      !Number.isFinite(amount) ||
-      amount <= 0
-    ) {
+    // Decimal(15,4) collection contract: parse the submitted value exactly
+    // once. A request with more than four fractional digits is invalid rather
+    // than silently rounded into a different posted amount.
+    const requestedAmountUnits = moneyToTenThousandths(req.body.amount);
+    if (requestedAmountUnits === null || requestedAmountUnits <= 0n) {
       return res.status(422).json({ success: false, message: "Payment amount must be greater than zero" });
     }
-    if (amount > remaining + 0.01) {
-      return res.status(422).json({
-        success: false,
-        message: `Overpayment rejected: amount ${amount} exceeds remaining ${remaining}`,
-      });
-    }
+    const amount = moneyFromTenThousandths(requestedAmountUnits);
     const method = req.body.paymentMethod || "Cash";
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
 
@@ -13112,8 +14601,37 @@ router.post(
         }
         const idemRequest = idemClaim.request;
 
+        // Re-read and lock the authoritative aggregate before deriving its
+        // outstanding amount. Concurrent collections for this installment now
+        // serialize here, so the second request observes the first commit.
+        const lockedInst = await models.Installment.findOne({
+          where: { id: req.params.id, companyId: req.companyId },
+          transaction: t,
+          lock: { level: t.LOCK.UPDATE, of: models.Installment }
+        });
+        if (!lockedInst) throw new NotFoundError("القسط غير موجود");
+        if (lockedInst.status === "paid") throw new ConflictError("القسط مدفوع بالفعل");
+
+        const installmentAmountUnits = moneyToTenThousandths(lockedInst.amount);
+        const paidAmountUnits = moneyToTenThousandths(lockedInst.paidAmount || 0);
+        if (installmentAmountUnits === null || paidAmountUnits === null) {
+          throw new AppError("Installment monetary state is invalid.", 409, "INSTALLMENT_MONETARY_STATE_INVALID");
+        }
+        const outstandingUnits = installmentAmountUnits - paidAmountUnits;
+        if (outstandingUnits <= 0n) throw new ConflictError("القسط مدفوع بالفعل");
+        if (requestedAmountUnits > outstandingUnits) {
+          throw new AppError(
+            "Overpayment rejected: amount exceeds the authoritative outstanding balance.",
+            422,
+            "INSTALLMENT_COLLECTION_AMOUNT_EXCEEDS_OUTSTANDING"
+          );
+        }
+        const newPaidUnits = paidAmountUnits + requestedAmountUnits;
+        const newPaid = moneyFromTenThousandths(newPaidUnits);
+        const status = newPaidUnits >= installmentAmountUnits ? "paid" : "partial";
+
         const invoice = await models.Invoice.findOne({
-          where: { id: inst.invoiceId, companyId: req.companyId },
+          where: { id: lockedInst.invoiceId, companyId: req.companyId },
           transaction: t,
           lock: { level: t.LOCK.UPDATE, of: models.Invoice }
         });
@@ -13126,7 +14644,7 @@ router.post(
           transaction: t
         });
 
-        const customerId = inst.customerId || invoice.customerId;
+        const customerId = lockedInst.customerId || invoice.customerId;
         const customer = customerId
           ? await models.Customer.findOne({
               where: { id: customerId, companyId: req.companyId },
@@ -13136,51 +14654,62 @@ router.post(
           : null;
         if (customerId && !customer) throw new NotFoundError("العميل المرتبط بالقسط غير موجود");
 
-        await inst.update({
+        const invoiceRemainingUnits = moneyToTenThousandths(invoice.remainingAmount || 0);
+        const invoicePaidUnits = moneyToTenThousandths(invoice.paidAmount || 0);
+        const customerBalanceUnits = customer ? moneyToTenThousandths(customer.balance || 0) : null;
+        if (invoiceRemainingUnits === null || invoicePaidUnits === null || (customer && customerBalanceUnits === null)) {
+          throw new AppError("Financial monetary state is invalid.", 409, "FINANCIAL_MONETARY_STATE_INVALID");
+        }
+
+        await lockedInst.update({
           paidAmount: newPaid,
           status,
           paidDate: payDate,
-          idempotencyKey: idempotencyKey || inst.idempotencyKey
+          idempotencyKey: idempotencyKey || lockedInst.idempotencyKey
         }, { transaction: t });
 
         await invoice.update({
-          remainingAmount: Math.max(0, round4(Number(invoice.remainingAmount || 0) - amount)),
-          paidAmount: round4(Number(invoice.paidAmount || 0) + amount)
+          remainingAmount: moneyFromTenThousandths(invoiceRemainingUnits > requestedAmountUnits ? invoiceRemainingUnits - requestedAmountUnits : 0n),
+          paidAmount: moneyFromTenThousandths(invoicePaidUnits + requestedAmountUnits)
         }, { transaction: t });
 
         if (customer) {
           await customer.update({
-            balance: Math.max(0, round4(Number(customer.balance || 0) - amount))
+            balance: moneyFromTenThousandths(customerBalanceUnits > requestedAmountUnits ? customerBalanceUnits - requestedAmountUnits : 0n)
           }, { transaction: t });
         }
 
         installmentPayment = await models.Payment.create({
           id: `PAY-INST-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          companyId: inst.companyId,
+          companyId: lockedInst.companyId,
           branchId,
-          invoiceId: inst.invoiceId,
+          invoiceId: lockedInst.invoiceId,
           paymentMethod: method,
           amount,
-          reference: req.body.reference || `Installment #${inst.sequence}`,
+          reference: req.body.reference || `Installment #${lockedInst.sequence}`,
           date: payDate,
-          notes: req.body.notes || `تحصيل قسط ${inst.id}`,
+          notes: req.body.notes || `تحصيل قسط ${lockedInst.id}`,
           receivedByEmployeeId: commandActor.employeeId || null
         }, { transaction: t });
 
         journalEntry = await postingService.postInstallmentPayment(
-          inst.toJSON(), amount, method, actor, { transaction: t, branchId }
+          lockedInst.toJSON(), amount, method, actor, {
+            transaction: t,
+            branchId,
+            collectionEventId: installmentPayment.id
+          }
         );
 
         await models.CashTransaction.create({
           id: `TX-INST-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          companyId: inst.companyId,
+          companyId: lockedInst.companyId,
           type: "cash_in",
           account: treasuryAccount,
           amount,
           category: "تحصيل قسط",
-          description: `تحصيل قسط ${inst.id} — فاتورة ${inst.invoiceId}`,
-          reference: inst.invoiceId,
-          branch: inst.branch || "Main Branch",
+          description: `تحصيل قسط ${lockedInst.id} — فاتورة ${lockedInst.invoiceId}`,
+          reference: lockedInst.invoiceId,
+          branch: lockedInst.branch || "Main Branch",
           branchId,
           date: payDate,
           createdBy: req.user ? req.user.id : "System",
@@ -13190,16 +14719,16 @@ router.post(
 
         await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
           action: "sales.installment.collect",
-          description: `Collected installment ${inst.id} for invoice ${inst.invoiceId}`,
+          description: `Collected installment ${lockedInst.id} for invoice ${lockedInst.invoiceId}`,
           user: actor,
           userId: req.user ? req.user.id : null,
-          place: inst.branch || branchId || null,
-          branch: inst.branch || branchId || null,
-          sourceDocument: inst.invoiceId,
+          place: lockedInst.branch || branchId || null,
+          branch: lockedInst.branch || branchId || null,
+          sourceDocument: lockedInst.invoiceId,
           severity: "info",
           after: JSON.stringify({
-            installmentId: inst.id,
-            invoiceId: inst.invoiceId,
+            installmentId: lockedInst.id,
+            invoiceId: lockedInst.invoiceId,
             paymentId: installmentPayment.id,
             amount,
             status,
@@ -13208,7 +14737,7 @@ router.post(
         }, commandActor), { transaction: t });
 
         // Persist the success response for idempotent replay BEFORE commit.
-        const out = inst.toJSON();
+        const out = lockedInst.toJSON();
         out.journalEntry = journalEntry;
         out.payment = installmentPayment;
         idemResponseBody = { success: true, ...out, data: out };
