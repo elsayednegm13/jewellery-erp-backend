@@ -17,6 +17,18 @@ const id = (prefix) => `${prefix}-${crypto.randomUUID()}`;
 const readinessError = () =>
   new AppError("Required financial configuration is incomplete.", 422, "FINANCIAL_READINESS_REQUIRED");
 
+// A branch mapping is historical when it is inactive.  Historical rows are
+// deliberately retained for audit, but must never compete with the one active
+// mapping that is authoritative for posting and reconciliation.
+function currentMappingAuthority(rows = []) {
+  const activeRows = rows.filter((row) => row.isActive === true);
+  if (activeRows.length > 1) throw readinessError();
+  // A historical-only mapping is not a usable current authority.  Fail closed
+  // instead of silently reactivating history or creating a second authority.
+  if (activeRows.length === 0 && rows.length > 0) throw readinessError();
+  return activeRows[0] || null;
+}
+
 async function accountForRole(models, companyId, branchId, roleCode, definition, actorId, transaction, report) {
   const rows = await models.SystemAccountRole.findAll({
     where: { companyId, branchId, roleCode },
@@ -149,14 +161,14 @@ async function reconcile({ models, companyId, branchId, actorId = "financial-boo
       accounts[roleCode] = await accountForRole(models, companyId, branchId, roleCode, definition, actorId, transaction, report);
     }
     for (const [mappingType, definition] of Object.entries(BRANCH_MAPPING_CATALOG)) {
-      const existing = await models.BranchFinancialMapping.findAll({
+      const existingRows = await models.BranchFinancialMapping.findAll({
         where: { companyId, branchId, mappingType, channel: null },
         transaction,
         lock: transaction?.LOCK.UPDATE,
       });
-      if (existing.length > 1) throw readinessError();
+      const existing = currentMappingAuthority(existingRows);
       const account = accounts[definition.accountRoleCode];
-      if (!existing.length) {
+      if (!existing) {
         await models.BranchFinancialMapping.create({
           id: id("BFM"),
           companyId,
@@ -175,12 +187,12 @@ async function reconcile({ models, companyId, branchId, actorId = "financial-boo
           companyId,
           branchId,
           mappingType,
-          accountId: existing[0].accountId,
+          accountId: existing.accountId,
           transaction,
           lock: true,
         });
-        if (!existing[0].isActive || !inspected.result.compatible) {
-          await existing[0].update({ accountId: account.id, isActive: true, updatedBy: actorId }, { transaction });
+        if (!inspected.result.compatible) {
+          await existing.update({ accountId: account.id, isActive: true, updatedBy: actorId }, { transaction });
         }
       }
     }
@@ -242,4 +254,4 @@ async function evaluateReadiness({ models, companyId, branchId, transaction = nu
   };
 }
 
-module.exports = { reconcile, evaluateReadiness, readinessError };
+module.exports = { reconcile, evaluateReadiness, readinessError, currentMappingAuthority };
