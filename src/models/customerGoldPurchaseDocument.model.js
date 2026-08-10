@@ -11,6 +11,11 @@ module.exports = sequelize.define("CustomerGoldPurchaseDocument", {
   currency: { type: DataTypes.STRING(3), allowNull: false },
   exchangeRate: { type: DataTypes.DECIMAL(24, 8), allowNull: false, field: "exchange_rate" },
   status: { type: DataTypes.ENUM("draft", "validated", "submitted", "approved"), allowNull: false, defaultValue: "draft" },
+  // `status` remains the temporary compatibility projection for existing draft
+  // and approval callers.  The two fields below are the CGP aggregate's
+  // canonical business and optional governance facts.
+  businessStatus: { type: DataTypes.STRING(16), allowNull: false, defaultValue: "DRAFT", field: "business_status" },
+  governanceStatus: { type: DataTypes.STRING(16), allowNull: false, defaultValue: "NONE", field: "governance_status" },
   version: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1 },
   notes: { type: DataTypes.TEXT },
   createdBy: { type: DataTypes.STRING, field: "created_by" },
@@ -21,6 +26,12 @@ module.exports = sequelize.define("CustomerGoldPurchaseDocument", {
   submittedBy: { type: DataTypes.STRING, field: "submitted_by" },
   approvedAt: { type: DataTypes.DATE, field: "approved_at" },
   approvedBy: { type: DataTypes.STRING, field: "approved_by" },
+  postedAt: { type: DataTypes.DATE, field: "posted_at" },
+  postedBy: { type: DataTypes.STRING, field: "posted_by" },
+  postingReference: { type: DataTypes.STRING(128), field: "posting_reference" },
+  postingMetadata: { type: DataTypes.JSONB, field: "posting_metadata" },
+  totalGoldValue: { type: DataTypes.DECIMAL(20, 4), field: "total_gold_value" },
+  totalPayableToCustomer: { type: DataTypes.DECIMAL(20, 4), field: "total_payable_to_customer" },
   lastRejectedAt: { type: DataTypes.DATE, field: "last_rejected_at" },
   lastRejectedBy: { type: DataTypes.STRING, field: "last_rejected_by" },
   lastRejectionReason: { type: DataTypes.TEXT, field: "last_rejection_reason" },

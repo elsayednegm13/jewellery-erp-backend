@@ -55,6 +55,15 @@ function snapshotFor(kind, document, documentVersion, submittedBy) {
 
 const fail = (message, code) => { throw new AppError(message, 409, code); };
 
+// `status` is a legacy compatibility projection.  Canonical CGP Posting must
+// never be reopened by an old submit/review/revision path that still examines
+// that projection, so immutable business states are checked first.
+function assertCgpBusinessMutable(kind, document) {
+  if (kind === "cgp" && ["POSTED", "REVERSED"].includes(document.businessStatus)) {
+    fail("Posted and reversed Customer Gold Purchase documents are immutable", "DOCUMENT_IMMUTABLE");
+  }
+}
+
 async function assertAction(kind, context, action, { reviewer = false } = {}) {
   const permission = `gold_purchase.${kind}.${action}`;
   if (!(await permissionService.userHasPermission(context.user, permission))) throw new ForbiddenError(`${permission} is required`);
@@ -75,6 +84,7 @@ async function audit(kind, context, document, action, before, after, transaction
 async function submit(kind, context, id, body, transaction) {
   await assertAction(kind, context, "submit");
   const document = await draftService.findScoped(kind, context, id, transaction, { lock: true });
+  assertCgpBusinessMutable(kind, document);
   const version = draftService.parseVersion(body.version);
   if (document.version !== version) fail("Gold Purchase document version conflict", "STATE_CONFLICT");
   const pending = await models.GoldPurchaseApprovalRequest.findOne({ where: { documentId: id, approvalStatus: "pending" }, transaction, lock: transaction.LOCK.UPDATE });
@@ -90,7 +100,7 @@ async function submit(kind, context, id, body, transaction) {
     submittedSnapshot: snapshot, submittedSnapshotHash: hashSnapshot(snapshot),
     requestedBy: context.user.id, requestedAt: new Date(), version: 1
   }, { transaction });
-  await document.update({ status: "submitted", submittedAt: approval.requestedAt, submittedBy: context.user.id, currentApprovalRequestId: approval.id, updatedBy: context.user.id, version: version + 1 }, { transaction });
+  await document.update({ status: "submitted", submittedAt: approval.requestedAt, submittedBy: context.user.id, currentApprovalRequestId: approval.id, updatedBy: context.user.id, version: version + 1, ...(kind === "cgp" ? draftService.cgpLifecycleForLegacyStatus("submitted") : {}) }, { transaction });
   await audit(kind, context, document, "submitted", { status: "validated", version }, { status: "submitted", version: version + 1, approvalRequestId: approval.id, snapshotHash: approval.submittedSnapshotHash }, transaction);
   return { document: draftService.serialize(await draftService.findScoped(kind, context, id, transaction)), approvalRequest: approval.toJSON() };
 }
@@ -99,6 +109,7 @@ async function review(kind, context, id, body, decision, transaction) {
   const action = decision === "approved" ? "approve" : "reject";
   await assertAction(kind, context, action, { reviewer: true });
   const document = await draftService.findScoped(kind, context, id, transaction, { lock: true });
+  assertCgpBusinessMutable(kind, document);
   const version = draftService.parseVersion(body.version);
   if (document.version !== version) fail("Gold Purchase document version conflict", "STATE_CONFLICT");
   if (document.status !== "submitted" || !document.currentApprovalRequestId) fail("Gold Purchase document is not submitted", "DOCUMENT_NOT_SUBMITTED");
@@ -120,9 +131,13 @@ async function review(kind, context, id, body, decision, transaction) {
   const now = new Date();
   await approval.update({ approvalStatus: decision, reviewedBy: context.user.id, reviewedAt: now, reviewReason: reason || null, version: approval.version + 1 }, { transaction });
   if (decision === "approved") {
-    await document.update({ status: "approved", approvedAt: now, approvedBy: context.user.id, currentApprovalRequestId: null, updatedBy: context.user.id, version: version + 1 }, { transaction });
+    await document.update({ status: "approved", approvedAt: now, approvedBy: context.user.id, currentApprovalRequestId: null, updatedBy: context.user.id, version: version + 1, ...(kind === "cgp" ? draftService.cgpLifecycleForLegacyStatus("approved") : {}) }, { transaction });
   } else {
-    await document.update({ status: "draft", validatedAt: null, validatedBy: null, submittedAt: null, submittedBy: null, currentApprovalRequestId: null, lastRejectedAt: now, lastRejectedBy: context.user.id, lastRejectionReason: reason, updatedBy: context.user.id, version: version + 1 }, { transaction });
+    // Legacy callers historically see a rejected submission as an editable
+    // draft.  Keep that compatibility projection, but retain the independent
+    // canonical validation fact: optional governance rejection is not a
+    // business de-validation or a Posting prerequisite.
+    await document.update({ status: "draft", validatedAt: null, validatedBy: null, submittedAt: null, submittedBy: null, currentApprovalRequestId: null, lastRejectedAt: now, lastRejectedBy: context.user.id, lastRejectionReason: reason, updatedBy: context.user.id, version: version + 1, ...(kind === "cgp" ? { businessStatus: "VALIDATED", governanceStatus: "REJECTED" } : {}) }, { transaction });
   }
   await audit(kind, context, document, decision,
     { status: "submitted", version, approvalRequestId: approval.id },
@@ -153,6 +168,7 @@ async function review(kind, context, id, body, decision, transaction) {
 async function createRevision(kind, context, id, body, transaction) {
   await assertAction(kind, context, "create");
   const source = await draftService.findScoped(kind, context, id, transaction, { lock: true });
+  assertCgpBusinessMutable(kind, source);
   const version = draftService.parseVersion(body.version);
   if (source.version !== version) fail("Gold Purchase document version conflict", "STATE_CONFLICT");
   if (source.status !== "approved" || source.voidedAt) fail("Revision source must be an approved Gold Purchase document", "REVISION_SOURCE_NOT_APPROVED");

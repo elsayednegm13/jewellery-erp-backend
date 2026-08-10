@@ -4,6 +4,14 @@ const assert = require("node:assert/strict");
 const {
   ACCEPTANCE_DATABASE,
   ACCEPTANCE_MIGRATION,
+  CGP_IMP_01_MIGRATIONS,
+  CGP_IMP_02_MIGRATIONS,
+  CGP_IMP_11_MIGRATIONS,
+  CGP_IMP_03_MIGRATIONS,
+  CGP_IMP_04_MIGRATIONS,
+  CGP_IMP_05A_MIGRATIONS,
+  CGP_IMP_05_MIGRATIONS,
+  CGP_IMP_06_MIGRATIONS,
   AcceptanceMigrationGuardError,
   resolveAcceptanceMigrationConfig,
   runAcceptanceMigrationCommand,
@@ -41,6 +49,7 @@ async function main() {
   });
   assert.equal(acceptance.database, ACCEPTANCE_DATABASE);
   assert.equal(acceptance.migrationExecution, "BLOCKED_BY_DRY_RUN");
+  assert.deepEqual(acceptance.expectedMigrations, [ACCEPTANCE_MIGRATION]);
   assert.equal(acceptanceCalls.migrations, 0);
 
   // Cases 2-4: dangerous, missing, and unknown resolved targets never connect.
@@ -70,6 +79,87 @@ async function main() {
     makeMigrator: () => ({ pending: async () => [{ file: ACCEPTANCE_MIGRATION }], up: async ({ migrations }) => { assert.deepEqual(migrations, [ACCEPTANCE_MIGRATION]); executeCalls.migrations += 1; } }),
   });
   assert.equal(executeCalls.migrations, 1);
+
+  // A named CGP batch is still an exact, fail-closed migration set rather
+  // than a permissive "run every pending migration" path.
+  const cgpCalls = { authenticate: 0, query: 0, close: 0, migrations: 0 };
+  await runAcceptanceMigrationCommand({
+    env: baseEnv,
+    dryRun: false,
+    expectedMigrations: CGP_IMP_01_MIGRATIONS,
+    makeConnection: () => fakeConnection(ACCEPTANCE_DATABASE, cgpCalls),
+    makeMigrator: () => ({ pending: async () => CGP_IMP_01_MIGRATIONS.map((file) => ({ file })), up: async ({ migrations }) => { assert.deepEqual(migrations, CGP_IMP_01_MIGRATIONS); cgpCalls.migrations += 1; } }),
+  });
+  assert.equal(cgpCalls.migrations, 1);
+
+  const cgpImp02Calls = { authenticate: 0, query: 0, close: 0, migrations: 0 };
+  await runAcceptanceMigrationCommand({
+    env: baseEnv,
+    dryRun: false,
+    expectedMigrations: CGP_IMP_02_MIGRATIONS,
+    makeConnection: () => fakeConnection(ACCEPTANCE_DATABASE, cgpImp02Calls),
+    makeMigrator: () => ({ pending: async () => CGP_IMP_02_MIGRATIONS.map((file) => ({ file })), up: async ({ migrations }) => { assert.deepEqual(migrations, CGP_IMP_02_MIGRATIONS); cgpImp02Calls.migrations += 1; } }),
+  });
+  assert.equal(cgpImp02Calls.migrations, 1);
+
+  const cgpImp11Calls = { authenticate: 0, query: 0, close: 0, migrations: 0 };
+  await runAcceptanceMigrationCommand({
+    env: baseEnv,
+    dryRun: false,
+    expectedMigrations: CGP_IMP_11_MIGRATIONS,
+    makeConnection: () => fakeConnection(ACCEPTANCE_DATABASE, cgpImp11Calls),
+    makeMigrator: () => ({ pending: async () => CGP_IMP_11_MIGRATIONS.map((file) => ({ file })), up: async ({ migrations }) => { assert.deepEqual(migrations, CGP_IMP_11_MIGRATIONS); cgpImp11Calls.migrations += 1; } }),
+  });
+  assert.equal(cgpImp11Calls.migrations, 1);
+
+  const cgpImp03Calls = { authenticate: 0, query: 0, close: 0, migrations: 0 };
+  await runAcceptanceMigrationCommand({
+    env: baseEnv,
+    dryRun: false,
+    expectedMigrations: CGP_IMP_03_MIGRATIONS,
+    makeConnection: () => fakeConnection(ACCEPTANCE_DATABASE, cgpImp03Calls),
+    makeMigrator: () => ({ pending: async () => CGP_IMP_03_MIGRATIONS.map((file) => ({ file })), up: async ({ migrations }) => { assert.deepEqual(migrations, CGP_IMP_03_MIGRATIONS); cgpImp03Calls.migrations += 1; } }),
+  });
+  assert.equal(cgpImp03Calls.migrations, 1);
+
+  const cgpImp04Calls = { authenticate: 0, query: 0, close: 0, migrations: 0 };
+  await runAcceptanceMigrationCommand({
+    env: baseEnv,
+    dryRun: false,
+    expectedMigrations: CGP_IMP_04_MIGRATIONS,
+    makeConnection: () => fakeConnection(ACCEPTANCE_DATABASE, cgpImp04Calls),
+    makeMigrator: () => ({ pending: async () => CGP_IMP_04_MIGRATIONS.map((file) => ({ file })), up: async ({ migrations }) => { assert.deepEqual(migrations, CGP_IMP_04_MIGRATIONS); cgpImp04Calls.migrations += 1; } }),
+  });
+  assert.equal(cgpImp04Calls.migrations, 1);
+
+  const cgpImp05aCalls = { authenticate: 0, query: 0, close: 0, migrations: 0 };
+  await runAcceptanceMigrationCommand({
+    env: baseEnv,
+    dryRun: false,
+    expectedMigrations: CGP_IMP_05A_MIGRATIONS,
+    makeConnection: () => fakeConnection(ACCEPTANCE_DATABASE, cgpImp05aCalls),
+    makeMigrator: () => ({ pending: async () => CGP_IMP_05A_MIGRATIONS.map((file) => ({ file })), up: async ({ migrations }) => { assert.deepEqual(migrations, CGP_IMP_05A_MIGRATIONS); cgpImp05aCalls.migrations += 1; } }),
+  });
+  assert.equal(cgpImp05aCalls.migrations, 1);
+
+  const cgpImp05Calls = { authenticate: 0, query: 0, close: 0, migrations: 0 };
+  await runAcceptanceMigrationCommand({
+    env: baseEnv,
+    dryRun: false,
+    expectedMigrations: CGP_IMP_05_MIGRATIONS,
+    makeConnection: () => fakeConnection(ACCEPTANCE_DATABASE, cgpImp05Calls),
+    makeMigrator: () => ({ pending: async () => CGP_IMP_05_MIGRATIONS.map((file) => ({ file })), up: async ({ migrations }) => { assert.deepEqual(migrations, CGP_IMP_05_MIGRATIONS); cgpImp05Calls.migrations += 1; } }),
+  });
+  assert.equal(cgpImp05Calls.migrations, 1);
+  const cgpImp06Calls = { authenticate: 0, query: 0, close: 0, migrations: 0 };
+  await runAcceptanceMigrationCommand({
+    env: baseEnv,
+    dryRun: false,
+    expectedMigrations: CGP_IMP_06_MIGRATIONS,
+    makeConnection: () => fakeConnection(ACCEPTANCE_DATABASE, cgpImp06Calls),
+    makeMigrator: () => ({ pending: async () => CGP_IMP_06_MIGRATIONS.map((file) => ({ file })), up: async ({ migrations }) => { assert.deepEqual(migrations, CGP_IMP_06_MIGRATIONS); cgpImp06Calls.migrations += 1; } }),
+  });
+  assert.equal(cgpImp06Calls.migrations, 1);
   await assert.rejects(
     runAcceptanceMigrationCommand({
       env: baseEnv,

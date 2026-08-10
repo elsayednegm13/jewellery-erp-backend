@@ -8,6 +8,7 @@ const models = require("../models");
 const postingService = require("../services/posting.service");
 const journalService = require("../services/journal.service");
 const goldService = require("../services/gold.service");
+const goldPriceApprovalService = require("../services/gold-price-approval.service");
 const settingsService = require("../services/settings.service");
 const salesService = require("../services/sales.service");
 const exchangePolicyService = require("../services/exchange-policy.service");
@@ -26,6 +27,7 @@ const pearlSizeMasterDataService = require("../services/pearl-size-master-data.s
 const profileMasterDataService = require("../services/profile-master-data.service");
 const inventoryMasterPolicy = require("../services/inventory-master-policy.service");
 const inventoryV2Runtime = require("../services/inventory-v2-runtime.service");
+const cgpLegacyIsolation = require("../services/cgp-legacy-isolation.service");
 const goldValuationService = require("../services/gold-valuation.service");
 const looseProfileFinanceService = require("../services/loose-profile-finance.service");
 const goldSalePricingService = require("../services/gold-sale-pricing.service");
@@ -560,6 +562,26 @@ function setupCrud(resourceName, model, searchFields = ["name"]) {
     router.post(`/${resourceName}/:id/deactivate`, authMiddleware, guardFor(resourceName, "update"), blockInvoiceMutation);
     router.post(`/${resourceName}/:id/reactivate`, authMiddleware, guardFor(resourceName, "update"), blockInvoiceMutation);
     router.delete(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "delete"), blockInvoiceMutation);
+    return controller;
+  }
+  if (resourceName === "customer-gold-pools") {
+    // Historical pool reads remain available.  Generic writes, however, can
+    // fabricate a customer-gold balance without the later canonical CGP
+    // Posting boundary, so cutover mode rejects them before controller/DB work.
+    const requireLegacyCgpAcquisitionPath = (req, res, next) => {
+      try {
+        cgpLegacyIsolation.assertLegacyCustomerGoldAcquisitionAllowed();
+        return next();
+      } catch (error) {
+        return next(error);
+      }
+    };
+    router.post(`/${resourceName}`, authMiddleware, guardFor(resourceName, "create"), requireLegacyCgpAcquisitionPath, controller.create);
+    router.put(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "update"), requireLegacyCgpAcquisitionPath, controller.update);
+    router.patch(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "update"), requireLegacyCgpAcquisitionPath, controller.update);
+    router.post(`/${resourceName}/:id/deactivate`, authMiddleware, guardFor(resourceName, "update"), requireLegacyCgpAcquisitionPath, controller.deactivate);
+    router.post(`/${resourceName}/:id/reactivate`, authMiddleware, guardFor(resourceName, "update"), requireLegacyCgpAcquisitionPath, controller.reactivate);
+    router.delete(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "delete"), requireLegacyCgpAcquisitionPath, controller.delete);
     return controller;
   }
   if (LIFECYCLE_GENERIC_MUTATION_BLOCKS[resourceName]) {
@@ -2640,8 +2662,10 @@ router.post(
 
 // ─── Customer Gold Deposit Endpoint ──────────────────────────────────────────
 router.post("/customers/:id/gold/deposit", authMiddleware, async (req, res, next) => {
-  const t = await models.sequelize.transaction();
+  let t;
   try {
+    cgpLegacyIsolation.assertLegacyCustomerGoldAcquisitionAllowed();
+    t = await models.sequelize.transaction();
     const customerId = req.params.id;
     const { description = "", karat = 21, weight, ratePerGram, payout = false, payMethod = "cash" } = req.body || {};
 
@@ -2867,7 +2891,7 @@ router.post("/customers/:id/gold/deposit", authMiddleware, async (req, res, next
       payoutJournal
     });
   } catch (error) {
-    await t.rollback();
+    if (t) await t.rollback();
     next(error);
   }
 });
@@ -5938,8 +5962,10 @@ router.post("/inventory-v2/melt-orders", authMiddleware, requireBusinessPermissi
 // when the caller supplies matching physical-piece evidence; aggregate source
 // material is deliberately retained as a disposition with no invented Asset.
 router.post("/inventory-v2/cgp-items/:id/disposition", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
-  const transaction = await models.sequelize.transaction();
+  let transaction;
   try {
+    cgpLegacyIsolation.assertCgpDispositionConversionAllowed({ disposition: req.body?.disposition });
+    transaction = await models.sequelize.transaction();
     const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
     const idempotencyKey = requireInventoryV2IdempotencyKey(req);
     const disposition = String(req.body?.disposition || "").toUpperCase();
@@ -5991,7 +6017,7 @@ router.post("/inventory-v2/cgp-items/:id/disposition", authMiddleware, requireBu
     await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory_v2.cgp_disposition", description: `CGP item ${item.id} disposition ${disposition}.`, sourceDocument: item.documentId, metadata: { cgpItemId: item.id, disposition, assetId: asset?.id || null } }), { transaction });
     await transaction.commit();
     return res.status(201).json({ success: true, data: { dispositionId, cgpItemId: item.id, disposition, assetId: asset?.id || null, financialEffect: "NONE_DEFINED" } });
-  } catch (error) { await transaction.rollback(); return next(error); }
+  } catch (error) { if (transaction) await transaction.rollback(); return next(error); }
 });
 
 // This guard is deliberately registered before generic CRUD. A completed V2
@@ -7303,6 +7329,7 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       price: body.price,
       notes: body.notes
     }];
+    cgpLegacyIsolation.assertSupplierReceiveDoesNotMasqueradeAsCgp({ body, items });
     const paymentMethod = body.paymentMethod || "credit";
     const paidAmount = Number(body.paidAmount) || 0;
     const now = new Date();
@@ -14345,7 +14372,7 @@ router.get("/gold/karat-prices", authMiddleware, async (req, res, next) => {
 });
 
 // Manually fix (lock) today's per-gram price for one or more karats.
-router.post("/gold/karat-prices", authMiddleware, async (req, res, next) => {
+router.post("/gold/karat-prices", authMiddleware, requireBusinessPermission("gold.update", { touch: true }), async (req, res, next) => {
   try {
     const currency = req.body.currency || "AED";
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
@@ -14353,42 +14380,58 @@ router.post("/gold/karat-prices", authMiddleware, async (req, res, next) => {
     if (!entries.length) {
       return res.status(422).json({ success: false, message: "لا توجد أسعار للحفظ" });
     }
+    const transaction = await models.sequelize.transaction();
     const saved = [];
     const auditChanges = [];
-    for (const e of entries) {
-      const karat = parseInt(e.karat);
-      const newPrice = Number(e.pricePerGram);
-      // Previous effective price for this karat (company-scoped), for the audit "before".
-      const prev = await findLatestGoldPrice(req.companyId, currency, karat);
-      const row = await models.GoldPrice.create({
-        karat,
-        pricePerGram: newPrice,
-        currency,
-        updatedBy: actor,
-        companyId: req.companyId, // tenant-scoped write
-        source: "manual"
-      });
-      saved.push(row.toJSON());
-      auditChanges.push({ karat, oldPrice: prev ? Number(prev.pricePerGram) : null, newPrice });
+    try {
+      for (const e of entries) {
+        const karat = parseInt(e.karat);
+        const newPrice = Number(e.pricePerGram);
+        const prev = await findLatestGoldPrice(req.companyId, currency, karat);
+        const row = await goldPriceApprovalService.createPendingPrice({
+          context: { companyId: req.companyId, branchId: req.branchId, user: req.user },
+          input: { karat, pricePerGram: newPrice, currency, source: e.source || "manual", validFrom: e.validFrom, validUntil: e.validUntil },
+          transaction,
+        });
+        saved.push(row.toJSON());
+        auditChanges.push({ karat, oldPrice: prev ? Number(prev.pricePerGram) : null, newPrice });
+      }
+      await auditService.record(req.companyId, {
+        action: "gold_price.pending_created",
+        description: `Pending Gold Center prices created (${currency}): ${auditChanges.map((c) => `${c.karat}K ${c.oldPrice ?? "-"}→${c.newPrice}`).join(", ")}`,
+        user: actor,
+        userId: req.user ? req.user.id : null,
+        place: req.branchId || "System",
+        sourceDocument: "gold-prices",
+        severity: "info",
+        before: JSON.stringify(auditChanges.map((c) => ({ karat: c.karat, pricePerGram: c.oldPrice }))),
+        after: JSON.stringify(auditChanges.map((c) => ({ karat: c.karat, pricePerGram: c.newPrice, approvalStatus: "PENDING" }))),
+      }, { transaction });
+      await transaction.commit();
+      return res.status(201).json({ success: true, items: saved, data: { items: saved } });
+    } catch (error) {
+      if (!transaction.finished) await transaction.rollback();
+      throw error;
     }
-
-    // Audit the manual gold-price fixing (was previously unaudited). Each POST
-    // appends a new gold_prices row, so the row log IS the price history; this
-    // records the before/after in the tamper-evident chain too.
-    await auditService.record(req.companyId, {
-      action: "gold_price.update",
-      description: `Gold prices updated (${currency}): ${auditChanges.map((c) => `${c.karat}K ${c.oldPrice ?? "-"}→${c.newPrice}`).join(", ")}`,
-      user: actor,
-      userId: req.user ? req.user.id : null,
-      place: req.branchId || "System",
-      sourceDocument: "gold-prices",
-      severity: "info",
-      before: JSON.stringify(auditChanges.map((c) => ({ karat: c.karat, pricePerGram: c.oldPrice }))),
-      after: JSON.stringify(auditChanges.map((c) => ({ karat: c.karat, pricePerGram: c.newPrice, source: "manual" })))
-    });
-
-    return res.status(201).json({ success: true, items: saved, data: { items: saved } });
   } catch (error) {
+    next(error);
+  }
+});
+
+// An executable economic price is a separate authorized Gold Center action;
+// creating a manual/imported price never makes it executable by itself.
+router.post("/gold/karat-prices/:id/approve", authMiddleware, requireBusinessPermission("gold.approve_price", { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const result = await goldPriceApprovalService.approvePrice({
+      context: { companyId: req.companyId, branchId: req.branchId, user: req.user },
+      priceId: Number(req.params.id),
+      transaction,
+    });
+    await transaction.commit();
+    return res.status(result.replayed ? 200 : 201).json({ success: true, replayed: result.replayed, data: result.price.toJSON() });
+  } catch (error) {
+    if (!transaction.finished) await transaction.rollback();
     next(error);
   }
 });

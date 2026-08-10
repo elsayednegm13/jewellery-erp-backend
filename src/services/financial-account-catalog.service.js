@@ -33,6 +33,19 @@ const ACCOUNT_ROLE_CATALOG = Object.freeze({
   OTHER_INCOME: accountRole("SYS-OTHER-INCOME", "Other Income", "إيرادات أخرى", "revenue", "credit", "other_income"),
 });
 
+// Optional semantic roles are resolved only by the business flow that needs
+// them.  They are deliberately excluded from the global financial-readiness
+// catalog: configuring a future capability must not make an unrelated current
+// posting flow fail its readiness gate.
+const OPTIONAL_SEMANTIC_ACCOUNT_ROLE_CATALOG = Object.freeze({
+  CUSTOMER_CREDITOR: accountRole("2500", "Customer Creditors", "ذمم دائنة للعملاء", "liability", "credit", "liability"),
+});
+
+function getSemanticAccountRoleDefinition(roleCode) {
+  const normalized = String(roleCode || "").trim().toUpperCase();
+  return ACCOUNT_ROLE_CATALOG[normalized] || OPTIONAL_SEMANTIC_ACCOUNT_ROLE_CATALOG[normalized] || null;
+}
+
 const branchMapping = (accountRoleCode, options = {}) =>
   Object.freeze({
     accountRoleCode,
@@ -102,6 +115,8 @@ const POSTING_ACCOUNT_CATALOG = Object.freeze({
 module.exports = {
   BOOTSTRAP_VERSION,
   ACCOUNT_ROLE_CATALOG,
+  OPTIONAL_SEMANTIC_ACCOUNT_ROLE_CATALOG,
+  getSemanticAccountRoleDefinition,
   BRANCH_MAPPING_CATALOG,
   POSTING_CODE_ROLE,
   POSTING_ACCOUNT_CATALOG,

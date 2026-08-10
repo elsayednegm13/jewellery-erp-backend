@@ -70,7 +70,8 @@ const Asset = sequelize.define("Asset", {
     // per DARFUS inventory rules (migration 20260619050000).
     type: DataTypes.ENUM(
       "available", "reserved", "sold", "repair", "transferred", "melted", "archived",
-      "pending_transfer", "returned", "in_workshop", "pending_tag"
+      "pending_transfer", "pending_integration", "returned", "in_workshop", "pending_tag",
+      "reversal_pending", "reversed"
     ),
     defaultValue: "available"
   },

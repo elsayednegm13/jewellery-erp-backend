@@ -33,6 +33,22 @@ const actorName = (user) => [user?.firstName, user?.lastName].filter(Boolean).jo
 
 const LEGACY_READ = { cgp: "sales.view", igp: "suppliers.view" };
 
+const CGP_BUSINESS_STATUSES = Object.freeze(["DRAFT", "VALIDATED", "POSTED", "REVERSED"]);
+const CGP_GOVERNANCE_STATUSES = Object.freeze(["NONE", "PENDING", "APPROVED", "REJECTED"]);
+
+// The legacy `status` field remains a compatibility projection while callers
+// are migrated.  This is the one runtime mapping authority for CGP draft and
+// governance writes; approval is intentionally never represented as Posting.
+function cgpLifecycleForLegacyStatus(status) {
+  switch (String(status || "").toLowerCase()) {
+    case "draft": return { businessStatus: "DRAFT", governanceStatus: "NONE" };
+    case "validated": return { businessStatus: "VALIDATED", governanceStatus: "NONE" };
+    case "submitted": return { businessStatus: "VALIDATED", governanceStatus: "PENDING" };
+    case "approved": return { businessStatus: "VALIDATED", governanceStatus: "APPROVED" };
+    default: throw new ValidationError("Unsupported legacy CGP status", { status: ["unsupported_legacy_status"] });
+  }
+}
+
 async function accessProfile(kind, context, { reviewer = false } = {}) {
   const names = new Set(await permissionService.getUserPermissionNames(context.user));
   const prefix = `gold_purchase.${kind}`;
@@ -55,7 +71,7 @@ function scopeWhere(context, profile) {
 }
 
 function assertMutable(document) {
-  if (["submitted", "approved"].includes(document.status)) {
+  if (["submitted", "approved"].includes(document.status) || ["POSTED", "REVERSED"].includes(document.businessStatus)) {
     throw new AppError("Submitted and approved Gold Purchase documents are immutable", 409, "DOCUMENT_IMMUTABLE");
   }
 }
@@ -194,6 +210,7 @@ async function create(kind, context, body, transaction) {
     [cfg.refKey]: body[cfg.refKey], [cfg.dateKey]: body[cfg.dateKey],
     ...(kind === "igp" ? { supplierReference: body.supplierReference || null } : {}),
     currency: validated.currency, exchangeRate: validated.exchangeRate, status: "draft", version: 1,
+    ...(kind === "cgp" ? cgpLifecycleForLegacyStatus("draft") : {}),
     notes: body.notes || null, createdBy: context.user.id, updatedBy: context.user.id,
     revisionNumber: 1, rootDocumentId: id
   }, { transaction });
@@ -245,7 +262,8 @@ async function update(kind, context, id, body, transaction) {
     [cfg.refKey]: merged[cfg.refKey], [cfg.dateKey]: merged[cfg.dateKey],
     ...(kind === "igp" ? { supplierReference: merged.supplierReference || null } : {}),
     currency: validated.currency, exchangeRate: validated.exchangeRate, notes: merged.notes || null,
-    status: "draft", validatedAt: null, validatedBy: null, version: expectedVersion + 1, updatedBy: context.user.id
+    status: "draft", validatedAt: null, validatedBy: null, version: expectedVersion + 1, updatedBy: context.user.id,
+    ...(kind === "cgp" ? cgpLifecycleForLegacyStatus("draft") : {})
   }, { transaction });
   await auditService.record(context.companyId, { action: `${kind}.draft.updated`, description: `${kind.toUpperCase()} draft ${document.draftNumber} updated`, user: actorName(context.user), userId: context.user.id, branch: validated.branch.name, sourceDocument: document.draftNumber, before: JSON.stringify(before), after: JSON.stringify({ version: document.version, status: "draft", itemCount: items.length }) }, { transaction });
   return serialize(await findScoped(kind, context, id, transaction));
@@ -259,7 +277,7 @@ async function validate(kind, context, id, expectedVersion, transaction) {
   if (document.version !== version) throw new ConflictError("Gold Purchase draft version conflict");
   if (document.status === "validated") throw new ConflictError("Gold Purchase draft is already validated");
   const branch = await models.Branch.findByPk(document.branchId, { transaction });
-  await document.update({ status: "validated", validatedAt: new Date(), validatedBy: context.user.id, updatedBy: context.user.id, version: version + 1 }, { transaction });
+  await document.update({ status: "validated", validatedAt: new Date(), validatedBy: context.user.id, updatedBy: context.user.id, version: version + 1, ...(kind === "cgp" ? cgpLifecycleForLegacyStatus("validated") : {}) }, { transaction });
   await auditService.record(context.companyId, { action: `${kind}.draft.validated`, description: `${kind.toUpperCase()} draft ${document.draftNumber} validated`, user: actorName(context.user), userId: context.user.id, branch: branch?.name, sourceDocument: document.draftNumber, before: JSON.stringify({ status: "draft", version }), after: JSON.stringify({ status: "validated", version: version + 1 }) }, { transaction });
   return serialize(await findScoped(kind, context, id, transaction));
 }
@@ -317,4 +335,4 @@ async function list(kind, context, query, includeVoided) {
   return { items: result.rows.map(serialize), pagination: { total: result.count, page, limit, pages: Math.ceil(result.count / limit) }, filters: { ...query } };
 }
 
-module.exports = { CONFIG, create, update, validate, voidDraft, findScoped, list, serialize, normalizeItem, validateHeader, nextDraftNumber, parseVersion, accessProfile, scopeWhere, actorName };
+module.exports = { CONFIG, CGP_BUSINESS_STATUSES, CGP_GOVERNANCE_STATUSES, cgpLifecycleForLegacyStatus, create, update, validate, voidDraft, findScoped, list, serialize, normalizeItem, validateHeader, nextDraftNumber, parseVersion, accessProfile, scopeWhere, actorName };

@@ -9,6 +9,7 @@ const { ValidationError } = require("../utils/errors");
 
 const LEGACY_STATUS = Object.freeze({
   AVAILABLE: "available",
+  PENDING_INTEGRATION: "pending_integration",
   RESERVED: "reserved",
   PENDING_TRANSFER: "pending_transfer",
   WORKSHOP: "in_workshop",
@@ -16,6 +17,8 @@ const LEGACY_STATUS = Object.freeze({
   MISSING: "archived",
   MELTED: "melted",
   SOLD: "sold",
+  REVERSAL_PENDING: "reversal_pending",
+  REVERSED: "reversed",
 });
 
 // Existing assets retain the legacy status column.  Runtime callers must not
@@ -23,6 +26,7 @@ const LEGACY_STATUS = Object.freeze({
 // Master foundation: this is the one normalization boundary for both shapes.
 const OPERATIONAL_STATUS_FROM_LEGACY = Object.freeze({
   available: "AVAILABLE",
+  pending_integration: "PENDING_INTEGRATION",
   reserved: "RESERVED",
   pending_transfer: "PENDING_TRANSFER",
   in_workshop: "WORKSHOP",
@@ -30,10 +34,13 @@ const OPERATIONAL_STATUS_FROM_LEGACY = Object.freeze({
   archived: "MISSING",
   melted: "MELTED",
   sold: "SOLD",
+  reversal_pending: "REVERSAL_PENDING",
+  reversed: "REVERSED",
 });
 
 const TRANSITIONS = Object.freeze({
-  AVAILABLE: new Set(["RESERVED", "PENDING_TRANSFER", "WORKSHOP", "MISSING", "MELTED", "SOLD"]),
+  PENDING_INTEGRATION: new Set(["AVAILABLE", "REVERSAL_PENDING"]),
+  AVAILABLE: new Set(["RESERVED", "PENDING_TRANSFER", "WORKSHOP", "MISSING", "MELTED", "SOLD", "REVERSAL_PENDING"]),
   RESERVED: new Set(["AVAILABLE", "SOLD", "MISSING"]),
   PENDING_TRANSFER: new Set(["AVAILABLE", "MISSING"]),
   WORKSHOP: new Set(["AVAILABLE", "MISSING", "MELTED"]),
@@ -41,7 +48,31 @@ const TRANSITIONS = Object.freeze({
   RETURNED: new Set(["AVAILABLE"]),
   MISSING: new Set(["RETURNED"]),
   MELTED: new Set([]),
+  REVERSAL_PENDING: new Set(["REVERSED"]),
+  REVERSED: new Set([]),
 });
+
+// This capability is intentionally module-private: HTTP input cannot produce
+// it.  The CGP evaluator obtains it from the same canonical state authority
+// only after independently proving every required durable hard gate.
+const CGP_AVAILABILITY_CAPABILITY = Symbol("CGP_AVAILABILITY_CAPABILITY");
+const CGP_REVERSAL_HOLD_CAPABILITY = Symbol("CGP_REVERSAL_HOLD_CAPABILITY");
+const CGP_REVERSAL_FINALIZE_CAPABILITY = Symbol("CGP_REVERSAL_FINALIZE_CAPABILITY");
+
+function createCgpAvailabilityTransitionContext(context = {}) {
+  return { ...context, cgpAvailabilityCapability: CGP_AVAILABILITY_CAPABILITY };
+}
+
+// These capabilities are deliberately module-private.  They bind the two CGP
+// reversal transitions to the reversal saga consumers, never to HTTP input or
+// ordinary inventory commands.
+function createCgpReversalHoldTransitionContext(context = {}) {
+  return { ...context, cgpReversalHoldCapability: CGP_REVERSAL_HOLD_CAPABILITY };
+}
+
+function createCgpReversalFinalizeTransitionContext(context = {}) {
+  return { ...context, cgpReversalFinalizeCapability: CGP_REVERSAL_FINALIZE_CAPABILITY };
+}
 
 const receiptTypes = Object.freeze({
   GOLD_BY_WEIGHT_JEWELLERY: "gold-weight",
@@ -375,16 +406,36 @@ async function linkInvoiceAsset({ models, transaction, invoiceItemId, asset, com
   });
 }
 
-async function transitionAsset({ models, transaction, asset, context, toStatus, eventType, movementType, sourceType, sourceId, note, idempotencyKey = null, toBranchId = null, toLocationId = null }) {
+async function transitionAsset({ models, transaction, asset, assetId = null, context, toStatus, eventType, movementType, sourceType, sourceId, note, idempotencyKey = null, toBranchId = null, toLocationId = null }) {
   if (!transaction) throw new Error("INVENTORY_CANONICAL_TRANSITION_TRANSACTION_REQUIRED");
-  if (!context?.companyId || context.companyId !== asset.companyId) throw new Error("INVENTORY_CANONICAL_TRANSITION_COMPANY_SCOPE_INVALID");
-  const fromStatus = operationalStatusOf(asset);
+  const id = assetId || asset?.id;
+  if (!id) throw new Error("INVENTORY_CANONICAL_TRANSITION_ASSET_REQUIRED");
+  // The public canonical entrypoint owns serialization.  A caller supplied
+  // model can only identify the Asset; final state validation always reads the
+  // PostgreSQL row under FOR UPDATE in this exact transaction.
+  const lockedAsset = await models.Asset.findByPk(id, { transaction, lock: transaction.LOCK.UPDATE });
+  if (!lockedAsset) throw new Error("INVENTORY_CANONICAL_TRANSITION_ASSET_NOT_FOUND");
+  if (!context?.companyId || context.companyId !== lockedAsset.companyId) throw new Error("INVENTORY_CANONICAL_TRANSITION_COMPANY_SCOPE_INVALID");
+  const fromStatus = operationalStatusOf(lockedAsset);
   if (!TRANSITIONS[fromStatus]?.has(toStatus)) throw new Error(`INVENTORY_V2_INVALID_STATE_TRANSITION:${fromStatus}:${toStatus}`);
-  const fromBranchId = asset.branchId;
-  const fromLocationId = asset.locationId;
-  await asset.update({ operationalStatus: toStatus, status: LEGACY_STATUS[toStatus], branchId: toBranchId || asset.branchId, locationId: toLocationId ?? asset.locationId, updatedBy: context.actorId || null }, { transaction, inventoryCanonicalTransition: true });
-  const event = await recordAssetEvent({ models, transaction, asset: { ...asset.toJSON(), operationalStatus: toStatus }, context, eventType, oldStatus: fromStatus, newStatus: toStatus, sourceType, sourceId, note, idempotencyKey });
-  await recordMovement({ models, transaction, asset, context, movementType, sourceType, sourceId, eventId: event.id, fromBranchId, toBranchId: toBranchId || fromBranchId, fromLocationId, toLocationId: toLocationId ?? fromLocationId });
+  if (fromStatus === "PENDING_INTEGRATION" && toStatus === "AVAILABLE") {
+    if (lockedAsset.source !== "customer_gold_purchase" || lockedAsset.inventoryProfile !== "CGP_CUSTOMER_GOLD_PURCHASE" || context.cgpAvailabilityCapability !== CGP_AVAILABILITY_CAPABILITY) {
+      throw new Error("INVENTORY_CGP_PENDING_AVAILABLE_EVALUATOR_REQUIRED");
+    }
+  }
+  if (["PENDING_INTEGRATION", "AVAILABLE"].includes(fromStatus) && toStatus === "REVERSAL_PENDING") {
+    if (lockedAsset.source !== "customer_gold_purchase" || lockedAsset.inventoryProfile !== "CGP_CUSTOMER_GOLD_PURCHASE" || context.cgpReversalHoldCapability !== CGP_REVERSAL_HOLD_CAPABILITY) {
+      throw new Error("INVENTORY_CGP_REVERSAL_HOLD_AUTHORITY_REQUIRED");
+    }
+  }
+  if (fromStatus === "REVERSAL_PENDING" && toStatus === "REVERSED" && context.cgpReversalFinalizeCapability !== CGP_REVERSAL_FINALIZE_CAPABILITY) {
+    throw new Error("INVENTORY_CGP_REVERSAL_FINALIZER_REQUIRED");
+  }
+  const fromBranchId = lockedAsset.branchId;
+  const fromLocationId = lockedAsset.locationId;
+  await lockedAsset.update({ operationalStatus: toStatus, status: LEGACY_STATUS[toStatus], branchId: toBranchId || lockedAsset.branchId, locationId: toLocationId ?? lockedAsset.locationId, updatedBy: context.actorId || null }, { transaction, inventoryCanonicalTransition: true });
+  const event = await recordAssetEvent({ models, transaction, asset: { ...lockedAsset.toJSON(), operationalStatus: toStatus }, context, eventType, oldStatus: fromStatus, newStatus: toStatus, sourceType, sourceId, note, idempotencyKey });
+  await recordMovement({ models, transaction, asset: lockedAsset, context, movementType, sourceType, sourceId, eventId: event.id, fromBranchId, toBranchId: toBranchId || fromBranchId, fromLocationId, toLocationId: toLocationId ?? fromLocationId });
   return event;
 }
 
@@ -695,4 +746,4 @@ async function updateAssetComponents({ models, transaction, asset, context, comp
   return fetchAssetComponents({ models, transaction, assetId: asset.id });
 }
 
-module.exports = { LEGACY_STATUS, TRANSITIONS, legacySubtypeForProfile, operationalStatusOf, requireV2ReceiptPieces, normalizeReceiptPiece, looseDetailsAsPrimarySubject, newId, recordAssetEvent, recordMovement, persistReceiptEvidence, persistManufacturingEvidence, linkInvoiceAsset, transitionAsset, assignRfid, recordRfidScan, recordTagPrint, normalizeComponentsForProfile, persistAssetComponents, fetchAssetComponents, updateAssetComponents };
+module.exports = { LEGACY_STATUS, TRANSITIONS, legacySubtypeForProfile, operationalStatusOf, createCgpAvailabilityTransitionContext, createCgpReversalHoldTransitionContext, createCgpReversalFinalizeTransitionContext, requireV2ReceiptPieces, normalizeReceiptPiece, looseDetailsAsPrimarySubject, newId, recordAssetEvent, recordMovement, persistReceiptEvidence, persistManufacturingEvidence, linkInvoiceAsset, transitionAsset, assignRfid, recordRfidScan, recordTagPrint, normalizeComponentsForProfile, persistAssetComponents, fetchAssetComponents, updateAssetComponents };

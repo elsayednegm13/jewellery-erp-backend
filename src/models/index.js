@@ -49,6 +49,14 @@ const CustomerGoldPool = require("./customerGoldPool.model");
 const InventoryGoldPool = require("./inventoryGoldPool.model");
 const CustomerGoldPurchaseDocument = require("./customerGoldPurchaseDocument.model");
 const CustomerGoldPurchaseItem = require("./customerGoldPurchaseItem.model");
+const CgpPricingSnapshot = require("./cgpPricingSnapshot.model");
+const CgpReversalRequest = require("./cgpReversalRequest.model");
+const CgpReversalCompensation = require("./cgpReversalCompensation.model");
+const OutboxEvent = require("./outboxEvent.model");
+const ProcessedEvent = require("./processedEvent.model");
+const IntegrationStatus = require("./integrationStatus.model");
+const CustomerFinancialLiability = require("./customerFinancialLiability.model");
+const GoldCoreEvent = require("./goldCoreEvent.model");
 const InvestmentGoldPurchaseDocument = require("./investmentGoldPurchaseDocument.model");
 const InvestmentGoldPurchaseItem = require("./investmentGoldPurchaseItem.model");
 const GoldPurchaseApprovalRequest = require("./goldPurchaseApprovalRequest.model");
@@ -65,6 +73,10 @@ const LoyaltyTransaction = require("./loyaltyTransaction.model");
 const Attendance = require("./attendance.model");
 const Payslip = require("./payslip.model");
 const ApprovalRequest = require("./approvalRequest.model");
+const FinancialApprovalPolicy = require("./financialApprovalPolicy.model");
+const FinancialSettlement = require("./financialSettlement.model");
+const FinancialSettlementLeg = require("./financialSettlementLeg.model");
+const FinancialSettlementAllocation = require("./financialSettlementAllocation.model");
 const Setting = require("./setting.model");
 const AuditLog = require("./auditLog.model");
 const GoldPrice = require("./goldPrice.model");
@@ -77,6 +89,8 @@ const Product = require("./product.model");
 const StockMovement = require("./stockMovement.model");
 const IdempotencyRequest = require("./idempotencyRequest.model");
 const CustomerCreditTransaction = require("./customerCreditTransaction.model");
+const CustomerTransactionHistory = require("./customerTransactionHistory.model");
+const CustomerTimeline = require("./customerTimeline.model");
 const BarcodeInventoryCode = require("./barcodeInventoryCode.model");
 const BarcodeItemCode = require("./barcodeItemCode.model");
 const BarcodeSequence = require("./barcodeSequence.model");
@@ -90,6 +104,9 @@ const BranchFinancialMapping = require("./branchFinancialMapping.model");
 const ReservationDepositReceiptDocument = require("./reservationDepositReceiptDocument.model");
 const ReservationDepositReceiptSequence = require("./reservationDepositReceiptSequence.model");
 const FirstRunSetupState = require("./firstRunSetupState.model");
+const GoldMarketQuote = require("./goldMarketQuote.model");
+const GoldMarketSetting = require("./goldMarketSetting.model");
+const GoldPricingPolicy = require("./goldPricingPolicy.model");
 
 // Define Associations
 
@@ -286,6 +303,14 @@ Payslip.belongsTo(Employee, { foreignKey: "employeeId", as: "employee" });
 
 Company.hasMany(ApprovalRequest, { foreignKey: "companyId", as: "approvalRequests" });
 ApprovalRequest.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Company.hasMany(FinancialApprovalPolicy, { foreignKey: "companyId", as: "financialApprovalPolicies" });
+FinancialApprovalPolicy.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(FinancialApprovalPolicy, { foreignKey: "branchId", as: "financialApprovalPolicies" });
+FinancialApprovalPolicy.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+FinancialApprovalPolicy.hasMany(ApprovalRequest, { foreignKey: "policyId", as: "approvalRequests" });
+ApprovalRequest.belongsTo(FinancialApprovalPolicy, { foreignKey: "policyId", as: "financialApprovalPolicy" });
+Branch.hasMany(ApprovalRequest, { foreignKey: "branchId", as: "financialApprovalRequests" });
+ApprovalRequest.belongsTo(Branch, { foreignKey: "branchId", as: "financialApprovalBranch" });
 
 Company.hasMany(Setting, { foreignKey: "companyId", as: "settings" });
 Setting.belongsTo(Company, { foreignKey: "companyId", as: "company" });
@@ -474,6 +499,80 @@ Customer.hasMany(CustomerGoldPurchaseDocument, { foreignKey: "customerId", as: "
 CustomerGoldPurchaseDocument.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
 CustomerGoldPurchaseDocument.hasMany(CustomerGoldPurchaseItem, { foreignKey: "documentId", as: "items" });
 CustomerGoldPurchaseItem.belongsTo(CustomerGoldPurchaseDocument, { foreignKey: "documentId", as: "document" });
+CustomerGoldPurchaseDocument.hasMany(CgpPricingSnapshot, { foreignKey: "cgpDocumentId", as: "pricingSnapshots" });
+CgpPricingSnapshot.belongsTo(CustomerGoldPurchaseDocument, { foreignKey: "cgpDocumentId", as: "document" });
+CustomerGoldPurchaseItem.hasOne(CgpPricingSnapshot, { foreignKey: "cgpItemId", as: "pricingSnapshot" });
+CgpPricingSnapshot.belongsTo(CustomerGoldPurchaseItem, { foreignKey: "cgpItemId", as: "item" });
+Company.hasMany(CgpPricingSnapshot, { foreignKey: "companyId", as: "cgpPricingSnapshots" });
+CgpPricingSnapshot.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(CgpPricingSnapshot, { foreignKey: "branchId", as: "cgpPricingSnapshots" });
+CgpPricingSnapshot.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+User.hasMany(CgpPricingSnapshot, { foreignKey: "createdBy", as: "createdCgpPricingSnapshots" });
+CgpPricingSnapshot.belongsTo(User, { foreignKey: "createdBy", as: "creator" });
+CustomerGoldPurchaseDocument.hasMany(CgpReversalRequest, { foreignKey: "cgpDocumentId", as: "reversalRequests" });
+CgpReversalRequest.belongsTo(CustomerGoldPurchaseDocument, { foreignKey: "cgpDocumentId", as: "document" });
+Company.hasMany(CgpReversalRequest, { foreignKey: "companyId", as: "cgpReversalRequests" });
+CgpReversalRequest.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(CgpReversalRequest, { foreignKey: "branchId", as: "cgpReversalRequests" });
+CgpReversalRequest.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+CgpReversalRequest.hasMany(CgpReversalCompensation, { foreignKey: "reversalRequestId", as: "compensations" });
+CgpReversalCompensation.belongsTo(CgpReversalRequest, { foreignKey: "reversalRequestId", as: "reversalRequest" });
+
+Company.hasMany(CustomerFinancialLiability, { foreignKey: "companyId", as: "customerFinancialLiabilities" });
+CustomerFinancialLiability.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(CustomerFinancialLiability, { foreignKey: "branchId", as: "customerFinancialLiabilities" });
+CustomerFinancialLiability.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+Customer.hasMany(CustomerFinancialLiability, { foreignKey: "customerId", as: "financialLiabilities" });
+CustomerFinancialLiability.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
+CustomerGoldPurchaseDocument.hasMany(CustomerFinancialLiability, { foreignKey: "sourceDocumentId", as: "financialLiabilities" });
+CustomerFinancialLiability.belongsTo(CustomerGoldPurchaseDocument, { foreignKey: "sourceDocumentId", as: "sourceDocument" });
+OutboxEvent.hasOne(CustomerFinancialLiability, { foreignKey: "sourceEventId", as: "customerFinancialLiability" });
+CustomerFinancialLiability.belongsTo(OutboxEvent, { foreignKey: "sourceEventId", targetKey: "eventId", as: "sourceEvent" });
+JournalEntry.hasOne(CustomerFinancialLiability, { foreignKey: "journalEntryId", as: "customerFinancialLiability" });
+CustomerFinancialLiability.belongsTo(JournalEntry, { foreignKey: "journalEntryId", as: "journalEntry" });
+
+Company.hasMany(FinancialSettlement, { foreignKey: "companyId", as: "financialSettlements" });
+FinancialSettlement.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(FinancialSettlement, { foreignKey: "branchId", as: "financialSettlements" });
+FinancialSettlement.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+Customer.hasMany(FinancialSettlement, { foreignKey: "customerId", as: "financialSettlements" });
+FinancialSettlement.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
+JournalEntry.hasOne(FinancialSettlement, { foreignKey: "journalEntryId", as: "financialSettlement" });
+FinancialSettlement.belongsTo(JournalEntry, { foreignKey: "journalEntryId", as: "journalEntry" });
+FinancialApprovalPolicy.hasMany(FinancialSettlement, { foreignKey: "approvalPolicyId", as: "settlements" });
+FinancialSettlement.belongsTo(FinancialApprovalPolicy, { foreignKey: "approvalPolicyId", as: "approvalPolicy" });
+ApprovalRequest.hasMany(FinancialSettlement, { foreignKey: "approvalRequestId", as: "financialSettlements" });
+FinancialSettlement.belongsTo(ApprovalRequest, { foreignKey: "approvalRequestId", as: "approvalRequest" });
+FinancialSettlement.hasMany(FinancialSettlementLeg, { foreignKey: "settlementId", as: "legs" });
+FinancialSettlementLeg.belongsTo(FinancialSettlement, { foreignKey: "settlementId", as: "settlement" });
+FinancialSettlementLeg.belongsTo(Account, { foreignKey: "accountId", as: "account" });
+FinancialSettlementLeg.belongsTo(CashRegisterSession, { foreignKey: "cashRegisterSessionId", as: "cashRegisterSession" });
+FinancialSettlementLeg.belongsTo(CashTransaction, { foreignKey: "cashTransactionId", as: "cashTransaction" });
+FinancialSettlement.hasMany(FinancialSettlementAllocation, { foreignKey: "settlementId", as: "allocations" });
+FinancialSettlementAllocation.belongsTo(FinancialSettlement, { foreignKey: "settlementId", as: "settlement" });
+FinancialSettlementAllocation.belongsTo(CustomerFinancialLiability, { foreignKey: "customerFinancialLiabilityId", as: "customerFinancialLiability" });
+
+Company.hasMany(GoldCoreEvent, { foreignKey: "companyId", as: "goldCoreEvents" });
+GoldCoreEvent.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(GoldCoreEvent, { foreignKey: "branchId", as: "goldCoreEvents" });
+GoldCoreEvent.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+Customer.hasMany(GoldCoreEvent, { foreignKey: "sourcePartyId", as: "sourceGoldCoreEvents" });
+GoldCoreEvent.belongsTo(Customer, { foreignKey: "sourcePartyId", as: "sourceCustomer" });
+CustomerGoldPurchaseDocument.hasMany(GoldCoreEvent, { foreignKey: "sourceDocumentId", as: "goldCoreEvents" });
+GoldCoreEvent.belongsTo(CustomerGoldPurchaseDocument, { foreignKey: "sourceDocumentId", as: "sourceDocument" });
+OutboxEvent.hasOne(GoldCoreEvent, { foreignKey: "sourceEventId", as: "goldCoreEvent" });
+GoldCoreEvent.belongsTo(OutboxEvent, { foreignKey: "sourceEventId", targetKey: "eventId", as: "sourceEvent" });
+
+Company.hasMany(GoldMarketQuote, { foreignKey: "companyId", as: "goldMarketQuotes" });
+GoldMarketQuote.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Company.hasOne(GoldMarketSetting, { foreignKey: "companyId", as: "goldMarketSetting" });
+GoldMarketSetting.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Company.hasMany(GoldPricingPolicy, { foreignKey: "companyId", as: "goldPricingPolicies" });
+GoldPricingPolicy.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+User.hasMany(GoldPricingPolicy, { foreignKey: "createdBy", as: "createdGoldPricingPolicies" });
+GoldPricingPolicy.belongsTo(User, { foreignKey: "createdBy", as: "creator" });
+GoldPricingPolicy.belongsTo(GoldPricingPolicy, { foreignKey: "supersedesPolicyId", as: "supersededPolicy" });
+GoldPricingPolicy.hasMany(GoldPricingPolicy, { foreignKey: "supersedesPolicyId", as: "successorPolicies" });
 
 Company.hasMany(InvestmentGoldPurchaseDocument, { foreignKey: "companyId", as: "investmentGoldPurchaseDocuments" });
 InvestmentGoldPurchaseDocument.belongsTo(Company, { foreignKey: "companyId", as: "company" });
@@ -503,6 +602,18 @@ Company.hasMany(CustomerCreditTransaction, { foreignKey: "companyId", as: "custo
 CustomerCreditTransaction.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 Customer.hasMany(CustomerCreditTransaction, { foreignKey: "customerId", as: "creditTransactions" });
 CustomerCreditTransaction.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
+Company.hasMany(CustomerTransactionHistory, { foreignKey: "companyId", as: "customerTransactionHistory" });
+CustomerTransactionHistory.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(CustomerTransactionHistory, { foreignKey: "branchId", as: "customerTransactionHistory" });
+CustomerTransactionHistory.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+Customer.hasMany(CustomerTransactionHistory, { foreignKey: "customerId", as: "transactionHistory" });
+CustomerTransactionHistory.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
+Company.hasMany(CustomerTimeline, { foreignKey: "companyId", as: "customerTimelines" });
+CustomerTimeline.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(CustomerTimeline, { foreignKey: "branchId", as: "customerTimelines" });
+CustomerTimeline.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+Customer.hasMany(CustomerTimeline, { foreignKey: "customerId", as: "timeline" });
+CustomerTimeline.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
 
 // Supplier relationships
 Supplier.hasMany(SupplierDocument, { foreignKey: "supplierId", as: "documents" });
@@ -581,6 +692,14 @@ module.exports = {
   InventoryGoldPool,
   CustomerGoldPurchaseDocument,
   CustomerGoldPurchaseItem,
+  CgpPricingSnapshot,
+  CgpReversalRequest,
+  CgpReversalCompensation,
+  OutboxEvent,
+  ProcessedEvent,
+  IntegrationStatus,
+  CustomerFinancialLiability,
+  GoldCoreEvent,
   InvestmentGoldPurchaseDocument,
   InvestmentGoldPurchaseItem,
   GoldPurchaseApprovalRequest,
@@ -597,6 +716,10 @@ module.exports = {
   Attendance,
   Payslip,
   ApprovalRequest,
+  FinancialApprovalPolicy,
+  FinancialSettlement,
+  FinancialSettlementLeg,
+  FinancialSettlementAllocation,
   Setting,
   AuditLog,
   GoldPrice,
@@ -609,6 +732,8 @@ module.exports = {
   StockMovement,
   IdempotencyRequest,
   CustomerCreditTransaction,
+  CustomerTransactionHistory,
+  CustomerTimeline,
   BarcodeInventoryCode,
   BarcodeItemCode,
   BarcodeSequence,
@@ -621,5 +746,8 @@ module.exports = {
   BranchFinancialMapping,
   ReservationDepositReceiptDocument,
   ReservationDepositReceiptSequence,
-  FirstRunSetupState
+  FirstRunSetupState,
+  GoldMarketQuote,
+  GoldMarketSetting,
+  GoldPricingPolicy
 };

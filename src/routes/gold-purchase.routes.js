@@ -2,6 +2,9 @@ const express = require("express");
 const models = require("../models");
 const draftService = require("../services/gold-purchase-draft.service");
 const governanceService = require("../services/gold-purchase-governance.service");
+const cgpPostingService = require("../services/cgp-posting.service");
+const cgpReversalHoldService = require("../services/cgp-reversal-hold.service");
+const cgpReversalCompensationService = require("../services/cgp-reversal-compensation.service");
 const idempotencyService = require("../services/idempotency.service");
 const permissionService = require("../services/permission.service");
 const { authMiddleware } = require("../middleware/auth.middleware");
@@ -100,6 +103,74 @@ function bind(kind) {
 
   router.post(`/${kind}/drafts/:id/validate`, authMiddleware, authorizeDraft(kind, "validate"), (req, res, next) =>
     idempotent(req, res, next, { scope: `gold-purchase.${kind}.validate`, statusCode: 200, execute: (t) => draftService.validate(kind, context(req), req.params.id, req.body?.version, t) }));
+
+  if (kind === "cgp") {
+    router.post("/cgp/drafts/:id/post", authMiddleware, (req, res, next) =>
+      idempotent(req, res, next, {
+        scope: "gold-purchase.cgp.post",
+        statusCode: 200,
+        execute: (t) => cgpPostingService.post({
+          context: { ...context(req), causationId: req.headers["x-causation-id"] || null },
+          id: req.params.id,
+          expectedVersion: req.body?.version,
+          correlationId: req.headers["x-correlation-id"] || null,
+          transaction: t,
+        }),
+      }));
+
+    // This is intentionally a request-only operation.  The explicit
+    // Inventory consumer owns the later Asset hold; no HTTP handler can
+    // directly mutate an Asset operational state.
+    router.post("/cgp/drafts/:id/reversal-holds", authMiddleware, (req, res, next) =>
+      idempotent(req, res, next, {
+        scope: "gold-purchase.cgp.reverse-hold",
+        statusCode: 202,
+        execute: (t) => cgpReversalHoldService.requestHold({
+          context: context(req), cgpDocumentId: req.params.id, reason: req.body?.reason,
+          idempotencyKey: req.headers["idempotency-key"] || req.body?.idempotencyKey,
+          correlationId: req.headers["x-correlation-id"] || null,
+          causationId: req.headers["x-causation-id"] || null, transaction: t,
+        }),
+      }));
+
+    // CGP-IMP-10 remains explicit-event controlled: this endpoint only
+    // records durable compensation intent.  Accounting, Gold, and Inventory
+    // retain their own canonical authorities and are never directly mutated
+    // by this request.
+    router.post("/cgp/drafts/:id/reversal-compensations", authMiddleware, (req, res, next) =>
+      idempotent(req, res, next, {
+        scope: "gold-purchase.cgp.reversal-compensation",
+        statusCode: 202,
+        execute: async (t) => {
+          const request = await models.CgpReversalRequest.findOne({ where: { cgpDocumentId: req.params.id, companyId: req.companyId, branchId: req.branchId }, transaction: t, lock: t.LOCK.UPDATE });
+          if (!request) throw new AppError("CGP reversal request was not found", 404, "CGP_REVERSAL_REQUEST_NOT_FOUND");
+          return cgpReversalCompensationService.beginCompensation({ requestId: request.id, actorId: req.user.id, context: context(req), transaction: t });
+        },
+      }));
+
+    // These commands process exactly the request's immutable compensation
+    // event.  They are deliberately narrow endpoints, not a global outbox
+    // dispatcher; each service independently enforces the CGP reverse
+    // capability and idempotent durable evidence.
+    router.post("/cgp/reversal-requests/:id/compensate-accounting", authMiddleware, async (req, res, next) => {
+      try {
+        const request = await models.CgpReversalRequest.findOne({ where: { id: req.params.id, companyId: req.companyId, branchId: req.branchId } });
+        if (!request) throw new AppError("CGP reversal request was not found", 404, "CGP_REVERSAL_REQUEST_NOT_FOUND");
+        return res.status(200).json({ success: true, data: await cgpReversalCompensationService.compensateAccounting({ eventId: request.compensationEventId, context: context(req) }) });
+      } catch (error) { return next(error); }
+    });
+    router.post("/cgp/reversal-requests/:id/compensate-gold", authMiddleware, async (req, res, next) => {
+      try {
+        const request = await models.CgpReversalRequest.findOne({ where: { id: req.params.id, companyId: req.companyId, branchId: req.branchId } });
+        if (!request) throw new AppError("CGP reversal request was not found", 404, "CGP_REVERSAL_REQUEST_NOT_FOUND");
+        return res.status(200).json({ success: true, data: await cgpReversalCompensationService.compensateGold({ eventId: request.compensationEventId, context: context(req) }) });
+      } catch (error) { return next(error); }
+    });
+    router.post("/cgp/reversal-requests/:id/finalize", authMiddleware, async (req, res, next) => {
+      try { return res.status(200).json({ success: true, data: await cgpReversalCompensationService.finalize({ requestId: req.params.id, actorId: req.user.id, context: context(req) }) }); }
+      catch (error) { return next(error); }
+    });
+  }
 
   router.post(`/${kind}/drafts/:id/void`, authMiddleware, authorizeDraft(kind, "void"), (req, res, next) =>
     idempotent(req, res, next, { scope: `gold-purchase.${kind}.void`, statusCode: 200, execute: (t) => draftService.voidDraft(kind, context(req), req.params.id, req.body || {}, t) }));
