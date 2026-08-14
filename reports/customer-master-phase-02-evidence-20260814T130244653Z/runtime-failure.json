@@ -1,0 +1,10 @@
+{
+  "result": "FAIL",
+  "stage": "clone_setup",
+  "message": "CUSTOMER_OR_SHELL_PERMISSIONS_MISSING",
+  "stack": [
+    "Error: CUSTOMER_OR_SHELL_PERMISSIONS_MISSING",
+    "    at main (H:\\WORK\\jewellery-erp-master\\backend\\tests\\customer-master-phase-02-browser-runtime.cjs:123:112)",
+    "    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)"
+  ]
+}

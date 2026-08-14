@@ -1,0 +1,45 @@
+const { DataTypes } = require("sequelize");
+const sequelize = require("../config/database");
+
+module.exports = sequelize.define("CustomerGoldPurchaseDocument", {
+  id: { type: DataTypes.STRING, primaryKey: true },
+  companyId: { type: DataTypes.STRING, allowNull: false, field: "company_id" },
+  branchId: { type: DataTypes.STRING, allowNull: false, field: "branch_id" },
+  draftNumber: { type: DataTypes.STRING, allowNull: false, field: "draft_number" },
+  customerId: { type: DataTypes.STRING, allowNull: false, field: "customer_id" },
+  transactionDate: { type: DataTypes.DATEONLY, allowNull: false, field: "transaction_date" },
+  currency: { type: DataTypes.STRING(3), allowNull: false },
+  exchangeRate: { type: DataTypes.DECIMAL(24, 8), allowNull: false, field: "exchange_rate" },
+  status: { type: DataTypes.ENUM("draft", "validated", "submitted", "approved"), allowNull: false, defaultValue: "draft" },
+  // `status` remains the temporary compatibility projection for existing draft
+  // and approval callers.  The two fields below are the CGP aggregate's
+  // canonical business and optional governance facts.
+  businessStatus: { type: DataTypes.STRING(16), allowNull: false, defaultValue: "DRAFT", field: "business_status" },
+  governanceStatus: { type: DataTypes.STRING(16), allowNull: false, defaultValue: "NONE", field: "governance_status" },
+  version: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1 },
+  notes: { type: DataTypes.TEXT },
+  createdBy: { type: DataTypes.STRING, field: "created_by" },
+  updatedBy: { type: DataTypes.STRING, field: "updated_by" },
+  validatedAt: { type: DataTypes.DATE, field: "validated_at" },
+  validatedBy: { type: DataTypes.STRING, field: "validated_by" },
+  submittedAt: { type: DataTypes.DATE, field: "submitted_at" },
+  submittedBy: { type: DataTypes.STRING, field: "submitted_by" },
+  approvedAt: { type: DataTypes.DATE, field: "approved_at" },
+  approvedBy: { type: DataTypes.STRING, field: "approved_by" },
+  postedAt: { type: DataTypes.DATE, field: "posted_at" },
+  postedBy: { type: DataTypes.STRING, field: "posted_by" },
+  postingReference: { type: DataTypes.STRING(128), field: "posting_reference" },
+  postingMetadata: { type: DataTypes.JSONB, field: "posting_metadata" },
+  totalGoldValue: { type: DataTypes.DECIMAL(20, 4), field: "total_gold_value" },
+  totalPayableToCustomer: { type: DataTypes.DECIMAL(20, 4), field: "total_payable_to_customer" },
+  lastRejectedAt: { type: DataTypes.DATE, field: "last_rejected_at" },
+  lastRejectedBy: { type: DataTypes.STRING, field: "last_rejected_by" },
+  lastRejectionReason: { type: DataTypes.TEXT, field: "last_rejection_reason" },
+  currentApprovalRequestId: { type: DataTypes.STRING, field: "current_approval_request_id" },
+  revisionNumber: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1, field: "revision_number" },
+  supersedesDocumentId: { type: DataTypes.STRING, field: "supersedes_document_id" },
+  rootDocumentId: { type: DataTypes.STRING, field: "root_document_id" },
+  voidedAt: { type: DataTypes.DATE, field: "voided_at" },
+  voidedBy: { type: DataTypes.STRING, field: "voided_by" },
+  voidReason: { type: DataTypes.TEXT, field: "void_reason" }
+}, { tableName: "customer_gold_purchase_documents", timestamps: true, underscored: true });
