@@ -1,0 +1,15 @@
+{
+  "result": "FAIL",
+  "stage": "optional_address_create_matrix",
+  "message": "Validation error: Validation isIn on sourceType failed",
+  "stack": [
+    "SequelizeValidationError: Validation error: Validation isIn on sourceType failed",
+    "    at InstanceValidator._validate (H:\\WORK\\jewellery-erp-master\\backend\\node_modules\\sequelize\\lib\\instance-validator.js:50:13)",
+    "    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)",
+    "    at async InstanceValidator._validateAndRunHooks (H:\\WORK\\jewellery-erp-master\\backend\\node_modules\\sequelize\\lib\\instance-validator.js:60:7)",
+    "    at async InstanceValidator.validate (H:\\WORK\\jewellery-erp-master\\backend\\node_modules\\sequelize\\lib\\instance-validator.js:54:12)",
+    "    at async model.save (H:\\WORK\\jewellery-erp-master\\backend\\node_modules\\sequelize\\lib\\model.js:2426:7)",
+    "    at async CustomerCreditTransaction.create (H:\\WORK\\jewellery-erp-master\\backend\\node_modules\\sequelize\\lib\\model.js:1362:12)",
+    "    at async createRow (H:\\WORK\\jewellery-erp-master\\backend\\src\\services\\customer-credit.service.js:59:15)"
+  ]
+}

@@ -1,0 +1,1060 @@
+{
+  "result": "PASS",
+  "database": "darfus_erp_customer_p2_correction_1786718101717",
+  "sourceDatabase": "darfus_erp_inventory_rehearsal_20260804_160500z",
+  "mutationTarget": "DISPOSABLE_CLONE_ONLY",
+  "syntheticCustomers": {
+    "withoutAddress": "CUS-0008",
+    "withAddress": "CUS-0009"
+  },
+  "network": [
+    {
+      "action": "open_customers",
+      "method": "GET",
+      "url": "/customers",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "open_customers",
+      "method": "GET",
+      "url": "/customers",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "create_without_address",
+      "method": "POST",
+      "url": "/customers",
+      "status": 201,
+      "requestKeys": [
+        "email",
+        "name",
+        "notes",
+        "phone",
+        "tier"
+      ],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": {
+        "tier": "Standard",
+        "notes": ""
+      },
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "create_without_address",
+      "method": "GET",
+      "url": "/customers",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "create_with_address",
+      "method": "POST",
+      "url": "/customers",
+      "status": 201,
+      "requestKeys": [
+        "addresses",
+        "email",
+        "name",
+        "notes",
+        "phone",
+        "tier"
+      ],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": {
+        "tier": "Standard",
+        "notes": "",
+        "addresses": [
+          {
+            "line1": "العنوان أ",
+            "city": "القاهرة"
+          }
+        ]
+      },
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "create_with_address",
+      "method": "GET",
+      "url": "/customers",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "get_customer_details",
+      "method": "GET",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "get_customer_details",
+      "method": "GET",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "get_customer_details",
+      "method": "GET",
+      "url": "/customers/CUS-0009/attachments",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "get_customer_details",
+      "method": "GET",
+      "url": "/customers/CUS-0009/invoices",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "get_customer_details",
+      "method": "GET",
+      "url": "/customers/CUS-0009/invoices",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "update_profile",
+      "method": "PUT",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [
+        "email",
+        "expectedUpdatedAt",
+        "name",
+        "nationality",
+        "notes",
+        "phone",
+        "tier"
+      ],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": true,
+      "requestBody": {
+        "tier": "Standard",
+        "notes": "تعديل Profile مسموح من Phase 2",
+        "nationality": "مصري",
+        "expectedUpdatedAt": "2026-08-14T14:35:09.040Z"
+      },
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "update_profile",
+      "method": "GET",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "add_second_address",
+      "method": "PUT",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [
+        "addresses",
+        "expectedUpdatedAt"
+      ],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": true,
+      "requestBody": {
+        "addresses": [
+          {
+            "isPrimary": true,
+            "line1": "العنوان أ",
+            "city": "القاهرة"
+          },
+          {
+            "isPrimary": false,
+            "line1": "العنوان ب",
+            "city": "الجيزة"
+          }
+        ],
+        "expectedUpdatedAt": "2026-08-14T14:35:10.401Z"
+      },
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "add_second_address",
+      "method": "GET",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "set_second_primary",
+      "method": "PUT",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [
+        "addresses",
+        "expectedUpdatedAt"
+      ],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": true,
+      "requestBody": {
+        "addresses": [
+          {
+            "isPrimary": false,
+            "line1": "العنوان أ",
+            "city": "القاهرة"
+          },
+          {
+            "isPrimary": true,
+            "line1": "العنوان ب",
+            "city": "الجيزة"
+          }
+        ],
+        "expectedUpdatedAt": "2026-08-14T14:35:10.671Z"
+      },
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "set_second_primary",
+      "method": "GET",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "pos_select_b_primary",
+      "method": "GET",
+      "url": "/customers",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "pos_select_b_primary",
+      "method": "GET",
+      "url": "/customers",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "set_first_primary",
+      "method": "PUT",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [
+        "addresses",
+        "expectedUpdatedAt"
+      ],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": true,
+      "requestBody": {
+        "addresses": [
+          {
+            "isPrimary": true,
+            "line1": "العنوان أ",
+            "city": "القاهرة"
+          },
+          {
+            "isPrimary": false,
+            "line1": "العنوان ب",
+            "city": "الجيزة"
+          }
+        ],
+        "expectedUpdatedAt": "2026-08-14T14:35:10.820Z"
+      },
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "set_first_primary",
+      "method": "GET",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "set_first_primary",
+      "method": "GET",
+      "url": "/customers",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "set_first_primary",
+      "method": "GET",
+      "url": "/customers",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "edit_second_address",
+      "method": "PUT",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [
+        "addresses",
+        "expectedUpdatedAt"
+      ],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": true,
+      "requestBody": {
+        "addresses": [
+          {
+            "isPrimary": true,
+            "line1": "العنوان أ",
+            "city": "القاهرة"
+          },
+          {
+            "isPrimary": false,
+            "line1": "عنوان طويل جدًا Mixed English 789 — شارع تجريبي يمتد لاختبار الالتفاف الآمن داخل البطاقة بدون أي تمرير أفقي",
+            "city": "الجيزة"
+          }
+        ],
+        "expectedUpdatedAt": "2026-08-14T14:35:12.214Z"
+      },
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "edit_second_address",
+      "method": "GET",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "remove_primary_address",
+      "method": "PUT",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [
+        "addresses",
+        "expectedUpdatedAt"
+      ],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": true,
+      "requestBody": {
+        "addresses": [
+          {
+            "isPrimary": true,
+            "line1": "العنوان أ",
+            "city": "القاهرة"
+          }
+        ],
+        "expectedUpdatedAt": "2026-08-14T14:35:13.401Z"
+      },
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "remove_primary_address",
+      "method": "GET",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "remove_last_address",
+      "method": "PUT",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [
+        "addresses",
+        "expectedUpdatedAt"
+      ],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": true,
+      "requestBody": {
+        "addresses": [],
+        "expectedUpdatedAt": "2026-08-14T14:35:13.670Z"
+      },
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "remove_last_address",
+      "method": "GET",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "PUT",
+      "url": "/customers/CUS-0009",
+      "status": 409,
+      "requestKeys": [
+        "email",
+        "expectedUpdatedAt",
+        "name",
+        "nationality",
+        "notes",
+        "phone",
+        "tier"
+      ],
+      "responseKeys": [
+        "error",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": true,
+      "requestBody": {
+        "tier": "Standard",
+        "notes": "تعديل Profile مسموح من Phase 2",
+        "nationality": "مصري",
+        "expectedUpdatedAt": "2026-08-14T14:35:13.934Z"
+      },
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "GET",
+      "url": "/customers",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "GET",
+      "url": "/customers",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "GET",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "GET",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "GET",
+      "url": "/customers/CUS-0009/attachments",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "GET",
+      "url": "/customers/CUS-0009/invoices",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "GET",
+      "url": "/customers/CUS-0009/invoices",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "GET",
+      "url": "/customers",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "GET",
+      "url": "/customers",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "GET",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "GET",
+      "url": "/customers/CUS-0009/attachments",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "GET",
+      "url": "/customers/CUS-0009/invoices",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "GET",
+      "url": "/customers/CUS-0009",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "GET",
+      "url": "/customers/CUS-0009/invoices",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "GET",
+      "url": "/customers",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    },
+    {
+      "action": "stale_profile_update",
+      "method": "GET",
+      "url": "/customers",
+      "status": 200,
+      "requestKeys": [],
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ],
+      "expectedUpdatedAtPresent": false,
+      "requestBody": null,
+      "database": "darfus_erp_customer_p2_correction_1786718101717"
+    }
+  ],
+  "permissions": {
+    "viewOnlyMutationStatus": 403,
+    "wrongCompanyStatus": 403,
+    "createActionVisibleForCreatePermission": true,
+    "editActionHiddenWithoutUpdate": true
+  },
+  "crossModuleSmoke": {
+    "posLoaded": true,
+    "salesLoaded": true,
+    "invoiceDetailCustomerNameContractCheckedByStaticTest": true
+  },
+  "concurrency": {
+    "status": 409,
+    "code": "CUSTOMER_UPDATE_CONFLICT",
+    "latestChangePreserved": true
+  },
+  "protectedSnapshot": {
+    "status": "active",
+    "balance": "0",
+    "purchases": "0",
+    "loyaltyPoints": 0
+  },
+  "protectedAfter": {
+    "status": "active",
+    "balance": "0",
+    "purchases": "0",
+    "loyaltyPoints": 0
+  },
+  "optionalAddressMatrix": [
+    {
+      "label": "line1_only",
+      "status": 201,
+      "primary": true
+    },
+    {
+      "label": "city_only",
+      "status": 201,
+      "primary": true
+    },
+    {
+      "label": "country_only",
+      "status": 201,
+      "primary": true
+    },
+    {
+      "label": "line1_city",
+      "status": 201,
+      "primary": true
+    },
+    {
+      "label": "city_country",
+      "status": 201,
+      "primary": true
+    },
+    {
+      "label": "postal_only",
+      "status": 201,
+      "primary": true
+    },
+    {
+      "label": "all_blank",
+      "status": 422,
+      "errorCode": "EMPTY_CUSTOMER_ADDRESS"
+    }
+  ],
+  "primarySwitch": {
+    "aToB": true,
+    "bToA": true,
+    "staleCacheCause": "NOT_PRESENT_ON_NORMAL_REMOUNT"
+  },
+  "beforeCounts": {
+    "customers": 3,
+    "customer_credit_transactions": 3,
+    "loyalty_transactions": 103,
+    "invoices": 133,
+    "payments": 122,
+    "journal_entries": 497,
+    "journal_lines": 1423,
+    "cash_transactions": 173,
+    "assets": 475
+  },
+  "afterCounts": {
+    "customers": 11,
+    "customer_credit_transactions": 3,
+    "loyalty_transactions": 103,
+    "invoices": 133,
+    "payments": 122,
+    "journal_entries": 497,
+    "journal_lines": 1423,
+    "cash_transactions": 173,
+    "assets": 475
+  },
+  "integrity": {
+    "orphan_branch_customers": 0,
+    "malformed_addresses": 0,
+    "orphan_journal_lines": 0,
+    "unbalanced_journals": 0
+  },
+  "auditCount": 9,
+  "screenshots": [
+    "H:\\WORK\\jewellery-erp-master\\backend\\reports\\customer-master-phase-02-correction-evidence-20260814T143501713Z\\01-create-customer-address-1440x900.png",
+    "H:\\WORK\\jewellery-erp-master\\backend\\reports\\customer-master-phase-02-correction-evidence-20260814T143501713Z\\02-details-edit-primary-1440x900.png",
+    "H:\\WORK\\jewellery-erp-master\\backend\\reports\\customer-master-phase-02-correction-evidence-20260814T143501713Z\\03-profile-nationality-1440x900.png",
+    "H:\\WORK\\jewellery-erp-master\\backend\\reports\\customer-master-phase-02-correction-evidence-20260814T143501713Z\\03-multiple-addresses-primary-1280x800.png",
+    "H:\\WORK\\jewellery-erp-master\\backend\\reports\\customer-master-phase-02-correction-evidence-20260814T143501713Z\\04-pos-b-primary-1280x800.png",
+    "H:\\WORK\\jewellery-erp-master\\backend\\reports\\customer-master-phase-02-correction-evidence-20260814T143501713Z\\05-pos-a-primary-1280x800.png",
+    "H:\\WORK\\jewellery-erp-master\\backend\\reports\\customer-master-phase-02-correction-evidence-20260814T143501713Z\\04-long-mixed-address-1280x800.png",
+    "H:\\WORK\\jewellery-erp-master\\backend\\reports\\customer-master-phase-02-correction-evidence-20260814T143501713Z\\05-primary-replacement-1280x800.png",
+    "H:\\WORK\\jewellery-erp-master\\backend\\reports\\customer-master-phase-02-correction-evidence-20260814T143501713Z\\06-empty-address-1280x800.png",
+    "H:\\WORK\\jewellery-erp-master\\backend\\reports\\customer-master-phase-02-correction-evidence-20260814T143501713Z\\07-conflict-message-1280x800.png"
+  ],
+  "overflowEvidence": [
+    {
+      "viewportWidth": 1440,
+      "documentClientWidth": 1440,
+      "documentScrollWidth": 1440,
+      "bodyClientWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "label": "create-address-1440x900",
+      "horizontalOverflow": false
+    },
+    {
+      "viewportWidth": 1440,
+      "documentClientWidth": 1440,
+      "documentScrollWidth": 1440,
+      "bodyClientWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "label": "details-primary-1440x900",
+      "horizontalOverflow": false
+    },
+    {
+      "viewportWidth": 1440,
+      "documentClientWidth": 1440,
+      "documentScrollWidth": 1440,
+      "bodyClientWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "label": "profile-nationality-1440x900",
+      "horizontalOverflow": false
+    },
+    {
+      "viewportWidth": 1280,
+      "documentClientWidth": 1280,
+      "documentScrollWidth": 1280,
+      "bodyClientWidth": 1280,
+      "bodyScrollWidth": 1280,
+      "label": "multiple-addresses-1280x800",
+      "horizontalOverflow": false
+    },
+    {
+      "viewportWidth": 1280,
+      "documentClientWidth": 1280,
+      "documentScrollWidth": 1280,
+      "bodyClientWidth": 1280,
+      "bodyScrollWidth": 1280,
+      "label": "long-mixed-address-1280x800",
+      "horizontalOverflow": false
+    },
+    {
+      "viewportWidth": 1280,
+      "documentClientWidth": 1280,
+      "documentScrollWidth": 1280,
+      "bodyClientWidth": 1280,
+      "bodyScrollWidth": 1280,
+      "label": "primary-replacement-1280x800",
+      "horizontalOverflow": false
+    },
+    {
+      "viewportWidth": 1280,
+      "documentClientWidth": 1280,
+      "documentScrollWidth": 1280,
+      "bodyClientWidth": 1280,
+      "bodyScrollWidth": 1280,
+      "label": "empty-address-1280x800",
+      "horizontalOverflow": false
+    },
+    {
+      "viewportWidth": 1280,
+      "documentClientWidth": 1280,
+      "documentScrollWidth": 1280,
+      "bodyClientWidth": 1280,
+      "bodyScrollWidth": 1280,
+      "label": "conflict-message-1280x800",
+      "horizontalOverflow": false
+    }
+  ],
+  "consoleErrors": [
+    "Failed to load resource: the server responded with a status of 409 (Conflict)"
+  ]
+}

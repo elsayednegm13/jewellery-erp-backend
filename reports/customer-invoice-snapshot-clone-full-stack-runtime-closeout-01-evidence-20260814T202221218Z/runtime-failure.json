@@ -1,0 +1,15 @@
+{
+  "result": "BLOCKED",
+  "stage": "frontend_build",
+  "message": "Command failed: C:\\Program Files\\nodejs\\node.exe C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js run build",
+  "stack": [
+    "Error: Command failed: C:\\Program Files\\nodejs\\node.exe C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js run build",
+    "    at genericNodeError (node:internal/errors:983:15)",
+    "    at wrappedFn (node:internal/errors:537:14)",
+    "    at checkExecSyncError (node:child_process:916:11)",
+    "    at execFileSync (node:child_process:952:15)",
+    "    at main (H:\\WORK\\jewellery-erp-master\\backend\\scripts\\customer-invoice-snapshot-clone-full-stack-runtime-closeout.js:175:3)",
+    "    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)"
+  ],
+  "clone": "darfus_erp_invoice_snapshot_fullstack_1786738941218"
+}

@@ -1,0 +1,7 @@
+{
+  "url": "http://127.0.0.1:20700/ar/pos",
+  "title": "DARFUS Jewellery ERP",
+  "bodyText": "Preparing workspace\n\nValidating Company readiness…\n\nLoading Company readiness…",
+  "consoleErrors": [],
+  "frontendOutput": "▲ Next.js 16.2.9\n- Local:         http://127.0.0.1:20700\n- Network:       http://127.0.0.1:20700\n✓ Ready in 506ms\n"
+}
