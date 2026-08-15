@@ -28,7 +28,7 @@ const PERMISSIONS = [
   "reservations.refund_request", "reservations.refund_approve", "reservations.refund_reject", "reservations.refund_execute",
   "reservations.refund_method_override", "reservations.audit_view", "reservations.reports_view", "reservations.reports_export",
   "reservations.statement_view", "reservations.configure_account",
-  "gold_purchase.cgp.view", "gold_purchase.cgp.view_all", "gold_purchase.cgp.view_branch", "gold_purchase.cgp.view_own", "gold_purchase.cgp.settle",
+  "gold_purchase.cgp.view", "gold_purchase.cgp.view_all", "gold_purchase.cgp.view_branch", "gold_purchase.cgp.view_own",
   "gold_purchase.cgp.create", "gold_purchase.cgp.update_draft", "gold_purchase.cgp.validate", "gold_purchase.cgp.submit",
   "gold_purchase.cgp.approve", "gold_purchase.cgp.reject", "gold_purchase.cgp.self_approve", "gold_purchase.cgp.void",
   "gold_purchase.igp.view", "gold_purchase.igp.view_all", "gold_purchase.igp.view_branch", "gold_purchase.igp.view_own",
