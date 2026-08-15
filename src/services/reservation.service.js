@@ -12,6 +12,7 @@ const reservationFinancialResolver = require("./reservation-financial-resolver.s
 const depositReceiptService = require("./reservation-deposit-receipt.service");
 const { requireOperationalBranch, assertBranchCustomer, assertSameBranch } = require("./branch-isolation.service");
 const { AppError, ValidationError, NotFoundError, ConflictError } = require("../utils/errors");
+const { buildCustomerContactSnapshot } = require("./invoice-contact-snapshot.service");
 
 // Bilingual, stable-coded errors for reservation deposit configuration and the
 // mandatory initial-payment rule (Phase 32.6-Post-C). The message carries both
@@ -723,6 +724,7 @@ class ReservationService {
     }
     const customer = await models.Customer.findOne({ where: { id: reservation.customerId, companyId }, transaction, lock: true });
     if (!customer) throw new NotFoundError("Reservation customer not found");
+    const customerContactSnapshot = buildCustomerContactSnapshot(customer);
     const branch = reservation.branchId
       ? await models.Branch.findOne({ where: { id: reservation.branchId, companyId, isActive: true }, transaction, lock: true })
       : null;
@@ -795,7 +797,8 @@ class ReservationService {
       branchId: reservation.branchId || null,
       branch: branch?.name || reservation.branch || "Main Branch",
       customerId: reservation.customerId,
-      customerName: reservation.customerName,
+      customerName: reservation.customerName || customer.name,
+      ...customerContactSnapshot,
       type: "sale",
       date: body.date || nowStr.slice(0, 10),
       subtotal: totals.taxBase,

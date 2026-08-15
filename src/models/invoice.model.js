@@ -29,6 +29,16 @@ const Invoice = sequelize.define("Invoice", {
     allowNull: false,
     field: "customer_name"
   },
+  customerPhoneSnapshot: {
+    type: DataTypes.STRING(255),
+    allowNull: true,
+    field: "customer_phone_snapshot"
+  },
+  customerAddressSnapshot: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    field: "customer_address_snapshot"
+  },
   date: {
     type: DataTypes.STRING,
     allowNull: false

@@ -22,6 +22,8 @@ const { emitEntityChanged } = require("../services/realtime-helper.service");
 const notificationService = require("../services/notification.service");
 const idempotencyService = require("../services/idempotency.service");
 const customerCreditService = require("../services/customer-credit.service");
+const customerPosSummaryService = require("../services/customer-pos-summary.service");
+const { buildCustomerContactSnapshot, copyInvoiceContactSnapshot } = require("../services/invoice-contact-snapshot.service");
 const installmentOverpaymentReclassificationService = require("../services/installment-overpayment-reclassification.service");
 const installmentPrecisionRemediationService = require("../services/installment-precision-remediation.service");
 const barcodeIdentityService = require("../services/barcode-identity.service");
@@ -713,6 +715,7 @@ async function executeCanonicalSale(req, res, next, { operation = "pos.checkout"
     if (!customer) {
       throw new ValidationError("العميل المحدد غير موجود");
     }
+    const customerContactSnapshot = buildCustomerContactSnapshot(customer);
 
     // 4. Products/assets validation
     const items = Array.isArray(body.items) ? body.items : [];
@@ -972,6 +975,7 @@ async function executeCanonicalSale(req, res, next, { operation = "pos.checkout"
       branch: branchRecord.name,
       customerId,
       customerName: customer.name,
+      ...customerContactSnapshot,
       type: paymentMethod === "installment" ? "installment" : (paymentMethod === "deposit" ? "deposit" : "sale"),
       date: body.date || nowStr.slice(0, 10),
       // Stored subtotal is the net-of-VAT base (= total - tax) so the journal
@@ -1501,6 +1505,7 @@ async function executeCanonicalReturn(req, res, next, { operation = "sales.retur
 
     // 6. Create Return Invoice (Negative total representing credit note)
     const nowStr = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const originalContactSnapshot = copyInvoiceContactSnapshot(originalInvoice);
     const returnInvoice = await models.Invoice.create({
       id: returnInvoiceId,
       companyId: req.companyId,
@@ -1508,6 +1513,7 @@ async function executeCanonicalReturn(req, res, next, { operation = "sales.retur
       branch: branchRecord.name,
       customerId: originalInvoice.customerId,
       customerName: originalInvoice.customerName,
+      ...originalContactSnapshot,
       type: "return",
       date: nowStr.slice(0, 10),
       subtotal: -returnedSubtotal,
@@ -2331,6 +2337,7 @@ router.post(
 
     // 7. Create Exchange Invoice record
     const nowStr = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const originalContactSnapshot = copyInvoiceContactSnapshot(originalInvoice);
     const exchangeInvoice = await models.Invoice.create({
       id: exchangeInvoiceId,
       companyId: req.companyId,
@@ -2338,6 +2345,7 @@ router.post(
       branch: branchRecord.name,
       customerId: originalInvoice.customerId,
       customerName: originalInvoice.customerName,
+      ...originalContactSnapshot,
       type: "exchange",
       date: nowStr.slice(0, 10),
       subtotal: exchangeSubtotal,
@@ -2738,6 +2746,7 @@ router.post("/customers/:id/gold/deposit", authMiddleware, async (req, res, next
     if (!customer) {
       throw new NotFoundError("العميل غير موجود");
     }
+    const customerContactSnapshot = buildCustomerContactSnapshot(customer);
 
     const settings = await settingsService.getCompanySettings(req.companyId, { transaction: t });
 
@@ -2840,6 +2849,7 @@ router.post("/customers/:id/gold/deposit", authMiddleware, async (req, res, next
         branch: branchRecord.name,
         customerId,
         customerName: customer.name,
+        ...customerContactSnapshot,
         type: "return", // negative total acts as payout
         date: nowStr.slice(0, 10),
         subtotal: -calculatedValue,
@@ -5038,6 +5048,26 @@ router.post("/employees/:id/reactivate", authMiddleware, requireAnyPermission(em
 
 // 1. Initialize Standard CRUD Endpoints
 setupCrud("customers", models.Customer, ["name", "phone", "email"]);
+
+// One selected-Customer projection only. Do not enrich every /customers list
+// row with customer-credit work, and do not own any financial calculation here.
+router.get("/customers/:id/pos-summary", authMiddleware, requireBusinessPermission("customers.view"), async (req, res, next) => {
+  try {
+    const customer = await requireBranchCustomerResource({
+      companyId: req.companyId,
+      branchId: req.branchId,
+      customerId: req.params.id,
+    });
+    const summary = await customerPosSummaryService.getCustomerPosSummary({
+      models,
+      companyId: req.companyId,
+      customer,
+    });
+    return res.status(200).json({ success: true, data: summary });
+  } catch (error) {
+    return next(error);
+  }
+});
 setupCrud("suppliers", models.Supplier, ["name", "phone", "email", "category"]);
 setupCrud("employees", models.Employee, ["name", "phone", "email", "role"]);
 
@@ -14043,6 +14073,7 @@ router.post(
     // Re-validate customer + active branch at post time.
     const customer = await models.Customer.findOne({ where: { id: invoice.customerId, companyId: req.companyId }, transaction: t });
     if (!customer) throw new NotFoundError("العميل غير موجود");
+    const customerContactSnapshot = buildCustomerContactSnapshot(customer);
     const branchId = invoice.branchId;
     await salesOperatorPolicy.assertSalesOperatorPolicy(req, "sales.post", { branchId, transaction: t });
     assertOperatorBranchForCommand(req, branchId);
@@ -14118,6 +14149,7 @@ router.post(
       remainingAmount,
       status,
       postingStatus: "posted",
+      ...customerContactSnapshot,
       invoiceNumber: finalInvoiceNumber,
       postedAt: nowStr,
       idempotencyKey: idempotencyKey || invoice.idempotencyKey,

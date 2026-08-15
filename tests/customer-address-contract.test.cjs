@@ -31,9 +31,22 @@ test("multiple explicit Primary addresses fail closed", () => {
   );
 });
 
-test("malformed and unsupported address shapes fail new writes", () => {
+test("malformed, unsupported, and wholly blank address shapes fail new writes", () => {
   assert.throws(() => normalizeCustomerAddresses([{ address: "legacy" }]), (error) => error.errorCode === "INVALID_CUSTOMER_ADDRESS");
-  assert.throws(() => normalizeCustomerAddresses([address("  ", "Dubai", "AE")]), (error) => error.errorCode === "INVALID_CUSTOMER_ADDRESS");
+  assert.throws(() => normalizeCustomerAddresses([{ line1: "  ", city: "", country: "", postalCode: "" }]), (error) => error.errorCode === "EMPTY_CUSTOMER_ADDRESS");
+});
+
+test("each address text field is optional, but any one meaningful value is valid", () => {
+  for (const partial of [
+    { line1: "Line only" },
+    { city: "City only" },
+    { country: "Country only" },
+    { postalCode: "10001" },
+  ]) {
+    const result = normalizeCustomerAddresses([partial]);
+    assert.equal(result[0].isPrimary, true);
+    assert.equal(Object.values(partial).some(Boolean), true);
+  }
 });
 
 test("legacy reads remain non-mutating and use explicit source classification", () => {
@@ -65,6 +78,8 @@ test("Customer mutation sanitizer protects financial and lifecycle authority", (
     status: "inactive",
     companyId: "attacker-company",
     expectedUpdatedAt: "stale",
+    nationality: "  مصري  ",
+    creditLimit: 123,
   });
   assert.equal(result.name, "Synthetic");
   assert.equal(result.addresses[0].isPrimary, true);
@@ -75,4 +90,6 @@ test("Customer mutation sanitizer protects financial and lifecycle authority", (
   assert.equal("status" in result, false);
   assert.equal("companyId" in result, false);
   assert.equal("expectedUpdatedAt" in result, false);
+  assert.equal("creditLimit" in result, false);
+  assert.equal(result.nationality, "مصري");
 });

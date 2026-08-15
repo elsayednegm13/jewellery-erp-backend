@@ -6,7 +6,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { execFileSync } = require("node:child_process");
+const { execFileSync, spawnSync, spawn } = require("node:child_process");
 require("dotenv").config({ path: path.resolve(__dirname, "../.env"), override: false });
 const { chromium } = require("playwright");
 const { QueryTypes } = require("sequelize");
@@ -30,11 +30,53 @@ const mark = (name, status, evidence = {}, failureLayer = null) => {
 const withTimeout = async (label, ms, fn) => Promise.race([Promise.resolve().then(fn), new Promise((_, reject) => setTimeout(() => { const e = new Error(`${label} timeout ${ms}ms`); e.code = "HARNESS_WAIT_CONDITION"; reject(e); }, ms))]);
 const pgEnv = (config, database) => ({ ...process.env, PGHOST: config.host, PGPORT: String(config.port), PGUSER: config.username, PGPASSWORD: config.password, PGDATABASE: database, PGSSLMODE: config.ssl ? "require" : "disable" });
 const pg = (name, args, env) => execFileSync(path.join(PG_BIN, name), args, { env, stdio: "pipe" });
+const npmCli = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+const freePort = () => new Promise((resolve, reject) => { const net = require("node:net"); const s = net.createServer(); s.once("error", reject); s.listen(0, "127.0.0.1", () => { const p = s.address().port; s.close(() => resolve(p)); }); });
+const waitHttp = async (url, timeoutMs = 90000) => { const end = Date.now() + timeoutMs; while (Date.now() < end) { try { const r = await fetch(url); if (r.status > 0) return r.status; } catch (_) {} await new Promise((resolve) => setTimeout(resolve, 500)); } throw new Error(`FRONTEND_STARTUP_TIMEOUT:${url}`); };
+
+async function applyApprovedSnapshotMigration(config, clone) {
+  const { Sequelize } = require("sequelize");
+  const migrationName = "20260814010000-customer-invoice-contact-snapshots.js";
+  const migration = require(path.resolve(__dirname, "../migrations", migrationName));
+  const s = new Sequelize(clone, config.username, config.password, { host: config.host, port: config.port, dialect: "postgres", logging: false, dialectOptions: config.ssl ? { ssl: { rejectUnauthorized: false } } : {} });
+  try {
+    const current = (await s.query("SELECT current_database() AS db"))[0][0].db;
+    if (current !== clone || current === ACCEPTANCE || current === PERSISTENT) throw new Error(`migration clone guard mismatch ${current}`);
+    const exists = (await s.query("SELECT 1 FROM \"SequelizeMeta\" WHERE name=:name", { replacements: { name: migrationName } }))[0].length;
+    if (!exists) {
+      await migration.up(s.getQueryInterface());
+      await s.query("INSERT INTO \"SequelizeMeta\" (name) VALUES (:name)", { replacements: { name: migrationName } });
+    }
+    const count = (await s.query("SELECT count(*)::int AS count FROM \"SequelizeMeta\""))[0][0].count;
+    if (count !== 81) throw new Error(`clone migration count ${count}`);
+    mark("02A_CLONE_SNAPSHOT_MIGRATION_81", "PASS", { clone, migration: migrationName, migrations: count });
+  } finally { await s.close(); }
+}
+
+async function prepareEphemeralFrontend(repo, apiOrigin, apiBase) {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "darfus-supplier-frontend-"));
+  const tempApp = path.join(tempRoot, "frontend");
+  fs.cpSync(repo, tempApp, { recursive: true, filter: (source) => { const b = path.basename(source); if ([".git", ".next", "node_modules", "backend", "reports", "test"].includes(b)) return false; if (b.startsWith(".env")) return false; return true; } });
+  const installEnv = { ...process.env, NODE_ENV: "development" };
+  const env = { ...process.env, NODE_ENV: "production", NEXT_PUBLIC_DATA_SOURCE: "api", NEXT_PUBLIC_API_URL: apiBase, NEXT_PUBLIC_API_ORIGIN: apiOrigin, BACKEND_ORIGIN: apiOrigin };
+  const install = spawnSync(process.execPath, [npmCli, "ci", "--no-audit", "--no-fund"], { cwd: tempApp, env: installEnv, encoding: "utf8", timeout: 900000, maxBuffer: 32 * 1024 * 1024 });
+  fs.writeFileSync(path.join(os.tmpdir(), `supplier-frontend-npm-ci-${Date.now()}.log`), `${install.stdout || ""}\n${install.stderr || ""}`);
+  if (install.status !== 0) throw new Error(`EPHEMERAL_FRONTEND_NPM_CI_FAILED:${install.status}`);
+  const build = spawnSync(process.execPath, [npmCli, "run", "build", "--", "--webpack"], { cwd: tempApp, env, encoding: "utf8", timeout: 900000, maxBuffer: 32 * 1024 * 1024 });
+  fs.writeFileSync(path.join(os.tmpdir(), `supplier-frontend-build-${Date.now()}.log`), `${build.stdout || ""}\n${build.stderr || ""}`);
+  if (build.status !== 0) throw new Error(`EPHEMERAL_FRONTEND_BUILD_FAILED:${build.status}`);
+  const port = await freePort();
+  const child = spawn(process.execPath, [path.join(tempApp, "node_modules/next/dist/bin/next"), "start", "-p", String(port), "-H", "127.0.0.1"], { cwd: tempApp, env, stdio: ["ignore", "pipe", "pipe"] });
+  let output = ""; child.stdout.on("data", (b) => { output += String(b); }); child.stderr.on("data", (b) => { output += String(b); });
+  await waitHttp(`http://127.0.0.1:${port}/ar/suppliers/purchases`);
+  mark("06A_EPHEMERAL_FRONTEND_READY", "PASS", { port, pid: child.pid, apiOrigin });
+  return { tempRoot, tempApp, port, child, output };
+}
 
 async function main() {
   const config = resolveDatabaseEnv({ ...process.env, NODE_ENV: "development", DATABASE_URL: "", DB_NAME: ACCEPTANCE });
   const clone = `${PREFIX}${Date.now()}`;
-  let sequelize; let server; let browser; let context; let pageRef; let cloneDropped = false;
+  let sequelize; let server; let browser; let context; let pageRef; let cloneDropped = false; let frontend = null;
   const requests = []; const responses = []; const apiCalls = []; const allRequests = []; const consoleErrors = [];
   try {
     const sourceProbe = new (require("pg").Client)({ host: config.host, port: config.port, user: config.username, password: config.password, database: ACCEPTANCE, ssl: config.ssl ? { rejectUnauthorized: false } : false });
@@ -49,6 +91,7 @@ async function main() {
     await probe.connect(); const db = (await probe.query("SELECT current_database() AS db")).rows[0].db; await probe.end();
     if (db === PERSISTENT || db === ACCEPTANCE || db !== clone) throw new Error(`clone guard mismatch ${db}`);
     mark("02_CLONE_GUARD_VERIFIED", "PASS", { currentDatabase: db });
+    await applyApprovedSnapshotMigration(config, clone);
 
     process.env.NODE_ENV = "development"; process.env.DATABASE_URL = ""; process.env.DB_NAME = clone; process.env.DB_USER = config.username || "postgres"; process.env.DB_HOST = config.host || "localhost"; process.env.DB_PORT = String(config.port || 5432); process.env.PORT = "0";
     const models = require("../src/models"); sequelize = models.sequelize;
@@ -75,6 +118,7 @@ async function main() {
     const health = await withTimeout("backend-health", 20000, () => get("/health")); mark("05_BACKEND_HEALTH_200", health.status === 200 ? "PASS" : "FAIL", { status: health.status });
     const gold = await withTimeout("gold-health", 20000, () => get("/health/gold")); mark("06_GOLD_HEALTH_200", gold.status === 200 ? "PASS" : "FAIL", { status: gold.status, body: gold.body.slice(0, 300) });
 
+    frontend = await prepareEphemeralFrontend(path.resolve(__dirname, "../.."), `http://127.0.0.1:${server.address().port}`, base);
     browser = await withTimeout("browser-launch", 15000, () => chromium.launch({ headless: true })); mark("07_BROWSER_LAUNCHED", "PASS");
     context = await browser.newContext(); const page = await context.newPage(); pageRef = page;
     await page.addInitScript(({ token, refreshToken, branchId, branchName, companyId, session }) => { localStorage.setItem("darfus-token-v1", token); localStorage.setItem("darfus-refresh-v1", refreshToken || "minimal-refresh"); localStorage.setItem("darfus-api-session-v1", JSON.stringify(session)); localStorage.setItem("darfus-active-branch-id-v1", branchId); localStorage.setItem("darfus-active-branch-name-v1", branchName); localStorage.setItem("darfus-company-id-v1", companyId); window.__minimalFetches = []; window.__minimalXhrs = []; const originalFetch = window.fetch.bind(window); window.fetch = async (...args) => { const input = args[0]; const init = args[1] || {}; const url = typeof input === "string" ? input : input?.url; const startedAt = Date.now(); try { const res = await originalFetch(...args); const text = await res.clone().text().catch(() => ""); window.__minimalFetches.push({ url, method: init.method || "GET", status: res.status, elapsedMs: Date.now() - startedAt, body: text.slice(0, 500) }); return res; } catch (e) { window.__minimalFetches.push({ url, method: init.method || "GET", status: 0, elapsedMs: Date.now() - startedAt, error: e.message }); throw e; } }; const OriginalXHR = window.XMLHttpRequest; function TracedXHR() { const xhr = new OriginalXHR(); const record = { url: "", method: "GET", status: 0 }; const open = xhr.open; xhr.open = function(method, url, ...rest) { record.method = method; record.url = String(url); return open.call(this, method, url, ...rest); }; xhr.addEventListener("loadend", () => { record.status = xhr.status; record.body = String(xhr.responseText || "").slice(0, 500); window.__minimalXhrs.push(record); }); return xhr; } TracedXHR.prototype = OriginalXHR.prototype; window.XMLHttpRequest = TracedXHR; }, { token: auth.token, refreshToken: auth.refreshToken, branchId: branch.id, branchName: branch.name, companyId: company.id, session: { user: user.toJSON(), company: { ...company.toJSON(), branchName: branch.name, branchCode: branch.code } } });
@@ -88,7 +132,7 @@ async function main() {
     await context.route("**/api/v1/events/stream**", async (route) => { await route.fulfill({ status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache" }, body: ": harness stream disabled\\n\\n" }); });
     await context.route("**/*", async (route) => { const req = route.request(); const rawUrl = req.url(); let u; try { u = new URL(rawUrl); } catch { return route.continue(); } if (!u.pathname.startsWith("/api/v1/")) return route.continue(); const h = { ...req.headers(), authorization: `Bearer ${auth.token}`, "x-company-id": company.id, "x-branch-id": branch.id, "x-device-session-id": "minimal-harness" }; delete h.host; const forwardedPath = u.pathname.slice("/api/v1".length) || "/"; try { const rr = await fetch(`${base}${forwardedPath}${u.search}`, { method: req.method(), headers: h, body: ["GET", "HEAD"].includes(req.method()) ? undefined : req.postData(), signal: AbortSignal.timeout(5000) }); const body = await rr.text(); apiCalls.push({ path: forwardedPath, originalPath: u.pathname, method: req.method(), status: rr.status, body: body.slice(0, 800), sourceUrl: rawUrl }); await route.fulfill({ status: rr.status, headers: Object.fromEntries(rr.headers.entries()), body }); } catch (e) { apiCalls.push({ path: forwardedPath, originalPath: u.pathname, method: req.method(), status: 599, body: e.message, sourceUrl: rawUrl }); await route.fulfill({ status: 599, body: JSON.stringify({ error: e.message }) }); } });
     await context.route("**/api/v1/events/stream**", async (route) => { await route.fulfill({ status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache" }, body: ": harness stream disabled\\n\\n" }); });
-    await withTimeout("supplier-page", 20000, () => page.goto("http://localhost:3000/ar/suppliers/purchases", { waitUntil: "domcontentloaded" }));
+    await withTimeout("supplier-page", 20000, () => page.goto(`http://127.0.0.1:${frontend.port}/ar/suppliers/purchases`, { waitUntil: "domcontentloaded" }));
     await withTimeout("supplier-ready", 10000, () => page.locator("select").first().waitFor({ state: "visible" })); mark("08_LOGIN_READY", "PASS"); mark("09_SUPPLIER_PAGE_LOADED", "PASS", { marker: "first select visible" });
     const selects = page.locator("select"); const selectCount = await selects.count(); await selects.nth(0).selectOption(String(supplier.id)); mark("10_SUPPLIER_SELECTED", "PASS", { supplierId: supplier.id, selectCount });
     // Identify profile select by its option value, avoiding brittle DOM order.
@@ -129,7 +173,7 @@ async function main() {
     mark("HARNESS_FAILURE", "BLOCKED", { message: error.message, traceFile, pageState, apiCalls: typeof apiCalls !== "undefined" ? apiCalls.slice(-20) : [], allRequests: typeof allRequests !== "undefined" ? allRequests.slice(-30) : [], browserDiagnostics }, error.code || "OTHER");
     console.log(JSON.stringify({ result: "BLOCKED", traceFile, checkpoints, error: error.message }));
   } finally {
-    try { if (context) await context.close(); } catch (_) {} try { if (browser) await browser.close(); } catch (_) {} try { if (server) await new Promise((resolve) => server.close(resolve)); } catch (_) {} try { if (sequelize) await sequelize.close(); } catch (_) {} if (!cloneDropped) { try { pg("dropdb.exe", ["--if-exists", clone], pgEnv(config, "postgres")); mark("28_CLONE_DROPPED", "PASS", { clone }); } catch (_) {} }
+    try { if (context) await context.close(); } catch (_) {} try { if (browser) await browser.close(); } catch (_) {} try { if (frontend?.child && !frontend.child.killed) frontend.child.kill(); } catch (_) {} try { if (frontend?.tempRoot) fs.rmSync(frontend.tempRoot, { recursive: true, force: true }); } catch (_) {} try { if (server) await new Promise((resolve) => server.close(resolve)); } catch (_) {} try { if (sequelize) await sequelize.close(); } catch (_) {} if (!cloneDropped) { try { pg("dropdb.exe", ["--if-exists", clone], pgEnv(config, "postgres")); mark("28_CLONE_DROPPED", "PASS", { clone }); } catch (_) {} }
   }
 }
 main();

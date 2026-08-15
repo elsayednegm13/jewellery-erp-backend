@@ -44,12 +44,16 @@ test("POS search uses debounce, abort, and latest-generation protection", () => 
 });
 
 test("POS customer panel is read-only and shows canonical customer identity details", () => {
-  assert.match(posSource, /selectedCustomerAddress/);
-  assert.match(posSource, /selectedCustomer\.name/);
-  assert.match(posSource, /selectedCustomer\.phone/);
-  assert.match(posSource, /selectedCustomer\.loyaltyPoints/);
-  assert.match(posSource, /selectedCustomer\.balance/);
-  assert.match(posSource, /addresses/);
+  assert.match(posSource, /customerSummary\.name/);
+  assert.match(posSource, /customerSummary\.phone/);
+  assert.match(posSource, /customerSummary\.loyaltyPoints/);
+  assert.match(posSource, /customerSummary\.totalPurchases/);
+  assert.match(posSource, /customerSummary\.primaryAddress/);
+  assert.match(posSource, /formatCustomerAddress/);
+  assert.match(posSource, /pos-summary/);
+  assert.doesNotMatch(posSource, /selectedCustomer\.balance/);
+  assert.doesNotMatch(posSource, /customerSummary\.status/);
+  assert.doesNotMatch(posSource, /customerSummary\.availableCredit/);
   assert.match(posSource, /Address not registered|العنوان غير مسجل/);
   assert.match(posSource, /numeric-token/);
 });

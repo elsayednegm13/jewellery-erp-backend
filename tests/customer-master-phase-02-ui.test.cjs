@@ -30,18 +30,20 @@ const addressUi = loadAddressUi();
 
 test("optional Customer Create address does not treat a blank block as an address", () => {
   const validation = addressUi.validateCustomerAddressDraft(addressUi.emptyCustomerAddressDraft());
-  assert.deepEqual(validation, { valid: true, started: false, missing: ["line1", "city", "country"] });
+  assert.deepEqual(validation, { valid: true, started: false, missing: [] });
 });
 
-test("started address requires line1, city, and country", () => {
-  const partial = { ...addressUi.emptyCustomerAddressDraft(), line1: "شارع الاختبار" };
-  assert.deepEqual(addressUi.validateCustomerAddressDraft(partial), {
-    valid: false,
-    started: true,
-    missing: ["city", "country"],
-  });
-  const complete = { ...partial, city: "دبي", country: "UAE" };
-  assert.equal(addressUi.validateCustomerAddressDraft(complete).valid, true);
+test("every meaningful partial address is valid and whole blanks stay out of payloads", () => {
+  for (const partial of [
+    { line1: "شارع الاختبار" },
+    { city: "القاهرة" },
+    { country: "مصر" },
+    { postalCode: "11511" },
+  ]) {
+    const draft = { ...addressUi.emptyCustomerAddressDraft(), ...partial };
+    assert.deepEqual(addressUi.validateCustomerAddressDraft(draft), { valid: true, started: true, missing: [] });
+    assert.match(addressUi.formatCustomerAddress(addressUi.customerAddressFromDraft(draft)), /\S/);
+  }
 });
 
 test("address helpers keep one explicit Primary and leave replacement choice to the server after deletion", () => {
@@ -60,6 +62,17 @@ test("legacy fallback display is truthful and never labeled explicit Primary", (
   ];
   assert.equal(addressUi.customerAddressDisplayMarker(legacy, 0), "CURRENT_COMPATIBILITY");
   assert.equal(addressUi.customerAddressDisplayMarker(legacy, 1), null);
+});
+
+test("shared resolver gives explicit Primary priority over array order for POS", () => {
+  const addresses = [
+    { line1: "العنوان أ", city: "القاهرة", isPrimary: false },
+    { line1: "العنوان ب", city: "الجيزة", isPrimary: true },
+  ];
+  const resolved = addressUi.resolveCustomerPrimaryAddress(addresses);
+  assert.equal(resolved.source, "EXPLICIT_PRIMARY");
+  assert.equal(resolved.index, 1);
+  assert.equal(addressUi.formatCustomerAddress(resolved.primaryAddress), "العنوان ب، الجيزة");
 });
 
 test("Customer Create UI uses optional Address contract and omits server-owned fields", () => {
@@ -93,6 +106,7 @@ test("Customer Details exposes permission-gated profile and address actions only
   const profileForm = source.slice(profileFormStart, profileFormEnd);
   assert.doesNotMatch(profileForm, /balance|purchases|loyaltyPoints|availableCredit|companyId/);
   assert.doesNotMatch(profileForm, /customer-profile-status/);
+  assert.match(profileForm, /customer-profile-nationality/);
 });
 
 test("Phase 2 keeps existing Customer endpoints and Phase 1 server contract", () => {

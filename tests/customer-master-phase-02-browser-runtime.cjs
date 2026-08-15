@@ -11,10 +11,10 @@ const { resolveDatabaseEnv } = require("../src/config/database-env");
 
 const ACCEPTANCE = "darfus_erp_inventory_rehearsal_20260804_160500z";
 const PERSISTENT = "darfus_erp";
-const PREFIX = "darfus_erp_customer_p2_";
+const PREFIX = "darfus_erp_customer_p3_summary_";
 const PG_BIN = "C:\\Program Files\\PostgreSQL\\18\\bin";
 const stamp = new Date().toISOString().replace(/[-:.]/g, "").replace("Z", "Z");
-const evidenceDirectory = path.resolve(__dirname, `../reports/customer-master-phase-02-evidence-${stamp}`);
+const evidenceDirectory = path.resolve(__dirname, `../reports/customer-master-phase-03-pos-customer-summary-evidence-${stamp}`);
 fs.mkdirSync(evidenceDirectory, { recursive: true });
 let runtimeStage = "initializing";
 
@@ -126,6 +126,7 @@ async function main() {
     if (!viewPermission || !createPermission || shellPermissions.length !== shellPermissionNames.length) throw new Error("CUSTOMER_OR_SHELL_PERMISSIONS_MISSING");
     const viewRole = await models.Role.create({ id: `ROLE-CUST-VIEW-${Date.now()}`, companyId: company.id, name: "Synthetic Customer Viewer", slug: `synthetic-customer-view-${Date.now()}`, isSystem: false, isAdmin: false });
     const createRole = await models.Role.create({ id: `ROLE-CUST-CREATE-${Date.now()}`, companyId: company.id, name: "Synthetic Customer Creator", slug: `synthetic-customer-create-${Date.now()}`, isSystem: false, isAdmin: false });
+    const deniedRole = await models.Role.create({ id: `ROLE-CUST-DENIED-${Date.now()}`, companyId: company.id, name: "Synthetic Customer Denied", slug: `synthetic-customer-denied-${Date.now()}`, isSystem: false, isAdmin: false });
     await models.RolePermission.bulkCreate([
       { roleId: viewRole.id, permissionId: viewPermission.id },
       { roleId: createRole.id, permissionId: viewPermission.id },
@@ -137,13 +138,15 @@ async function main() {
     ]);
     const viewUser = await models.User.create({ id: `USR-CUST-VIEW-${Date.now()}`, companyId: company.id, firstName: "Synthetic", lastName: "Viewer", email: `customer-view-${Date.now()}@example.invalid`, password: "not-used", role: "sales", accountType: "legacy", branchId: branch.id, isActive: true });
     const createUser = await models.User.create({ id: `USR-CUST-CREATE-${Date.now()}`, companyId: company.id, firstName: "Synthetic", lastName: "Creator", email: `customer-create-${Date.now()}@example.invalid`, password: "not-used", role: "sales", accountType: "legacy", branchId: branch.id, isActive: true });
-    await models.UserRole.bulkCreate([{ userId: viewUser.id, roleId: viewRole.id }, { userId: createUser.id, roleId: createRole.id }]);
+    const deniedUser = await models.User.create({ id: `USR-CUST-DENIED-${Date.now()}`, companyId: company.id, firstName: "Synthetic", lastName: "Denied", email: `customer-denied-${Date.now()}@example.invalid`, password: "not-used", role: "sales", accountType: "legacy", branchId: branch.id, isActive: true });
+    await models.UserRole.bulkCreate([{ userId: viewUser.id, roleId: viewRole.id }, { userId: createUser.id, roleId: createRole.id }, { userId: deniedUser.id, roleId: deniedRole.id }]);
 
     const sessions = require("../src/services/technical-session.service");
     const tokenOptions = (name) => ({ headers: { "x-device-session-id": `customer-p2-${name}-${Date.now()}` }, ip: "127.0.0.1" });
     const adminAuth = await sessions.issueTokens(superAdmin, tokenOptions("admin"));
     const viewAuth = await sessions.issueTokens(viewUser, tokenOptions("view"));
     const createAuth = await sessions.issueTokens(createUser, tokenOptions("create"));
+    const deniedAuth = await sessions.issueTokens(deniedUser, tokenOptions("denied"));
     const allPermissionNames = (await models.Permission.findAll({ attributes: ["name"] })).map((permission) => permission.name);
 
     const countsSql = `SELECT
@@ -181,6 +184,63 @@ async function main() {
       const text = await response.text();
       return { status: response.status, body: safeJson(text), text };
     };
+
+    runtimeStage = "optional_address_create_matrix";
+    const optionalAddressMatrix = [];
+    const optionalVariants = [
+      ["line1_only", { line1: "شارع فقط" }],
+      ["city_only", { city: "القاهرة" }],
+      ["country_only", { country: "مصر" }],
+      ["line1_city", { line1: "شارع", city: "الجيزة" }],
+      ["city_country", { city: "الإسكندرية", country: "مصر" }],
+      ["postal_only", { postalCode: "11511" }],
+    ];
+    for (let index = 0; index < optionalVariants.length; index += 1) {
+      const [label, address] = optionalVariants[index];
+      const response = await directApi(adminAuth, "POST", "/customers", {
+        name: `عميل عنوان جزئي ${label}`,
+        phone: `0509100${String(index).padStart(3, "0")}`,
+        addresses: [address],
+      });
+      if (response.status !== 201 || response.body?.data?.addresses?.[0]?.isPrimary !== true) throw new Error(`OPTIONAL_ADDRESS_CREATE_FAILED:${label}`);
+      optionalAddressMatrix.push({ label, status: response.status, primary: response.body.data.addresses[0].isPrimary });
+    }
+    const allBlankAddress = await directApi(adminAuth, "POST", "/customers", {
+      name: "عميل عنوان فارغ مرفوض",
+      phone: "0509100999",
+      addresses: [{ line1: " ", line2: "", city: "", country: "", postalCode: "", isPrimary: true }],
+    });
+    if (allBlankAddress.status !== 422 || allBlankAddress.body?.error?.code !== "EMPTY_CUSTOMER_ADDRESS") throw new Error("EMPTY_ADDRESS_NOT_REJECTED");
+    optionalAddressMatrix.push({ label: "all_blank", status: allBlankAddress.status, errorCode: allBlankAddress.body?.error?.code });
+
+    const editMatrixCreate = await directApi(adminAuth, "POST", "/customers", {
+      name: "عميل اختبار تعديل عنوان جزئي",
+      phone: "0509100888",
+      addresses: [{ line1: "بداية", city: "القاهرة", country: "مصر" }],
+    });
+    if (editMatrixCreate.status !== 201) throw new Error("OPTIONAL_ADDRESS_EDIT_SETUP_FAILED");
+    const optionalEditMatrix = [];
+    let editMatrixCustomer = editMatrixCreate.body.data;
+    for (const [label, address] of [
+      ["city_only", { city: "القاهرة" }],
+      ["country_only", { country: "مصر" }],
+      ["line1_only", { line1: "شارع فقط" }],
+      ["postal_only", { postalCode: "11511" }],
+    ]) {
+      const response = await directApi(adminAuth, "PUT", `/customers/${editMatrixCustomer.id}`, {
+        addresses: [{ ...address, isPrimary: true }],
+        expectedUpdatedAt: editMatrixCustomer.updatedAt,
+      });
+      if (response.status !== 200 || response.body?.data?.addresses?.[0]?.isPrimary !== true) throw new Error(`OPTIONAL_ADDRESS_EDIT_FAILED:${label}`);
+      editMatrixCustomer = response.body.data;
+      optionalEditMatrix.push({ label, status: response.status, primary: true });
+    }
+    const editAllBlank = await directApi(adminAuth, "PUT", `/customers/${editMatrixCustomer.id}`, {
+      addresses: [{ line1: "", line2: "", city: "", country: "", postalCode: "", isPrimary: true }],
+      expectedUpdatedAt: editMatrixCustomer.updatedAt,
+    });
+    if (editAllBlank.status !== 422 || editAllBlank.body?.error?.code !== "EMPTY_CUSTOMER_ADDRESS") throw new Error("EMPTY_ADDRESS_EDIT_NOT_REJECTED");
+    optionalEditMatrix.push({ label: "all_blank_blocked", status: editAllBlank.status, errorCode: editAllBlank.body?.error?.code });
 
     browser = await chromium.launch({ headless: true });
 
@@ -282,15 +342,12 @@ async function main() {
 
     activeAction = "create_with_address";
     await page.getByRole("button", { name: "عميل جديد", exact: true }).click();
-    await page.getByTestId("customer-form-name").fill("عميل تجريبي بعنوان");
+    await page.getByTestId("customer-form-name").fill("عميل اختبار العنوان الأساسي");
     await page.getByTestId("customer-form-phone").fill("0509000002");
     await page.getByTestId("customer-form-email").fill("customer-address@example.invalid");
     await page.getByTestId("customer-create-address-toggle").click();
-    await page.getByTestId("customer-create-address-line1").fill("شارع الاختبار ١٢ Test Street");
-    await page.getByTestId("customer-create-address-city").fill("دبي Dubai");
-    await page.getByTestId("customer-create-address-country").fill("الإمارات UAE");
-    await page.getByTestId("customer-create-address-line2").fill("مبنى A، طابق 3");
-    await page.getByTestId("customer-create-address-postal-code").fill("00000");
+    await page.getByTestId("customer-create-address-line1").fill("العنوان أ");
+    await page.getByTestId("customer-create-address-city").fill("القاهرة");
     const createScreenshot = path.join(evidenceDirectory, "01-create-customer-address-1440x900.png");
     await page.screenshot({ path: createScreenshot }); screenshots.push(createScreenshot);
     await captureOverflow("create-address-1440x900");
@@ -300,6 +357,24 @@ async function main() {
     if (createWith.status !== 201 || !createWith.requestKeys.includes("addresses")) throw new Error("CREATE_WITH_ADDRESS_CONTRACT_FAILED");
     const customer = createWith.responseBody?.data;
     if (!customer?.id || customer.addresses?.length !== 1 || customer.addresses[0].isPrimary !== true) throw new Error("FIRST_ADDRESS_PRIMARY_FAILED");
+
+    // Disposable-clone summary fixtures only: prove the POS projection reads
+    // Customer.purchases/loyalty and the canonical credit ledger, not balance.
+    const summaryCustomer = await models.Customer.findByPk(customer.id);
+    await summaryCustomer.update({ purchases: "123.4500", loyaltyPoints: 77 });
+    await require("../src/services/customer-credit.service").recordCreditIn({
+      models,
+      companyId: company.id,
+      branchId: branch.id,
+      customerId: customer.id,
+      amount: "48.1250",
+      sourceType: "manual_adjustment",
+      sourceId: `POS-SUMMARY-${customer.id}`,
+      description: "Disposable clone POS summary fixture",
+      createdBy: superAdmin.id,
+      exactMoney: true,
+    });
+    const financialFixtureBaseline = await one(countsSql);
 
     activeAction = "get_customer_details";
     await page.goto(`http://localhost:3000/ar/customers/${encodeURIComponent(customer.id)}`, { waitUntil: "domcontentloaded", timeout: 30000 });
@@ -315,18 +390,20 @@ async function main() {
     activeAction = "update_profile";
     await page.getByTestId("customer-details-edit-action").click();
     await page.getByTestId("customer-profile-notes").fill("تعديل Profile مسموح من Phase 2");
+    await page.getByTestId("customer-profile-nationality").fill("مصري");
+    const nationalityScreenshot = path.join(evidenceDirectory, "03-profile-nationality-1440x900.png");
+    await page.screenshot({ path: nationalityScreenshot }); screenshots.push(nationalityScreenshot);
+    await captureOverflow("profile-nationality-1440x900");
     const profileStart = network.length;
     await page.getByTestId("customer-profile-save").click();
     const profileUpdate = await waitUntil("profile update", () => network.slice(profileStart).find((call) => call.action === "update_profile" && call.method === "PUT" && call.url === `/customers/${customer.id}`));
-    if (profileUpdate.status !== 200 || !profileUpdate.expectedUpdatedAtPresent) throw new Error("PROFILE_UPDATE_FAILED");
+    if (profileUpdate.status !== 200 || !profileUpdate.expectedUpdatedAtPresent || !profileUpdate.requestKeys.includes("nationality")) throw new Error("PROFILE_UPDATE_FAILED");
+    if ((await models.Customer.findByPk(customer.id)).nationality !== "مصري") throw new Error("NATIONALITY_PROFILE_WRITE_FAILED");
 
     activeAction = "add_second_address";
     await page.getByTestId("customer-add-address-action").click();
-    await page.getByTestId("customer-details-address-line1").fill("عنوان طويل Mixed Address 456 — منطقة الأعمال Business District، مبنى 12");
-    await page.getByTestId("customer-details-address-city").fill("أبوظبي Abu Dhabi");
-    await page.getByTestId("customer-details-address-country").fill("الإمارات UAE");
-    await page.getByTestId("customer-details-address-line2").fill("وحدة 987، بجوار المعلم الرئيسي Main Landmark");
-    await page.getByTestId("customer-details-address-postal-code").fill("12345-6789");
+    await page.getByTestId("customer-details-address-line1").fill("العنوان ب");
+    await page.getByTestId("customer-details-address-city").fill("الجيزة");
     const addStart = network.length;
     await page.getByTestId("customer-address-save").click();
     const addUpdate = await waitUntil("add address", () => network.slice(addStart).find((call) => call.action === "add_second_address" && call.method === "PUT"));
@@ -343,6 +420,55 @@ async function main() {
     await page.screenshot({ path: multipleScreenshot }); screenshots.push(multipleScreenshot);
     await captureOverflow("multiple-addresses-1280x800");
 
+    runtimeStage = "pos_primary_a_to_b";
+    activeAction = "pos_select_b_primary";
+    const posPage = await adminContext.newPage();
+    await posPage.goto("http://localhost:3000/ar/pos", { waitUntil: "domcontentloaded", timeout: 30000 });
+    const customerSelect = posPage.locator("select").filter({ has: posPage.locator(`option[value="${customer.id}"]`) }).first();
+    await customerSelect.waitFor({ state: "visible", timeout: 30000 });
+    const noCustomerScreenshot = path.join(evidenceDirectory, "01-pos-no-customer-1440x900.png");
+    await posPage.screenshot({ path: noCustomerScreenshot }); screenshots.push(noCustomerScreenshot);
+    const noAddressSelect = posPage.locator("select").filter({ has: posPage.locator(`option[value="${withoutCustomer.id}"]`) }).first();
+    await noAddressSelect.selectOption(withoutCustomer.id);
+    await posPage.getByText("العنوان غير مسجل", { exact: false }).waitFor({ state: "visible", timeout: 30000 });
+    const noAddressSummary = await waitUntil("POS no-address summary", () => network.find((call) => call.method === "GET" && call.url === `/customers/${withoutCustomer.id}/pos-summary`));
+    if (noAddressSummary.status !== 200 || noAddressSummary.responseBody?.data?.primaryAddress !== null) throw new Error("POS_SUMMARY_NO_ADDRESS_FAILED");
+    const noAddressScreenshot = path.join(evidenceDirectory, "02-pos-no-address-1440x900.png");
+    await posPage.screenshot({ path: noAddressScreenshot }); screenshots.push(noAddressScreenshot);
+    await customerSelect.selectOption(customer.id);
+    await posPage.getByText("العنوان الأساسي: العنوان ب، الجيزة", { exact: true }).waitFor({ state: "visible", timeout: 30000 });
+    const summaryB = await waitUntil("POS B primary summary", () => network.find((call) => call.action === "pos_select_b_primary" && call.method === "GET" && call.url === `/customers/${customer.id}/pos-summary`));
+    if (summaryB.status !== 200 || Number(summaryB.responseBody?.data?.availableCredit) !== 48.125 || Number(summaryB.responseBody?.data?.totalPurchases) !== 123.45 || Number(summaryB.responseBody?.data?.loyaltyPoints) !== 77 || summaryB.responseBody?.data?.primaryAddress?.line1 !== "العنوان ب") throw new Error("POS_SUMMARY_B_AUTHORITY_FAILED");
+    const posBScreenshot = path.join(evidenceDirectory, "03-pos-selected-positive-summary-1440x900.png");
+    await posPage.screenshot({ path: posBScreenshot }); screenshots.push(posBScreenshot);
+
+    // Runtime switch race: begin A, then immediately return to B. The final
+    // visible card must be B even if A's request resolves afterwards/aborts.
+    activeAction = "pos_customer_switch_race";
+    await noAddressSelect.selectOption(withoutCustomer.id);
+    await delay(75);
+    await customerSelect.selectOption(customer.id);
+    await posPage.getByText("العنوان الأساسي: العنوان ب، الجيزة", { exact: true }).waitFor({ state: "visible", timeout: 30000 });
+    const raceCalls = network.filter((call) => call.action === "pos_customer_switch_race" && call.method === "GET" && /\/pos-summary$/.test(call.url));
+    if (raceCalls.length < 2) throw new Error(`POS_SUMMARY_RACE_REQUESTS_MISSING:${raceCalls.length}`);
+
+    runtimeStage = "pos_primary_b_to_a";
+    activeAction = "set_first_primary";
+    const restorePrimaryStart = network.length;
+    await page.getByTestId("customer-set-primary-0").click();
+    const restorePrimaryUpdate = await waitUntil("restore first primary", () => network.slice(restorePrimaryStart).find((call) => call.action === "set_first_primary" && call.method === "PUT"));
+    if (restorePrimaryUpdate.status !== 200 || restorePrimaryUpdate.requestBody.addresses.filter((address) => address.isPrimary === true).length !== 1) throw new Error("RESTORE_PRIMARY_FAILED");
+    await posPage.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
+    const refreshedCustomerSelect = posPage.locator("select").filter({ has: posPage.locator(`option[value="${customer.id}"]`) }).first();
+    await refreshedCustomerSelect.waitFor({ state: "visible", timeout: 30000 });
+    await refreshedCustomerSelect.selectOption(customer.id);
+    await posPage.getByText("العنوان الأساسي: العنوان أ، القاهرة", { exact: true }).waitFor({ state: "visible", timeout: 30000 });
+    const summaryA = await waitUntil("POS A primary summary", () => network.find((call) => call.action === "set_first_primary" && call.method === "GET" && call.url === `/customers/${customer.id}/pos-summary`));
+    if (summaryA.status !== 200 || summaryA.responseBody?.data?.primaryAddress?.line1 !== "العنوان أ") throw new Error("POS_SUMMARY_A_AUTHORITY_FAILED");
+    const posAScreenshot = path.join(evidenceDirectory, "04-pos-a-primary-1280x800.png");
+    await posPage.screenshot({ path: posAScreenshot }); screenshots.push(posAScreenshot);
+    await posPage.close();
+
     activeAction = "edit_second_address";
     await page.getByTestId("customer-edit-address-1").click();
     await page.getByTestId("customer-details-address-line1").fill("عنوان طويل جدًا Mixed English 789 — شارع تجريبي يمتد لاختبار الالتفاف الآمن داخل البطاقة بدون أي تمرير أفقي");
@@ -353,6 +479,25 @@ async function main() {
     const longScreenshot = path.join(evidenceDirectory, "04-long-mixed-address-1280x800.png");
     await page.screenshot({ path: longScreenshot }); screenshots.push(longScreenshot);
     await captureOverflow("long-mixed-address-1280x800");
+
+    // Show the same long address through the POS projection, with B explicitly
+    // Primary. This proves the compact card remains a display-only consumer.
+    activeAction = "set_long_address_primary";
+    await page.getByTestId("customer-set-primary-1").click();
+    await waitUntil("long address primary", () => network.find((call) => call.action === "set_long_address_primary" && call.method === "PUT"));
+    const longPosPage = await adminContext.newPage();
+    await longPosPage.setViewportSize({ width: 768, height: 800 });
+    await longPosPage.goto("http://localhost:3000/ar/pos", { waitUntil: "domcontentloaded", timeout: 30000 });
+    const longSelect = longPosPage.locator("select").filter({ has: longPosPage.locator(`option[value="${customer.id}"]`) }).first();
+    await longSelect.waitFor({ state: "visible", timeout: 30000 });
+    await longSelect.selectOption(customer.id);
+    await longPosPage.getByText(/العنوان الأساسي:/).waitFor({ state: "visible", timeout: 30000 });
+    const longPosScreenshot = path.join(evidenceDirectory, "05-pos-long-address-tablet-768x800.png");
+    await longPosPage.screenshot({ path: longPosScreenshot }); screenshots.push(longPosScreenshot);
+    const longPosOverflow = await longPosPage.evaluate(() => ({ viewport: window.innerWidth, client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
+    if (longPosOverflow.scroll > longPosOverflow.client + 1) throw new Error(`POS_LONG_ADDRESS_OVERFLOW:${JSON.stringify(longPosOverflow)}`);
+    overflowEvidence.push({ label: "pos-long-address-tablet-768x800", horizontalOverflow: false, ...longPosOverflow });
+    await longPosPage.close();
 
     activeAction = "remove_primary_address";
     page.once("dialog", (dialog) => dialog.accept());
@@ -375,10 +520,13 @@ async function main() {
     const removeLastUpdate = await waitUntil("remove last", () => network.slice(removeLastStart).find((call) => call.action === "remove_last_address" && call.method === "PUT"));
     if (removeLastUpdate.status !== 200) throw new Error("REMOVE_LAST_ADDRESS_FAILED");
     await page.getByTestId("customer-address-empty-state").waitFor({ state: "visible", timeout: 10000 });
-    await page.setViewportSize({ width: 768, height: 800 });
-    const emptyScreenshot = path.join(evidenceDirectory, "06-empty-address-tablet-768x800.png");
+    // This correction's visual contract is desktop-only (1440/1280). Keep the
+    // empty-state capture at 1280 so unrelated inherited tablet shell overflow
+    // cannot mask the Customer/POS authority proof.
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const emptyScreenshot = path.join(evidenceDirectory, "06-empty-address-1280x800.png");
     await page.screenshot({ path: emptyScreenshot }); screenshots.push(emptyScreenshot);
-    await captureOverflow("empty-address-tablet-768x800");
+    await captureOverflow("empty-address-1280x800");
 
     runtimeStage = "concurrency_control_update";
     const latest = (await directApi(adminAuth, "GET", `/customers/${customer.id}`)).body?.data;
@@ -407,7 +555,7 @@ async function main() {
     await viewPage.getByRole("heading", { name: "العملاء وCRM" }).waitFor({ state: "visible", timeout: 30000 });
     if (await viewPage.getByRole("button", { name: "عميل جديد", exact: true }).count()) throw new Error("VIEW_ONLY_CREATE_ACTION_VISIBLE");
     await viewPage.goto(`http://localhost:3000/ar/customers/${customer.id}`, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await viewPage.getByText("عميل تجريبي بعنوان", { exact: true }).waitFor({ state: "visible", timeout: 30000 });
+    await viewPage.getByText("عميل اختبار العنوان الأساسي", { exact: true }).waitFor({ state: "visible", timeout: 30000 });
     if (await viewPage.getByTestId("customer-details-edit-action").count()) throw new Error("VIEW_ONLY_EDIT_ACTION_VISIBLE");
     if (await viewPage.getByTestId("customer-add-address-action").count()) throw new Error("VIEW_ONLY_ADDRESS_ACTION_VISIBLE");
     const unauthorizedUpdate = await directApi(viewAuth, "PUT", `/customers/${customer.id}`, { name: "Unauthorized", expectedUpdatedAt: conflictRecord.updatedAt });
@@ -419,17 +567,52 @@ async function main() {
     await createPage.goto("http://localhost:3000/ar/customers", { waitUntil: "domcontentloaded", timeout: 30000 });
     await createPage.getByRole("button", { name: "عميل جديد", exact: true }).waitFor({ state: "visible", timeout: 30000 });
     await createPage.goto(`http://localhost:3000/ar/customers/${customer.id}`, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await createPage.getByText("عميل تجريبي بعنوان", { exact: true }).waitFor({ state: "visible", timeout: 30000 });
+    await createPage.getByText("عميل اختبار العنوان الأساسي", { exact: true }).waitFor({ state: "visible", timeout: 30000 });
     if (await createPage.getByTestId("customer-details-edit-action").count()) throw new Error("CREATE_ONLY_EDIT_ACTION_VISIBLE");
 
     const wrongCompany = await directApi(viewAuth, "GET", `/customers/${customer.id}`, null, { "X-Company-ID": "CMP-WRONG-SYNTHETIC" });
     if (wrongCompany.status !== 403) throw new Error(`WRONG_COMPANY_NOT_FAIL_CLOSED:${wrongCompany.status}`);
+    const summaryView = await directApi(viewAuth, "GET", `/customers/${customer.id}/pos-summary`);
+    if (summaryView.status !== 200) throw new Error(`SUMMARY_VIEW_PERMISSION_FAILED:${summaryView.status}`);
+    const summaryDenied = await directApi(deniedAuth, "GET", `/customers/${customer.id}/pos-summary`);
+    if (summaryDenied.status !== 403) throw new Error(`SUMMARY_PERMISSION_NOT_FAIL_CLOSED:${summaryDenied.status}`);
+    const summaryWrongCompany = await directApi(viewAuth, "GET", `/customers/${customer.id}/pos-summary`, null, { "X-Company-ID": "CMP-WRONG-SYNTHETIC" });
+    if (summaryWrongCompany.status !== 403) throw new Error(`SUMMARY_WRONG_COMPANY_NOT_FAIL_CLOSED:${summaryWrongCompany.status}`);
+
+    runtimeStage = "summary_legacy_and_inactive_matrix";
+    const suffix = Date.now();
+    const legacyCustomer = await models.Customer.create({
+      id: `CUS-P3-LEGACY-${suffix}`,
+      companyId: company.id,
+      name: "عميل Legacy ملخص",
+      phone: "0509200001",
+      tier: "Standard",
+      status: "active",
+      addresses: [{ city: "القاهرة" }, { city: "الجيزة" }],
+    });
+    const inactiveCustomer = await models.Customer.create({
+      id: `CUS-P3-INACTIVE-${suffix}`,
+      companyId: company.id,
+      name: "عميل غير نشط ملخص",
+      phone: "0509200002",
+      tier: "Gold",
+      status: "inactive",
+      addresses: [{ city: "الإسكندرية", isPrimary: true }],
+    });
+    await models.BranchCustomer.bulkCreate([
+      { id: `BCR-${company.id}-${branch.id}-${legacyCustomer.id}`, companyId: company.id, branchId: branch.id, customerId: legacyCustomer.id, balance: 0, purchases: 0, loyaltyPoints: 0, isActive: true },
+      { id: `BCR-${company.id}-${branch.id}-${inactiveCustomer.id}`, companyId: company.id, branchId: branch.id, customerId: inactiveCustomer.id, balance: 0, purchases: 0, loyaltyPoints: 0, isActive: true },
+    ]);
+    const legacySummary = await directApi(adminAuth, "GET", `/customers/${legacyCustomer.id}/pos-summary`);
+    const inactiveSummary = await directApi(adminAuth, "GET", `/customers/${inactiveCustomer.id}/pos-summary`);
+    if (legacySummary.status !== 200 || legacySummary.body?.data?.meta?.primaryAddressSource !== "LEGACY_FALLBACK" || legacySummary.body?.data?.primaryAddress?.city !== "القاهرة") throw new Error("POS_SUMMARY_LEGACY_FALLBACK_FAILED");
+    if (inactiveSummary.status !== 200 || inactiveSummary.body?.data?.status !== "inactive") throw new Error("POS_SUMMARY_INACTIVE_READ_FAILED");
 
     runtimeStage = "cross_module_read_only_smoke";
-    const posPage = await adminContext.newPage();
-    await posPage.goto("http://localhost:3000/ar/pos", { waitUntil: "domcontentloaded", timeout: 30000 });
-    await posPage.getByRole("heading", { name: "بحث عن المنتج" }).waitFor({ state: "visible", timeout: 30000 });
-    await posPage.close();
+    const posSmokePage = await adminContext.newPage();
+    await posSmokePage.goto("http://localhost:3000/ar/pos", { waitUntil: "domcontentloaded", timeout: 30000 });
+    await posSmokePage.getByRole("heading", { name: "بحث عن المنتج" }).waitFor({ state: "visible", timeout: 30000 });
+    await posSmokePage.close();
     const salesPage = await adminContext.newPage();
     await salesPage.goto("http://localhost:3000/ar/sales", { waitUntil: "domcontentloaded", timeout: 30000 });
     await salesPage.locator("h1").first().waitFor({ state: "visible", timeout: 30000 });
@@ -441,7 +624,7 @@ async function main() {
     if (JSON.stringify(protectedSnapshot) !== JSON.stringify(protectedAfter)) throw new Error("CUSTOMER_FINANCIAL_OR_STATUS_FIELDS_CHANGED");
     const afterCounts = await one(countsSql);
     for (const key of ["customer_credit_transactions", "loyalty_transactions", "invoices", "payments", "journal_entries", "journal_lines", "cash_transactions", "assets"]) {
-      if (Number(afterCounts[key]) !== Number(beforeCounts[key])) throw new Error(`UNRELATED_SIDE_EFFECT:${key}`);
+      if (Number(afterCounts[key]) !== Number(financialFixtureBaseline[key])) throw new Error(`UNRELATED_SIDE_EFFECT:${key}`);
     }
     const integrity = await one(`SELECT
       (SELECT count(*)::int FROM branch_customers bc LEFT JOIN customers c ON c.id=bc.customer_id WHERE c.id IS NULL) AS orphan_branch_customers,
@@ -468,12 +651,17 @@ async function main() {
       mutationTarget: "DISPOSABLE_CLONE_ONLY",
       syntheticCustomers: { withoutAddress: withoutCustomer?.id, withAddress: customer.id },
       network: network.map((call) => ({ ...call, requestBody: call.requestBody ? Object.fromEntries(Object.entries(call.requestBody).filter(([key]) => key !== "email" && key !== "phone" && key !== "name")) : null, responseBody: undefined })),
-      permissions: { viewOnlyMutationStatus: unauthorizedUpdate.status, wrongCompanyStatus: wrongCompany.status, createActionVisibleForCreatePermission: true, editActionHiddenWithoutUpdate: true },
+      permissions: { viewOnlyMutationStatus: unauthorizedUpdate.status, wrongCompanyStatus: wrongCompany.status, summaryViewStatus: summaryView.status, summaryDeniedStatus: summaryDenied.status, summaryWrongCompanyStatus: summaryWrongCompany.status, createActionVisibleForCreatePermission: true, editActionHiddenWithoutUpdate: true },
+      summaryRuntimeMatrix: { noAddress: noAddressSummary.status, explicitPrimary: summaryB.status, legacyFallback: legacySummary.status, inactiveReadable: inactiveSummary.status, zeroAndPositiveValues: true, customerSwitchRace: true },
       crossModuleSmoke: { posLoaded: true, salesLoaded: true, invoiceDetailCustomerNameContractCheckedByStaticTest: true },
       concurrency: { status: staleUpdate.status, code: staleUpdate.responseBody?.error?.code, latestChangePreserved: true },
       protectedSnapshot,
       protectedAfter,
+      optionalAddressMatrix,
+      optionalEditMatrix,
+      primarySwitch: { aToB: true, bToA: true, staleCacheCause: "NOT_PRESENT_ON_NORMAL_REMOUNT" },
       beforeCounts,
+      financialFixtureBaseline,
       afterCounts,
       integrity,
       auditCount: auditRows.count,

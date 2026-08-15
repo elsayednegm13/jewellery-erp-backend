@@ -1,7 +1,10 @@
 const { AppError } = require("../utils/errors");
 
 const ADDRESS_KEYS = new Set(["line1", "line2", "city", "country", "postalCode", "isPrimary"]);
-const OPTIONAL_TEXT_KEYS = new Set(["line2", "postalCode"]);
+const ADDRESS_TEXT_KEYS = ["line1", "line2", "city", "country", "postalCode"];
+const PROFILE_MUTATION_FIELDS = new Set([
+  "name", "phone", "email", "tier", "notes", "nationality", "addresses",
+]);
 
 function addressError(message, fieldErrors = null, code = "INVALID_CUSTOMER_ADDRESS") {
   return new AppError(message, 422, code, fieldErrors);
@@ -13,18 +16,14 @@ function isPlainObject(value) {
   return proto === Object.prototype || proto === null;
 }
 
-function normalizeText(value, field, { required = false } = {}) {
+function normalizeText(value, field) {
   if (value === undefined || value === null || value === "") {
-    if (required) throw addressError(`${field} is required.`, { [field]: [`${field} is required.`] });
     return null;
   }
   if (typeof value !== "string") {
     throw addressError(`${field} must be a string.`, { [field]: [`${field} must be a string.`] });
   }
   const trimmed = value.trim();
-  if (!trimmed && required) {
-    throw addressError(`${field} is required.`, { [field]: [`${field} is required.`] });
-  }
   return trimmed || null;
 }
 
@@ -38,21 +37,22 @@ function normalizeAddress(address, index) {
     throw addressError(`Unsupported customer address fields: ${unknownKeys.join(", ")}.`, { addresses: [`Unsupported fields: ${unknownKeys.join(", ")}`] });
   }
 
-  const normalized = {
-    line1: normalizeText(address.line1, "line1", { required: true }),
-    line2: normalizeText(address.line2, "line2"),
-    city: normalizeText(address.city, "city", { required: true }),
-    country: normalizeText(address.country, "country", { required: true }),
-    postalCode: normalizeText(address.postalCode, "postalCode"),
-    isPrimary: address.isPrimary === undefined ? false : address.isPrimary,
-  };
+  const normalized = { isPrimary: address.isPrimary === undefined ? false : address.isPrimary };
+  for (const key of ADDRESS_TEXT_KEYS) {
+    const value = normalizeText(address[key], key);
+    if (value !== null) normalized[key] = value;
+  }
 
   if (typeof normalized.isPrimary !== "boolean") {
     throw addressError("isPrimary must be boolean.", { addresses: ["isPrimary must be boolean."] });
   }
 
-  for (const key of OPTIONAL_TEXT_KEYS) {
-    if (normalized[key] === null) delete normalized[key];
+  if (!ADDRESS_TEXT_KEYS.some((key) => normalized[key])) {
+    throw addressError(
+      "An address must contain at least one non-empty address text field.",
+      { addresses: ["EMPTY_CUSTOMER_ADDRESS"] },
+      "EMPTY_CUSTOMER_ADDRESS",
+    );
   }
   return normalized;
 }
@@ -77,9 +77,7 @@ function normalizeCustomerAddresses(addresses) {
 
 function isUsableLegacyAddress(address) {
   return isPlainObject(address)
-    && typeof address.line1 === "string" && address.line1.trim()
-    && typeof address.city === "string" && address.city.trim()
-    && typeof address.country === "string" && address.country.trim();
+    && ADDRESS_TEXT_KEYS.some((key) => typeof address[key] === "string" && address[key].trim());
 }
 
 function resolvePrimaryAddress(addresses) {
@@ -97,14 +95,13 @@ function resolvePrimaryAddress(addresses) {
 }
 
 function sanitizeCustomerMutation(body = {}) {
-  const update = { ...body };
-  const serverOwned = [
-    "companyId", "company_id", "balance", "purchases", "loyaltyPoints", "loyalty_points",
-    "availableCredit", "available_credit", "status",
-    "creditLedger", "credit_ledger", "audit", "auditFields", "createdAt", "created_at",
-    "updatedAt", "updated_at", "expectedUpdatedAt"
-  ];
-  for (const field of serverOwned) delete update[field];
+  const update = {};
+  for (const field of PROFILE_MUTATION_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(body, field)) update[field] = body[field];
+  }
+  if (Object.prototype.hasOwnProperty.call(update, "nationality")) {
+    update.nationality = normalizeText(update.nationality, "nationality");
+  }
   if (Object.prototype.hasOwnProperty.call(update, "addresses")) {
     update.addresses = normalizeCustomerAddresses(update.addresses);
   }
@@ -113,6 +110,8 @@ function sanitizeCustomerMutation(body = {}) {
 
 module.exports = {
   ADDRESS_KEYS,
+  ADDRESS_TEXT_KEYS,
+  PROFILE_MUTATION_FIELDS,
   normalizeCustomerAddresses,
   resolvePrimaryAddress,
   sanitizeCustomerMutation,
