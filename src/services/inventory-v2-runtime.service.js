@@ -7,6 +7,14 @@ const goldValuationService = require("./gold-valuation.service");
 const looseProfileFinanceService = require("./loose-profile-finance.service");
 const { ValidationError } = require("../utils/errors");
 
+const OPERATIONAL_STATUS = Object.freeze([
+  "PENDING_INTEGRATION", "AVAILABLE", "RESERVED", "PENDING_TRANSFER", "WORKSHOP",
+  "SOLD", "RETURNED", "MISSING", "MELTED", "REVERSAL_PENDING", "REVERSED",
+]);
+const CONDITION = Object.freeze(["NEW", "USED"]);
+const TAG_STATE = Object.freeze(["PENDING", "PRINTED"]);
+const EVENT_ONLY_TERMS = Object.freeze(["IN_TRANSFER", "RECOVERED", "EXCHANGED"]);
+
 const LEGACY_STATUS = Object.freeze({
   AVAILABLE: "available",
   PENDING_INTEGRATION: "pending_integration",
@@ -150,6 +158,9 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
   if (!type) throw new Error("INVENTORY_PROFILE_INVALID");
 
   const grossWeight = finiteOrNull(piece.grossWeight, "GROSS_WEIGHT");
+  if (profile === "GOLD_BY_PIECE" && !Object.prototype.hasOwnProperty.call(piece, "stoneWeight")) {
+    throw new Error("GBP_STONE_WEIGHT_REQUIRED");
+  }
   const stoneWeight = finiteOrNull(piece.stoneWeight ?? 0, "STONE_WEIGHT");
   const karat = finiteOrNull(piece.karat, "KARAT");
   let weights = null;
@@ -217,7 +228,7 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
     makingTotal: specializedValuation?.purchase.makingTotal ?? finiteOrNull(piece.makingTotal, "MAKING_TOTAL"),
     certificateCost,
     vat: { ...vat, vatRateSource: specializedValuation?.purchase.vatRateSource ?? (piece.vatRate === undefined ? "SETTINGS_DEFAULT" : "MANUAL") },
-    currentValuation: specializedValuation?.current ?? (loosePurchase ? looseProfileFinanceService.calculateCurrent({ profile, input: piece.looseCurrentValuation || { currentValue: loosePurchase.purchaseBaseCost, currentVatRate: loosePurchase.vatRate }, configuredVatRate: context.vatRateDefault }) : null),
+    currentValuation: specializedValuation?.current ?? piece.currentValuation ?? (loosePurchase ? looseProfileFinanceService.calculateCurrent({ profile, input: piece.looseCurrentValuation || { currentValue: loosePurchase.purchaseBaseCost, currentVatRate: loosePurchase.vatRate }, configuredVatRate: context.vatRateDefault }) : null),
     pricing,
   });
 }
@@ -236,7 +247,7 @@ function looseDetailsAsPrimarySubject(looseDetails) {
   return { ...base, pearlDetails: looseDetails };
 }
 
-async function recordAssetEvent({ models, transaction, asset, context, eventType, oldStatus = null, newStatus, sourceType, sourceId, note, idempotencyKey = null }) {
+async function recordAssetEvent({ models, transaction, asset, context, eventType, oldStatus = null, newStatus, sourceType, sourceId, note, idempotencyKey = null, oldContextExtra = {}, newContextExtra = {} }) {
   const occurredAt = context.occurredAt || new Date();
   const event = await models.AssetEvent.create({
     id: newId("ASEV2"),
@@ -258,8 +269,8 @@ async function recordAssetEvent({ models, transaction, asset, context, eventType
     sourceId,
     beforeState: oldStatus ? `operational_status:${oldStatus}` : null,
     afterState: `operational_status:${newStatus}`,
-    oldContext: oldStatus ? { operationalStatus: oldStatus } : null,
-    newContext: { operationalStatus: newStatus, inventoryProfile: asset.inventoryProfile },
+    oldContext: oldStatus ? { operationalStatus: oldStatus, ...oldContextExtra } : null,
+    newContext: { operationalStatus: newStatus, inventoryProfile: asset.inventoryProfile, ...newContextExtra },
     idempotencyKey,
     severity: "info",
   }, { transaction });
@@ -301,7 +312,11 @@ async function persistReceiptEvidence({ models, transaction, asset, poItem, piec
       componentCost: piece.loosePurchase?.additionalCost ?? piece.componentCost ?? null, vatEnabled: Number(piece.vat.vatRate) > 0, vatRate: piece.vat.vatRate,
       vatRateSource: piece.vat.vatRateSource, vatBase: piece.vat.vatBase, vatAmount: piece.vat.vatAmount,
       totalPurchaseCost: piece.purchaseCost, supplierId: context.supplierId, purchaseDate: context.purchaseDate, poItemId: poItem.id,
-      createdBy: context.actorId || null, provenance: JSON.stringify({ contract: "V2_RUNTIME_RECEIPT", profile: piece.profile, perPiece: true }),
+      createdBy: context.actorId || null, provenance: JSON.stringify({
+        contract: "V2_RUNTIME_RECEIPT", profile: piece.profile, perPiece: true,
+        ...(piece.goldValuation?.rateSnapshot ? { goldRateSnapshot: piece.goldValuation.rateSnapshot } : {}),
+        ...(piece.__gbpCalculation ? { calculationAuthority: "GBP_03_R2_GOLD_CENTER_GLOBAL_SPOT", currentRateType: piece.goldValuation?.currentRateType || "GLOBAL" } : {}),
+      }),
     }, transaction,
   });
   const resolvedLoose = await profileMasterDataService.resolveLooseReferences({
@@ -492,6 +507,11 @@ async function recordTagPrint({ models, transaction, asset, context, printKind, 
     VALUES (:id,:assetId,:companyId,:branchId,:printKind,:templateName,:templateVersion,:printerName,:deviceId,:operatorId,:operatorName,:reason,:printedAt,'PRINTED',:idempotencyKey)`, {
     replacements: { id, assetId: asset.id, companyId: context.companyId, branchId: asset.branchId, printKind: kind, templateName: templateName || null, templateVersion: templateVersion || null, printerName: printerName || null, deviceId: deviceId || null, operatorId: context.actorId || null, operatorName: context.actorName || null, reason: reason || null, printedAt: context.occurredAt || new Date(), idempotencyKey }, transaction,
   });
+  await asset.update({
+    tagState: "PRINTED",
+    tagStateClassification: kind === "INITIAL" ? "V2_INITIAL_PRINTED" : "V2_REPRINTED",
+    updatedBy: context.actorId || null,
+  }, { transaction });
   await recordAssetEvent({ models, transaction, asset, context, eventType: kind === 'INITIAL' ? 'TAG_PRINTED' : 'TAG_REPRINTED', oldStatus: asset.operationalStatus, newStatus: asset.operationalStatus, sourceType: 'ASSET_TAG_PRINT', sourceId: id, note: reason || 'Barcode tag printed', idempotencyKey: `${idempotencyKey}:event` });
   return { id, printKind: kind, barcode: asset.barcode };
 }
@@ -746,4 +766,4 @@ async function updateAssetComponents({ models, transaction, asset, context, comp
   return fetchAssetComponents({ models, transaction, assetId: asset.id });
 }
 
-module.exports = { LEGACY_STATUS, TRANSITIONS, legacySubtypeForProfile, operationalStatusOf, createCgpAvailabilityTransitionContext, createCgpReversalHoldTransitionContext, createCgpReversalFinalizeTransitionContext, requireV2ReceiptPieces, normalizeReceiptPiece, looseDetailsAsPrimarySubject, newId, recordAssetEvent, recordMovement, persistReceiptEvidence, persistManufacturingEvidence, linkInvoiceAsset, transitionAsset, assignRfid, recordRfidScan, recordTagPrint, normalizeComponentsForProfile, persistAssetComponents, fetchAssetComponents, updateAssetComponents };
+module.exports = { OPERATIONAL_STATUS, CONDITION, TAG_STATE, EVENT_ONLY_TERMS, LEGACY_STATUS, TRANSITIONS, legacySubtypeForProfile, operationalStatusOf, createCgpAvailabilityTransitionContext, createCgpReversalHoldTransitionContext, createCgpReversalFinalizeTransitionContext, requireV2ReceiptPieces, normalizeReceiptPiece, looseDetailsAsPrimarySubject, newId, recordAssetEvent, recordMovement, persistReceiptEvidence, persistManufacturingEvidence, linkInvoiceAsset, transitionAsset, assignRfid, recordRfidScan, recordTagPrint, normalizeComponentsForProfile, persistAssetComponents, fetchAssetComponents, updateAssetComponents };

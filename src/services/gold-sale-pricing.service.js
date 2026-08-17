@@ -5,7 +5,7 @@
  * for gold Asset sales.
  *
  * Supported profiles:
- *   - GOLD_BY_WEIGHT_JEWELLERY : weight × gold_rate + weight × making_rate
+ *   - GOLD_BY_WEIGHT_JEWELLERY : net_gold_weight × gold_rate + net_gold_weight × making_rate
  *   - GOLD_BAR_24K             : weight × gold_rate + certificate amount; VAT on cert only
  *   - GOLD_BY_PIECE            : current_total_cost × (1 + markup%/100) with max-discount rule
  *
@@ -62,6 +62,12 @@ function calculateMakingChargeTotal({ itemWeightGrams, makingChargePerGram }) {
   return fixed(weight.times(rate));
 }
 
+function calculateGoldByWeightMakingTotal({ netGoldWeight, makingChargePerGram }) {
+  const weight = decimal(netGoldWeight, "NET_GOLD_WEIGHT", { required: true, min: 0 });
+  const rate = decimal(makingChargePerGram, "MAKING_CHARGE_PER_GRAM", { required: true, min: 0 });
+  return fixed(weight.times(rate));
+}
+
 // ─── VAT Rate Resolution ────────────────────────────────────────────────────
 // Reuses gold-valuation.service.js canonical VAT resolver — NO second resolver.
 
@@ -89,7 +95,8 @@ async function resolveSaleVatRate({ requestedRate, models, companyId, transactio
  *
  * @param {object} p
  * @param {string|number} p.netGoldWeight     Net gold weight used for gold value
- * @param {string|number} p.itemWeightGrams   Trusted physical gross weight used for making
+ * @param {string|number} p.itemWeightGrams   Trusted physical gross weight for display/audit
+ * @param {string|number} p.makingWeightGrams Making basis; defaults to net gold weight
  * @param {string|number} p.sellingGoldRate   Gold rate per gram used for sale
  * @param {string|number} p.makingChargePerGram  Making charge per gram for sale
  * @param {string|number|null} p.minimumMakingPerGram  Minimum allowed making per gram (from asset config)
@@ -100,6 +107,7 @@ async function resolveSaleVatRate({ requestedRate, models, companyId, transactio
 function calculateGoldByWeightSalePrice({
   netGoldWeight,
   itemWeightGrams = netGoldWeight,
+  makingWeightGrams = netGoldWeight,
   sellingGoldRate,
   makingChargePerGram,
   minimumMakingPerGram = null,
@@ -108,12 +116,16 @@ function calculateGoldByWeightSalePrice({
 }) {
   const weight = decimal(netGoldWeight, "NET_GOLD_WEIGHT", { required: true, min: 0 });
   const physicalWeight = decimal(itemWeightGrams, "ITEM_WEIGHT_GRAMS", { required: true, min: 0 });
+  const makingWeight = decimal(makingWeightGrams, "MAKING_WEIGHT_GRAMS", { required: true, min: 0 });
   const goldRate = decimal(sellingGoldRate, "SELLING_GOLD_RATE", { required: true, min: 0 });
   const makingRate = decimal(makingChargePerGram, "MAKING_CHARGE_PER_GRAM", { required: true, min: 0 });
   const minMaking = decimal(minimumMakingPerGram, "MINIMUM_MAKING_PER_GRAM", { min: 0 });
 
   const goldValue = weight.times(goldRate);
-  const makingTotal = physicalWeight.times(makingRate);
+  const makingTotal = new Decimal(calculateGoldByWeightMakingTotal({
+    netGoldWeight: makingWeight,
+    makingChargePerGram: makingRate,
+  }));
   const subtotal = goldValue.plus(makingTotal);
 
   // VAT resolution — for weight jewellery, VAT is on the full subtotal (gold + making)
@@ -562,6 +574,9 @@ async function calculateGoldSalePriceForAsset({
     return calculateGoldByWeightSalePrice({
       netGoldWeight,
       itemWeightGrams,
+      // Gold By Weight Jewellery follows the 01B net-weight authority. CGP
+      // is a separate acquisition path and retains its established basis.
+      makingWeightGrams: profile === "GOLD_BY_WEIGHT_JEWELLERY" ? netGoldWeight : itemWeightGrams,
       sellingGoldRate,
       makingChargePerGram,
       minimumMakingPerGram,
@@ -592,6 +607,7 @@ async function calculateGoldSalePriceForAsset({
 
 module.exports = {
   calculateMakingChargeTotal,
+  calculateGoldByWeightMakingTotal,
   calculateGoldByWeightSalePrice,
   calculateGoldBar24KSalePrice,
   calculateGoldByPieceSalePrice,

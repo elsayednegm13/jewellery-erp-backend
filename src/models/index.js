@@ -18,6 +18,7 @@ const EmployeeVerificationAttempt = require("./employeeVerificationAttempt.model
 const EmployeeOperationalSession = require("./employeeOperationalSession.model");
 const Asset = require("./asset.model");
 const AssetEvent = require("./assetEvent.model");
+const AssetBarcodeHistory = require("./assetBarcodeHistory.model");
 const AssetReturnReview = require("./assetReturnReview.model");
 const AssetCertificate = require("./assetCertificate.model");
 const AssetAttachment = require("./assetAttachment.model");
@@ -172,6 +173,10 @@ Employee.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
 Company.hasMany(Asset, { foreignKey: "companyId", as: "assets" });
 Asset.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Company.hasMany(AssetBarcodeHistory, { foreignKey: "companyId", as: "assetBarcodeHistory" });
+AssetBarcodeHistory.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Asset.hasMany(AssetBarcodeHistory, { foreignKey: "assetId", as: "barcodeHistory" });
+AssetBarcodeHistory.belongsTo(Asset, { foreignKey: "assetId", as: "asset" });
 
 Company.hasMany(BarcodeInventoryCode, { foreignKey: "companyId", as: "barcodeInventoryCodes" });
 BarcodeInventoryCode.belongsTo(Company, { foreignKey: "companyId", as: "company" });
@@ -661,6 +666,7 @@ module.exports = {
   EmployeeOperationalSession,
   Asset,
   AssetEvent,
+  AssetBarcodeHistory,
   AssetReturnReview,
   AssetCertificate,
   AssetAttachment,

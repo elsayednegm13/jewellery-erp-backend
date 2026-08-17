@@ -95,7 +95,10 @@ function calculateReceiptGoldValuation({ profile, weights, input, configuredVatR
 
   const makingPerGram = decimal(value.makingPerGram ?? 0, "PURCHASE_MAKING_PER_GRAM", { min: 0 });
   const currentMakingPerGram = decimal(value.currentMakingPerGram ?? makingPerGram, "CURRENT_MAKING_PER_GRAM", { min: 0 });
-  const makingWeight = decimal(weights?.grossWeight ?? netGoldWeight, "GROSS_WEIGHT", { required: true, min: 0 });
+  // Gold By Weight Jewellery economics are based on net gold weight. Gross
+  // weight remains available in the weight facts for physical/audit display;
+  // it is not the making-charge basis.
+  const makingWeight = decimal(netGoldWeight, "NET_GOLD_WEIGHT", { required: true, min: 0 });
   const makingTotal = fixed(makingWeight.times(makingPerGram));
   const currentMakingValue = fixed(makingWeight.times(currentMakingPerGram));
   const purchaseVat = resolveVatRate({ requestedRate: value.vatRate, configuredRate: null, required: false });
@@ -136,7 +139,9 @@ function calculateCurrentGoldValuation({ profile, goldDetails, input, configured
     return Object.freeze({ rateSource: currentRateSource, goldRate: fixed(currentGoldRate), goldValue: currentGoldValue, makingValue: null, certificateValue: fixed(currentCertificateCost), componentValue: null, vatRate: vat.rate, vatRateSource: vat.source, vatBase, vatAmount, totalValue: fixed(new Decimal(currentGoldValue).plus(currentCertificateCost).plus(vatAmount)) });
   }
   const currentMakingPerGram = decimal(value.currentMakingPerGram ?? 0, "CURRENT_MAKING_PER_GRAM", { min: 0 });
-  const currentMakingWeight = decimal(goldDetails?.gross_weight ?? goldDetails?.grossWeight ?? netGoldWeight, "GROSS_WEIGHT", { required: true, min: 0 });
+  // Preserve the Gold By Weight Jewellery purchase/current valuation split,
+  // but use the same approved net-weight making basis for current value.
+  const currentMakingWeight = decimal(netGoldWeight, "NET_GOLD_WEIGHT", { required: true, min: 0 });
   const makingValue = fixed(currentMakingWeight.times(currentMakingPerGram));
   const vat = resolveVatRate({ requestedRate: value.currentVatRate, configuredRate: null, required: false });
   const vatBase = fixed(new Decimal(currentGoldValue).plus(makingValue));

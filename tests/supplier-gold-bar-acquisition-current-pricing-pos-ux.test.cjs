@@ -7,7 +7,7 @@ const goldValuation = require("../src/services/gold-valuation.service");
 const goldSalePricing = require("../src/services/gold-sale-pricing.service");
 const goldReference = require("../src/services/gold-center-reference-price.service");
 
-test("supplier gold valuation uses gross weight for making and preserves rate sources", () => {
+test("supplier gold valuation uses net gold weight for making and preserves rate sources", () => {
   const result = goldValuation.calculateReceiptGoldValuation({
     profile: "GOLD_BY_WEIGHT_JEWELLERY",
     weights: { grossWeight: 10, netGoldWeight: 8.75 },
@@ -22,8 +22,8 @@ test("supplier gold valuation uses gross weight for making and preserves rate so
   });
   assert.equal(result.purchase.goldRateSource, "GOLD_CENTER");
   assert.equal(result.current.rateSource, "GOLD_CENTER");
-  assert.equal(result.purchase.makingTotal, "30.00000000");
-  assert.equal(result.current.makingValue, "40.00000000");
+  assert.equal(result.purchase.makingTotal, "26.25000000");
+  assert.equal(result.current.makingValue, "35.00000000");
 });
 
 test("24K purchase and sale VAT remain certificate-only", () => {

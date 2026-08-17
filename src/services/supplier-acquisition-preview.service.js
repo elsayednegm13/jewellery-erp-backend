@@ -7,16 +7,27 @@ const Decimal = require("decimal.js");
 
 const round2 = (value) => new Decimal(value || 0).toDecimalPlaces(2, Decimal.ROUND_HALF_UP).toNumber();
 const round4 = (value) => new Decimal(value || 0).toDecimalPlaces(4, Decimal.ROUND_HALF_UP).toNumber();
+const scale8 = (value) => new Decimal(value || 0).toDecimalPlaces(8, Decimal.ROUND_HALF_UP).toNumber();
+
+function containsGoldByPiece(pieces = []) {
+  return pieces.some((piece) => String(piece.profile || piece.inventoryProfile || "").toUpperCase() === "GOLD_BY_PIECE");
+}
 
 function normalizeItem(item, pieces) {
-  const totalCost = round2(pieces.reduce((sum, piece) => new Decimal(sum).plus(piece.purchaseCost || 0), 0));
-  const totalWeight = new Decimal(pieces.reduce((sum, piece) => new Decimal(sum).plus(piece.grossWeight || 0), 0)).toDecimalPlaces(4, Decimal.ROUND_HALF_UP).toNumber();
+  const exactCost = pieces.reduce((sum, piece) => sum.plus(piece.purchaseCost || 0), new Decimal(0));
+  const exactWeight = pieces.reduce((sum, piece) => sum.plus(piece.grossWeight || 0), new Decimal(0));
+  const finalProfile = containsGoldByPiece(pieces);
+  const totalCost = finalProfile ? scale8(exactCost) : round2(exactCost);
+  const totalWeight = finalProfile ? scale8(exactWeight) : exactWeight.toDecimalPlaces(4, Decimal.ROUND_HALF_UP).toNumber();
   return { ...item, v2Pieces: pieces, totalCost, unitCost: pieces.length ? totalCost / pieces.length : 0, totalWeight };
 }
 
 function calculateTotals({ normalizedItems = [], body = {}, settings = {}, inventoryV2Target = false }) {
-  const goodsTotal = round2(normalizedItems.reduce((sum, item) => new Decimal(sum).plus(item.totalCost || 0), 0));
-  const totalWeight = new Decimal(normalizedItems.reduce((sum, item) => new Decimal(sum).plus(item.totalWeight || 0), 0)).toDecimalPlaces(4, Decimal.ROUND_HALF_UP).toNumber();
+  const finalProfile = normalizedItems.some((item) => containsGoldByPiece(item.v2Pieces || []));
+  const exactGoodsTotal = normalizedItems.reduce((sum, item) => sum.plus(item.totalCost || 0), new Decimal(0));
+  const exactTotalWeight = normalizedItems.reduce((sum, item) => sum.plus(item.totalWeight || 0), new Decimal(0));
+  const goodsTotal = finalProfile ? scale8(exactGoodsTotal) : round2(exactGoodsTotal);
+  const totalWeight = finalProfile ? scale8(exactTotalWeight) : exactTotalWeight.toDecimalPlaces(4, Decimal.ROUND_HALF_UP).toNumber();
   const rcmRequested = Boolean(body.isRcm || body.isDRC || body.reverseVat || body.useReverseCharge);
   const vatRequested = (rcmRequested || body.applyVat === true) && settings.vatEnabled !== false;
   let taxBase = 0;
@@ -48,14 +59,15 @@ function calculateTotals({ normalizedItems = [], body = {}, settings = {}, inven
     taxBase = goodsTotal;
     rcmRate = rate;
     vatRate = rate;
-    rcmVatAmount = round2(new Decimal(taxBase).times(rate).div(100));
+    rcmVatAmount = finalProfile ? scale8(new Decimal(taxBase).times(rate).div(100)) : round2(new Decimal(taxBase).times(rate).div(100));
     total = taxBase;
   } else if (explicitV2Vat) {
     vatRate = Number(pieceVats[0].vatRate);
     taxIncluded = true;
     isRecoverable = Boolean(body.isRecoverable ?? settings.purchaseVatRecoverableDefault ?? true);
-    inputVatAmount = round2(pieceVats.reduce((sum, vat) => new Decimal(sum).plus(vat.vatAmount || 0), 0));
-    taxBase = round2(new Decimal(goodsTotal).minus(inputVatAmount));
+    const exactInputVat = pieceVats.reduce((sum, vat) => sum.plus(vat.vatAmount || 0), new Decimal(0));
+    inputVatAmount = finalProfile ? scale8(exactInputVat) : round2(exactInputVat);
+    taxBase = finalProfile ? scale8(new Decimal(goodsTotal).minus(inputVatAmount)) : round2(new Decimal(goodsTotal).minus(inputVatAmount));
     total = goodsTotal;
   } else if (vatRequested) {
     const rate = Number(body.vatRate ?? settings.purchaseVatRate ?? settings.vatRate ?? 0);
@@ -65,19 +77,19 @@ function calculateTotals({ normalizedItems = [], body = {}, settings = {}, inven
       taxIncluded = Boolean(body.taxIncluded ?? settings.purchaseTaxIncludedDefault ?? false);
       isRecoverable = Boolean(body.isRecoverable ?? settings.purchaseVatRecoverableDefault ?? true);
       if (taxIncluded) {
-        taxBase = round2(new Decimal(goodsTotal).div(new Decimal(1).plus(rate / 100)));
-        inputVatAmount = round2(new Decimal(goodsTotal).minus(taxBase));
+        taxBase = finalProfile ? scale8(new Decimal(goodsTotal).div(new Decimal(1).plus(new Decimal(rate).div(100)))) : round2(new Decimal(goodsTotal).div(new Decimal(1).plus(rate / 100)));
+        inputVatAmount = finalProfile ? scale8(new Decimal(goodsTotal).minus(taxBase)) : round2(new Decimal(goodsTotal).minus(taxBase));
         total = goodsTotal;
       } else {
         taxBase = goodsTotal;
-        inputVatAmount = round2(new Decimal(taxBase).times(rate).div(100));
-        total = round2(new Decimal(taxBase).plus(inputVatAmount));
+        inputVatAmount = finalProfile ? scale8(new Decimal(taxBase).times(rate).div(100)) : round2(new Decimal(taxBase).times(rate).div(100));
+        total = finalProfile ? scale8(new Decimal(taxBase).plus(inputVatAmount)) : round2(new Decimal(taxBase).plus(inputVatAmount));
       }
     }
   }
 
-  const paidAmount = round2(body.paidAmount || 0);
-  const remainingAmount = round2(new Decimal(total).minus(paidAmount));
+  const paidAmount = finalProfile ? scale8(body.paidAmount || 0) : round2(body.paidAmount || 0);
+  const remainingAmount = finalProfile ? scale8(new Decimal(total).minus(paidAmount)) : round2(new Decimal(total).minus(paidAmount));
   const paymentStatus = remainingAmount <= 0 && total > 0 ? "paid" : paidAmount > 0 ? "partial" : "unpaid";
   return { goodsTotal, totalWeight, total, paidAmount, remainingAmount, paymentStatus, taxBase, vatRate, inputVatAmount, taxIncluded, isRecoverable, isRcm, rcmVatAmount, rcmRate };
 }

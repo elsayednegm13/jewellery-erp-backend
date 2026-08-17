@@ -6,6 +6,9 @@ const CODE_PATTERN = /^[A-Z0-9]{2,6}$/;
 const KARAT_PATTERN = /^\d{2}$/;
 const MAX_SERIAL = 999999;
 
+const BARCODE_HISTORY_STATE = Object.freeze({ ACTIVE: "ACTIVE", RETIRED: "RETIRED" });
+const BARCODE_HISTORY_ACTION = Object.freeze({ INITIAL: "INITIAL", REPLACEMENT: "REPLACEMENT" });
+
 function normalizeCode(value, label) {
   const code = String(value || "").trim().toUpperCase();
   if (!CODE_PATTERN.test(code)) {
@@ -206,7 +209,19 @@ async function generateBarcodeForAsset({
     const barcode = formatBarcode({ inventoryCode: inventory.code, itemCode: item.code, karatCode, serial });
     // Inventory Master V2 reserves Barcode identity globally, including rows
     // outside the caller's Company and soft-deleted/terminal Assets.
-    const collision = await models.Asset.count({ where: { barcode }, paranoid: false, transaction });
+    let collision = await models.Asset.count({ where: { barcode }, paranoid: false, transaction });
+    try {
+      const [historyRows] = await models.sequelize.query(
+        "SELECT 1 FROM asset_barcode_history WHERE barcode=:barcode LIMIT 1",
+        { replacements: { barcode }, transaction }
+      );
+      collision += historyRows.length;
+    } catch (error) {
+      // Staged deployments may start the application before the forward-only
+      // migration is applied. Once present, permanent history is mandatory.
+      const code = error?.original?.code || error?.parent?.code || error?.code;
+      if (code !== "42P01") throw error;
+    }
     if (!collision) {
       return {
         barcode,
@@ -222,6 +237,63 @@ async function generateBarcodeForAsset({
   throw new ConflictError("Could not allocate a non-reused barcode after 20 attempts.");
 }
 
+async function replaceAssetBarcode({ asset, companyId, context = {}, reason, transaction }) {
+  const models = require("../models");
+  const normalizedReason = String(reason || "").trim();
+  if (!normalizedReason) throw new ValidationError("Barcode replacement reason is required.");
+  if (!transaction) throw new ValidationError("Barcode replacement transaction is required.");
+  if (!asset?.id || asset.companyId !== companyId) throw new ValidationError("Barcode replacement company scope is invalid.");
+
+  const currentHistory = await models.sequelize.query(`
+    SELECT id,barcode,barcode_revision AS "barcodeRevision"
+    FROM asset_barcode_history
+    WHERE asset_id=:assetId AND state='ACTIVE'
+    FOR UPDATE
+  `, { replacements: { assetId: asset.id }, transaction, type: models.sequelize.QueryTypes.SELECT });
+  if (currentHistory.length !== 1 || currentHistory[0].barcode !== asset.barcode) {
+    throw new ConflictError("Barcode history does not match the current Asset identity.");
+  }
+
+  const identity = await generateBarcodeForAsset({
+    companyId,
+    assetType: asset.type,
+    inventoryCode: asset.inventoryCode,
+    itemCode: asset.itemCode,
+    karat: asset.karat,
+    inventorySubtype: asset.inventorySubtype,
+    transaction,
+  });
+  const now = context.occurredAt || new Date();
+  const actorId = context.actorId || null;
+  const nextRevision = Number(currentHistory[0].barcodeRevision || asset.barcodeRevision || 1) + 1;
+
+  await models.sequelize.query("SELECT set_config('darfus.inventory_barcode_replacement','approved',true)", { transaction });
+  await models.sequelize.query(`
+    UPDATE asset_barcode_history
+    SET state='RETIRED',retired_at=:retiredAt,retired_by=:retiredBy,retirement_reason=:reason,updated_at=CURRENT_TIMESTAMP
+    WHERE id=:id AND state='ACTIVE'
+  `, { replacements: { id: currentHistory[0].id, retiredAt: now, retiredBy: actorId, reason: normalizedReason }, transaction });
+  await asset.update({ ...identity, barcodeRevision: nextRevision, updatedBy: actorId }, { transaction });
+  await models.sequelize.query(`
+    INSERT INTO asset_barcode_history
+      (id,asset_id,company_id,barcode,barcode_revision,state,action,issued_at,issued_by,source_type,source_id,created_at,updated_at)
+    VALUES (:id,:assetId,:companyId,:barcode,:barcodeRevision,'ACTIVE','REPLACEMENT',:issuedAt,:issuedBy,'BARCODE_REPLACEMENT',:sourceId,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+  `, {
+    replacements: {
+      id: `ABH-REPL-${asset.id}-${nextRevision}`,
+      assetId: asset.id,
+      companyId,
+      barcode: identity.barcode,
+      barcodeRevision: nextRevision,
+      issuedAt: now,
+      issuedBy: actorId,
+      sourceId: asset.id,
+    },
+    transaction,
+  });
+  return { assetId: asset.id, oldBarcode: currentHistory[0].barcode, barcode: identity.barcode, barcodeRevision: nextRevision, reason: normalizedReason };
+}
+
 module.exports = {
   formatBarcode,
   validateInventoryCode,
@@ -230,6 +302,9 @@ module.exports = {
   getEffectiveBarcodeSettings,
   allocateBarcodeSerial,
   generateBarcodeForAsset,
+  replaceAssetBarcode,
+  BARCODE_HISTORY_STATE,
+  BARCODE_HISTORY_ACTION,
   isCodeUsed,
   getCodeUsageSummary,
 };

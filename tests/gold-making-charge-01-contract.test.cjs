@@ -25,8 +25,8 @@ async function main() {
     vatRate: 0,
   });
   assert.equal(sale.goldValue, "960.00000000");
-  assert.equal(sale.makingTotal, "1000.00000000");
-  assert.equal(sale.subtotal, "1960.00000000");
+  assert.equal(sale.makingTotal, "800.00000000");
+  assert.equal(sale.subtotal, "1760.00000000");
   assert.equal(sale.itemWeightGrams, "10.00000000");
 
   console.log(JSON.stringify({

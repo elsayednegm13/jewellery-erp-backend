@@ -36,8 +36,9 @@ const goldValuationService = require("../services/gold-valuation.service");
 const looseProfileFinanceService = require("../services/loose-profile-finance.service");
 const supplierAcquisitionPreviewService = require("../services/supplier-acquisition-preview.service");
 const goldSalePricingService = require("../services/gold-sale-pricing.service");
+const goldByPieceProfileService = require("../services/gold-by-piece-profile.service");
 const assetMetadataService = require("../services/asset-metadata.service");
-const { calculateMakingChargeTotal } = goldSalePricingService;
+const { calculateMakingChargeTotal, calculateGoldByWeightMakingTotal } = goldSalePricingService;
 const inventoryAuditCanonicalService = require("../services/inventory-audit-canonical.service");
 const reservationService = require("../services/reservation.service");
 const reservationDepositReceiptService = require("../services/reservation-deposit-receipt.service");
@@ -747,6 +748,18 @@ async function executeCanonicalSale(req, res, next, { operation = "pos.checkout"
       });
 
       if (product) {
+        // Product quantity is retained only for non-final legacy scope. A
+        // direct Product payload must not bypass the Asset authority even if
+        // the POS search projection was bypassed or a client supplied a
+        // misleading item shape.
+        if (inventoryMasterPolicy.isFinalClientInventoryProduct(product)
+          || inventoryMasterPolicy.isFinalClientInventoryProfile(item.inventoryProfile || item.profile)) {
+          throw new AppError(
+            "Final client inventory profiles must be sold by Asset identity, not Product quantity.",
+            422,
+            "FINAL_PROFILE_PRODUCT_SALE_FORBIDDEN"
+          );
+        }
         const qty = Number(item.quantity) || 1;
         if (Number(product.quantityAvailable) < qty) {
           throw new ValidationError(`الكمية المطلوبة غير متاحة في المخزون للمنتج ${product.productName}. المتاح: ${product.quantityAvailable}`);
@@ -1458,6 +1471,13 @@ async function executeCanonicalReturn(req, res, next, { operation = "sales.retur
       // Otherwise a Product (quantity-based full return)
       const product = await models.Product.findOne({ where: { id: rid, companyId: req.companyId }, lock: true, transaction: t });
       if (product) {
+        if (inventoryMasterPolicy.isFinalClientInventoryProduct(product)) {
+          throw new AppError(
+            "Final client inventory profiles must preserve Asset identity through returns.",
+            422,
+            "FINAL_PROFILE_PRODUCT_RETURN_FORBIDDEN"
+          );
+        }
         const qty = Number(originalItem.quantity) || 1;
         if (qty <= 0) {
           throw new ValidationError(`كمية البند (${rid}) غير صالحة للإرجاع`);
@@ -1875,6 +1895,13 @@ router.post(
         attributes: ["id", "companyId", "productName", "branchId", "quantityAvailable", "salePrice", "unitCost"],
       });
       if (!returnedProduct) throw new ValidationError("البند المراد إرجاعه غير موجود");
+      if (inventoryMasterPolicy.isFinalClientInventoryProduct(returnedProduct)) {
+        throw new AppError(
+          "Final client inventory profiles must preserve Asset identity through exchanges.",
+          422,
+          "FINAL_PROFILE_PRODUCT_EXCHANGE_FORBIDDEN"
+        );
+      }
       returnQuantity = Number(originalItem.quantity) || 1;
       if (returnQuantity <= 0) throw new ValidationError("كمية البند المراد إرجاعه غير صالحة");
     }
@@ -1924,6 +1951,13 @@ router.post(
           attributes: ["id", "companyId", "productName", "branchId", "quantityAvailable", "salePrice", "unitCost"],
         });
         if (!product) throw new ValidationError("بعض المنتجات البديلة الجديدة غير موجودة في النظام");
+        if (inventoryMasterPolicy.isFinalClientInventoryProduct(product)) {
+          throw new AppError(
+            "Final client inventory profiles must use an Asset replacement, not Product quantity.",
+            422,
+            "FINAL_PROFILE_PRODUCT_EXCHANGE_FORBIDDEN"
+          );
+        }
         if (product.branchId !== branchId) throw new ValidationError(`المنتج البديل ${product.productName} (${product.id}) تابع لفرع آخر وليس للفرع النشط`);
         if (Number(product.quantityAvailable || 0) < qty) throw new ValidationError(`الكمية المطلوبة غير متاحة للمنتج البديل ${product.productName}. المتاح: ${product.quantityAvailable}`);
         const unitPrice = Number(product.salePrice || 0);
@@ -2203,6 +2237,13 @@ router.post(
       if (!product) {
         throw new ValidationError("البند المراد إرجاعه غير موجود");
       }
+      if (inventoryMasterPolicy.isFinalClientInventoryProduct(product)) {
+        throw new AppError(
+          "Final client inventory profiles must preserve Asset identity through exchanges.",
+          422,
+          "FINAL_PROFILE_PRODUCT_EXCHANGE_FORBIDDEN"
+        );
+      }
       returnedProduct = product;
       returnQuantity = Number(originalItem.quantity) || 1;
       if (returnQuantity <= 0) {
@@ -2267,6 +2308,13 @@ router.post(
         if (!Number.isInteger(qty) || qty <= 0) throw new ValidationError("كمية المنتج البديل يجب أن تكون عددًا صحيحًا أكبر من صفر");
         const product = await models.Product.findOne({ where: { id: it.id, companyId: req.companyId }, lock: true, transaction: t });
         if (!product) throw new ValidationError("بعض الأصول البديلة الجديدة غير موجودة في النظام");
+        if (inventoryMasterPolicy.isFinalClientInventoryProduct(product)) {
+          throw new AppError(
+            "Final client inventory profiles must use an Asset replacement, not Product quantity.",
+            422,
+            "FINAL_PROFILE_PRODUCT_EXCHANGE_FORBIDDEN"
+          );
+        }
         if (product.branchId !== branchId) throw new ValidationError(`المنتج البديل ${product.productName} (${product.id}) تابع لفرع آخر وليس للفرع النشط`);
         if (Number(product.quantityAvailable || 0) < qty) throw new ValidationError(`الكمية المطلوبة غير متاحة للمنتج البديل ${product.productName}. المتاح: ${product.quantityAvailable}`);
         const unitPrice = Number(product.salePrice || 0);
@@ -5582,6 +5630,68 @@ router.post("/inventory-v2/assets/:id/tags/print", authMiddleware, requireBusine
   } catch (error) { await transaction.rollback(); return next(error); }
 });
 
+// Barcode replacement is the only controlled identity change. The server
+// allocates the next barcode, retires the old one permanently, and records
+// both the durable history row and the normal Asset event/audit evidence.
+router.post("/inventory-v2/assets/:id/barcode/replace", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true, operation: "inventory_v2.barcode_replace" }), async (req, res, next) => {
+  const reason = String(req.body?.reason || "").trim();
+  if (!reason) return next(new ValidationError("Barcode replacement reason is required."));
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const idempotencyKey = requireInventoryV2IdempotencyKey(req);
+    const scope = "inventory-v2.barcode-replacement";
+    const requestHash = idempotencyService.hashRequest(scope, req.body || {});
+    const claim = await idempotencyService.claim({ models, companyId: req.companyId, scope, key: idempotencyKey, requestHash, transaction });
+    if (!claim.claimed) {
+      await transaction.rollback();
+      const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope, key: idempotencyKey, requestHash });
+      if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+      return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+    }
+    const asset = await findScopedInventoryV2Asset(req, req.params.id, branchId, transaction, { lock: true });
+    const result = await barcodeIdentityService.replaceAssetBarcode({
+      asset,
+      companyId: req.companyId,
+      context: { ...inventoryV2Context(req, branchId), branchName: asset.branch },
+      reason,
+      transaction,
+    });
+    const event = await inventoryV2Runtime.recordAssetEvent({
+      models,
+      transaction,
+      asset: asset.toJSON(),
+      context: { ...inventoryV2Context(req, branchId), branchName: asset.branch },
+      eventType: "BARCODE_REPLACED",
+      oldStatus: asset.operationalStatus,
+      newStatus: asset.operationalStatus,
+      sourceType: "BARCODE_REPLACEMENT",
+      sourceId: asset.id,
+      note: reason,
+      idempotencyKey,
+      oldContextExtra: { barcode: result.oldBarcode },
+      newContextExtra: { barcode: result.barcode, barcodeRevision: result.barcodeRevision },
+    });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
+      action: "inventory_v2.barcode_replaced",
+      description: `Barcode replaced for Asset ${asset.id}`,
+      sourceDocument: event.id,
+      operatorReason: reason,
+      requiredPermission: "inventory.adjust",
+      requestedOperation: "inventory_v2.barcode_replace",
+      authorizationResult: "allowed",
+      metadata: { assetId: asset.id, oldBarcode: result.oldBarcode, newBarcode: result.barcode, barcodeRevision: result.barcodeRevision },
+    }), { transaction });
+    const responseBody = { success: true, data: result };
+    await idempotencyService.succeed({ request: claim.request, statusCode: 201, responseBody, transaction });
+    await transaction.commit();
+    return res.status(201).json(responseBody);
+  } catch (error) {
+    if (!transaction.finished) await transaction.rollback();
+    return next(error);
+  }
+});
+
 router.post("/inventory-v2/workshop-orders", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
   const transaction = await models.sequelize.transaction();
   try {
@@ -7572,13 +7682,20 @@ router.get("/pos/search", authMiddleware, requireAnyBusinessPermission(["pos.vie
         },
       });
     };
-    if (exactProduct && Number(exactProduct.quantityAvailable || 0) <= 0) addProduct(exactProduct, true);
+    // Product rows remain available to non-final legacy scope, but they are
+    // never a physical-stock projection for the Owner-approved final client
+    // profiles. The helper is server-owned because Product has no inventory
+    // profile column in the legacy schema; explicit profile/stockType values
+    // are resolved here before the result is exposed.
+    if (exactProduct && !inventoryMasterPolicy.isFinalClientInventoryProduct(exactProduct) && Number(exactProduct.quantityAvailable || 0) <= 0) addProduct(exactProduct, true);
     if (exactAsset) {
       const exactUnavailable = String(exactAsset.operationalStatus || "").toUpperCase() !== "AVAILABLE";
       const exactPrice = exactUnavailable ? { value: null, unavailable: false } : await resolveSearchAssetPrice(exactAsset);
       addAsset(exactAsset, exactUnavailable, exactPrice.value, exactPrice.unavailable);
     }
-    products.forEach((product) => addProduct(product));
+    products
+      .filter((product) => !inventoryMasterPolicy.isFinalClientInventoryProduct(product))
+      .forEach((product) => addProduct(product));
     const pricedAssets = await Promise.all(assets.map(async (asset) => ({ asset, price: await resolveSearchAssetPrice(asset) })));
     pricedAssets.forEach(({ asset, price }) => addAsset(asset, false, price.value, price.unavailable));
     return res.status(200).json({ success: true, items: result.slice(0, limit), data: { items: result.slice(0, limit), total: result.length, limit, query, branchId } });
@@ -7635,27 +7752,45 @@ router.get("/products/:id/purchases", authMiddleware, requireBusinessPermission(
 
 // ─── Supplier Purchase Receiving ───────────────────────────────────────────
 
+function assertFinalClientSupplierReceiveContract({ body = {}, items = [] } = {}) {
+  const assessment = inventoryMasterPolicy.assessFinalClientSupplierReceive({ body, items });
+  if (assessment.rejectLegacy) {
+    throw new AppError(
+      "Final client inventory profiles require the canonical V2 per-piece Supplier Receive path.",
+      422,
+      "FINAL_CLIENT_PROFILE_V2_REQUIRED"
+    );
+  }
+  return assessment;
+}
+
 router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMiddleware, requireBusinessPermission("suppliers.create", { touch: true }), async (req, res, next) => {
+  const body = req.body || {};
+  const items = Array.isArray(body.items) && body.items.length ? body.items : [{
+    name: body.itemName || body.assetName,
+    description: body.description,
+    type: body.stockType || body.assetType,
+    category: body.category,
+    karat: body.karat,
+    quantity: body.quantity,
+    weightPerUnit: body.weightPerUnit,
+    unitCost: body.unitCost,
+    grossWeight: body.grossWeight,
+    cost: body.cost,
+    price: body.price,
+    notes: body.notes
+  }];
+  try {
+    cgpLegacyIsolation.assertSupplierReceiveDoesNotMasqueradeAsCgp({ body, items });
+    assertFinalClientSupplierReceiveContract({ body, items });
+  } catch (error) {
+    return next(error);
+  }
+
   const t = await models.sequelize.transaction();
   try {
-    const body = req.body || {};
     const supplierId = body.supplierId;
     const branchId = body.warehouseId || body.branchId || req.headers["x-branch-id"] || req.branchId;
-    const items = Array.isArray(body.items) && body.items.length ? body.items : [{
-      name: body.itemName || body.assetName,
-      description: body.description,
-      type: body.stockType || body.assetType,
-      category: body.category,
-      karat: body.karat,
-      quantity: body.quantity,
-      weightPerUnit: body.weightPerUnit,
-      unitCost: body.unitCost,
-      grossWeight: body.grossWeight,
-      cost: body.cost,
-      price: body.price,
-      notes: body.notes
-    }];
-    cgpLegacyIsolation.assertSupplierReceiveDoesNotMasqueradeAsCgp({ body, items });
     const paymentMethod = body.paymentMethod || "credit";
     const paidAmount = Number(body.paidAmount) || 0;
     const now = new Date();
@@ -7703,7 +7838,10 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       const weightPerUnit = Number(item.weightPerUnit ?? item.grossWeight ?? item.weight);
       const unitCost = Number(item.unitCost ?? item.cost ?? item.unitPrice);
       const karat = item.karat == null || item.karat === "" ? null : Number(item.karat);
-      const validKarats = new Set([14, 18, 21, 22, 24]);
+      const profileHint = String(item.profile || item.inventoryProfile || item.perPiece?.[0]?.profile || item.perPiece?.[0]?.inventoryProfile || "").trim().toUpperCase();
+      const validKarats = profileHint === "GOLD_BY_PIECE"
+        ? new Set(goldByPieceProfileService.KARATS)
+        : new Set([14, 18, 21, 22, 24]);
 
       if (!item.name) throw new ValidationError(`اسم البند رقم ${index + 1} مطلوب`);
       if (!Number.isFinite(quantity) || quantity <= 0) throw new ValidationError(`كمية البند رقم ${index + 1} غير صحيحة`);
@@ -7765,6 +7903,68 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
         if (!Array.isArray(item.perPiece)) return item;
         const perPiece = await Promise.all(item.perPiece.map(async (piece, pieceIndex) => {
           const profile = String(piece.profile || piece.inventoryProfile || "").trim().toUpperCase();
+          if (profile === "GOLD_BY_PIECE") {
+            if (!Object.prototype.hasOwnProperty.call(piece, "stoneWeight")) throw new ValidationError("Gold By Piece stoneWeight is required; zero is valid.");
+            const selectedKarat = goldByPieceProfileService.validateWeights(piece).karat;
+            const reference = await goldByPieceProfileService.resolveRate({ companyId: req.companyId, currency: "AED", karat: selectedKarat, rateType: "GLOBAL", now });
+            const requested = piece.goldValuation?.purchaseGoldRate ?? piece.purchaseGoldRate;
+            const hasRequested = requested !== undefined && requested !== null && String(requested).trim() !== "";
+            let approvedPurchaseRate = reference.rate;
+            let purchaseRateSource = "GOLD_CENTER_GLOBAL_SPOT";
+            let overrideMetadata = null;
+            if (hasRequested) {
+              let requestedDecimal;
+              try { requestedDecimal = new Decimal(String(requested)); } catch { throw new ValidationError("Purchase gold rate must be a valid number."); }
+              if (!requestedDecimal.isFinite() || requestedDecimal.lte(0)) throw new ValidationError("Purchase gold rate must be positive.");
+              if (!requestedDecimal.eq(new Decimal(reference.rate))) {
+                if (!(await canOverridePurchaseRate())) throw new ForbiddenError("Purchase gold-rate override requires inventory.adjust permission.");
+                const reason = piece.purchaseRateOverrideReason ?? piece.goldValuation?.purchaseRateOverrideReason ?? body.purchaseRateOverrideReason;
+                if (!reason || !String(reason).trim()) throw new ValidationError("Purchase gold-rate override reason is required.");
+                approvedPurchaseRate = requestedDecimal.toDecimalPlaces(8, Decimal.ROUND_HALF_UP).toFixed(8);
+                purchaseRateSource = "MANUAL_OVERRIDE";
+                overrideMetadata = { referenceRate: reference.rate, approvedRate: approvedPurchaseRate, reason: String(reason).trim(), actorId: req.user?.id || null };
+              }
+            }
+            const input = {
+              ...piece,
+              karat: selectedKarat,
+              vatRate: piece.goldValuation?.vatRate ?? piece.vatRate ?? (settings.vatEnabled === false ? 0 : settings.purchaseVatRate ?? settings.vatRate),
+              currentVatRate: piece.goldValuation?.currentVatRate ?? piece.currentVatRate ?? (settings.vatEnabled === false ? 0 : settings.vatRate),
+              purchaseGoldRate: approvedPurchaseRate,
+              currentGoldRate: reference.rate,
+              makingPerGram: piece.goldValuation?.makingPerGram ?? piece.makingPerGram,
+              currentMakingPerGram: piece.goldValuation?.currentMakingPerGram ?? piece.currentMakingPerGram ?? piece.goldValuation?.makingPerGram ?? piece.makingPerGram,
+              markupPercent: piece.pricing?.markupPercent ?? piece.markupPercent,
+              maximumDiscountPercent: piece.pricing?.maximumDiscountPercent ?? piece.maximumDiscountPercent,
+            };
+            const calculation = goldByPieceProfileService.calculate({
+              input,
+              settings,
+              purchaseRate: approvedPurchaseRate,
+              currentRate: reference.rate,
+              purchaseRateSnapshot: { ...reference, rate: approvedPurchaseRate, source: purchaseRateSource, override: overrideMetadata },
+              currentRateSnapshot: reference,
+            });
+            if (!calculation.sale) throw new ValidationError("Gold By Piece markupPercent is required for the server pricing contract.");
+            return {
+              ...piece,
+              purchaseCost: calculation.purchase.totalPurchaseCost,
+              unitCost: calculation.purchase.totalPurchaseCost,
+              goldValue: calculation.purchase.goldValue,
+              makingPerGram: calculation.purchase.makingPerGram,
+              makingTotal: calculation.purchase.makingTotal,
+              purchaseGoldRate: approvedPurchaseRate,
+              goldRateSource: purchaseRateSource,
+              vatRate: calculation.purchase.vatRate,
+              vatBase: calculation.purchase.vatBase,
+              vatAmount: calculation.purchase.vatAmount,
+              currentValuation: { rateSource: "GOLD_CENTER_GLOBAL_SPOT", goldRate: reference.rate, goldValue: calculation.current.goldValue, makingValue: calculation.current.makingValue, certificateValue: 0, componentValue: 0, vatRate: calculation.current.vatRate, vatRateSource: "SETTINGS_DEFAULT", vatBase: calculation.current.vatBase, vatAmount: calculation.current.vatAmount, totalValue: calculation.current.totalValue },
+              pricing: { ...(piece.pricing || {}), markupPercent: calculation.sale.markupPercent, maximumDiscountPercent: calculation.sale.maximumDiscountPercent, minimumSellingPrice: calculation.sale.minAllowedSellingPrice, manualPriceAllowed: false },
+              goldValuation: { ...(piece.goldValuation || {}), purchaseGoldRate: approvedPurchaseRate, currentGoldRate: reference.rate, makingPerGram: calculation.purchase.makingPerGram, currentMakingPerGram: calculation.current.makingPerGram, vatRate: calculation.purchase.vatRate, currentVatRate: calculation.current.vatRate, purchaseRateType: "GLOBAL", currentRateType: "GLOBAL", rateSnapshot: calculation.gold.purchaseRateSnapshot },
+              __gbpCalculation: calculation,
+              ...(overrideMetadata ? { __purchaseRateOverride: { ...overrideMetadata, approvedPurchaseRate } } : {}),
+            };
+          }
           if (!["GOLD_BY_WEIGHT_JEWELLERY", "GOLD_BAR_24K"].includes(profile)) return piece;
           const referenceRate = await goldSalePricingService.resolveCanonicalSellingGoldRate({
             models,
@@ -7793,12 +7993,17 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
           }
           return {
             ...piece,
-            goldValuation: {
-              ...(piece.goldValuation || {}),
-              purchaseGoldRate: approvedPurchaseRate,
-              currentGoldRate: referenceRate,
-              purchaseRateSource,
-              currentRateSource: "GOLD_CENTER",
+              goldValuation: {
+                ...(piece.goldValuation || {}),
+                purchaseGoldRate: approvedPurchaseRate,
+                currentGoldRate: referenceRate,
+                // GBW purchase/current VAT are server-effective settings when
+                // the operator did not explicitly provide a rate. The client
+                // may display this value, but cannot become the authority.
+                vatRate: piece.goldValuation?.vatRate ?? (settings.vatEnabled === false ? 0 : settings.vatRate),
+                currentVatRate: piece.goldValuation?.currentVatRate ?? (settings.vatEnabled === false ? 0 : settings.vatRate),
+                purchaseRateSource,
+                currentRateSource: "GOLD_CENTER",
             },
           };
         }));
@@ -7829,10 +8034,13 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       normalizedItems.forEach((item, itemIndex) => {
         const pieces = pieceSets[itemIndex];
         item.v2Pieces = pieces;
-        item.totalCost = Math.round(pieces.reduce((sum, piece) => sum + piece.purchaseCost, 0) * 100) / 100;
+        const isGoldByPiece = pieces.some((piece) => piece.profile === "GOLD_BY_PIECE");
+        const exactItemCost = pieces.reduce((sum, piece) => sum.plus(piece.purchaseCost || 0), new Decimal(0));
+        const exactItemWeight = pieces.reduce((sum, piece) => sum.plus(piece.grossWeight || 0), new Decimal(0));
+        item.totalCost = (isGoldByPiece ? exactItemCost : exactItemCost.toDecimalPlaces(2, Decimal.ROUND_HALF_UP)).toDecimalPlaces(8, Decimal.ROUND_HALF_UP).toNumber();
         item.unitCost = item.totalCost / pieces.length;
         item.cost = item.unitCost;
-        item.totalWeight = Math.round(pieces.reduce((sum, piece) => sum + piece.grossWeight, 0) * 10000) / 10000;
+        item.totalWeight = (isGoldByPiece ? exactItemWeight : exactItemWeight.toDecimalPlaces(4, Decimal.ROUND_HALF_UP)).toDecimalPlaces(8, Decimal.ROUND_HALF_UP).toNumber();
         item.weightPerUnit = item.totalWeight / pieces.length;
       });
     }
@@ -13732,6 +13940,15 @@ async function buildDraftItems(items, companyId, transaction) {
     if (!assetId) throw new ValidationError(`الصنف رقم ${i + 1} بدون معرف أصل`);
     const asset = await models.Asset.findOne({ where: { id: assetId, companyId }, transaction });
     if (!asset) throw new ValidationError(`الأصل ${assetId} غير موجود`);
+    const profile = asset.inventoryProfile || asset.profile;
+    const makingCharge = it.makingChargePerGram !== undefined && it.makingChargePerGram !== null && it.makingChargePerGram !== ""
+      ? profile === "GOLD_BY_WEIGHT_JEWELLERY"
+        ? Number(calculateGoldByWeightMakingTotal({
+            netGoldWeight: asset.netGoldWeight ?? asset.netWeight ?? asset.goldWeight,
+            makingChargePerGram: it.makingChargePerGram,
+          }))
+        : Number(calculateMakingChargeTotal({ itemWeightGrams: asset.grossWeight, makingChargePerGram: it.makingChargePerGram }))
+      : (Number(it.makingCharge) || 0);
     rows.push({
       assetId,
       name: it.name || asset.name || "",
@@ -13743,9 +13960,7 @@ async function buildDraftItems(items, companyId, transaction) {
       weight: Number(it.weight || it.grossWeight) || 0,
       karat: it.karat ?? null,
       discount: Number(it.discount) || 0,
-      makingCharge: it.makingChargePerGram !== undefined && it.makingChargePerGram !== null && it.makingChargePerGram !== ""
-        ? Number(calculateMakingChargeTotal({ itemWeightGrams: asset.grossWeight, makingChargePerGram: it.makingChargePerGram }))
-        : (Number(it.makingCharge) || 0),
+      makingCharge,
       stoneValue: Number(it.stoneValue) || 0
     });
   }

@@ -25,11 +25,56 @@ const PROFILE_REGISTRY = Object.freeze({
 
 const PROFILE_ALIASES = Object.freeze(Object.fromEntries(Object.entries(PROFILE_REGISTRY).flatMap(([key, contract]) => [[key, key], ...contract.aliases.map((alias) => [alias, key])])));
 
+// These are the five Owner-approved client inventory profiles represented by
+// the current internal strategies. This set is an authority boundary, not a
+// UI label list: receive/POS/checkout callers use it to prevent a serialized
+// profile from silently becoming Product quantity stock.
+const FINAL_CLIENT_PROFILE_CANONICAL_CODES = new Set([
+  "GOLD_BY_WEIGHT_JEWELLERY", "GOLD_BAR_24K", "GOLD_BY_PIECE",
+  "DIAMOND_JEWELLERY", "LOOSE_DIAMOND",
+  "GEMSTONE_JEWELLERY", "LOOSE_GEMSTONE",
+  "PEARL_JEWELLERY", "LOOSE_PEARL",
+]);
+const FINAL_CLIENT_PROFILE_LABEL_CODES = new Set(["GOLD_BY_WEIGHT", "DIAMOND", "GEM_STONE", "PEARL"]);
+const FINAL_CLIENT_PRODUCT_TYPE_CODES = new Set(["gold-weight", "gold-piece", "diamond", "gemstone", "pearl"]);
+
 function normalizeProfile(profile) {
   const raw = String(profile || "").trim().toUpperCase();
   const canonical = PROFILE_ALIASES[raw];
   if (!canonical) throw new Error("INVENTORY_PROFILE_INVALID");
   return canonical;
+}
+
+function isFinalClientInventoryProfile(profile) {
+  const raw = String(profile || "").trim().toUpperCase();
+  if (!raw) return false;
+  if (FINAL_CLIENT_PROFILE_LABEL_CODES.has(raw)) return true;
+  try {
+    return FINAL_CLIENT_PROFILE_CANONICAL_CODES.has(normalizeProfile(raw));
+  } catch (_) {
+    return false;
+  }
+}
+
+function isFinalClientInventoryProduct(product = {}) {
+  const explicitProfile = product.inventoryProfile || product.profile;
+  if (explicitProfile && isFinalClientInventoryProfile(explicitProfile)) return true;
+  return [product.stockType, product.type]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .some((value) => FINAL_CLIENT_PRODUCT_TYPE_CODES.has(value) || isFinalClientInventoryProfile(value));
+}
+
+function assessFinalClientSupplierReceive({ body = {}, items = [] } = {}) {
+  const normalizedItems = Array.isArray(items) ? items : [];
+  const itemTargetsFinalProfile = (item = {}) => isFinalClientInventoryProduct(item)
+    || (Array.isArray(item.perPiece) ? item.perPiece : [])
+      .some((piece) => isFinalClientInventoryProfile(piece?.profile || piece?.inventoryProfile));
+  const targetsFinalProfile = isFinalClientInventoryProfile(body.profile || body.inventoryProfile || body.stockType || body.assetType)
+    || normalizedItems.some(itemTargetsFinalProfile);
+  const inventoryV2Requested = body.inventoryV2 === true || normalizedItems.some((item) => Array.isArray(item.perPiece));
+  const rejectLegacy = targetsFinalProfile && (!inventoryV2Requested
+    || normalizedItems.some((item) => item.productCode || item.productId || !Array.isArray(item.perPiece)));
+  return Object.freeze({ targetsFinalProfile, inventoryV2Required: targetsFinalProfile, inventoryV2Requested, rejectLegacy });
 }
 
 const decimal = (value, field) => {
@@ -206,4 +251,4 @@ function priceAsset(strategy, input = {}) {
   throw new Error("INVENTORY_PRICING_STRATEGY_UNSUPPORTED");
 }
 
-module.exports = { CONDITION, PROFILE_REGISTRY, normalizeProfile, requireProfile, validateCondition, validateComponent, normalizeLooseDetails, describeLooseMeasurement, commercialNineRule, assertPieceBasedPayload, calculateGoldWeights, calculateVat, priceAsset };
+module.exports = { CONDITION, PROFILE_REGISTRY, normalizeProfile, isFinalClientInventoryProfile, isFinalClientInventoryProduct, assessFinalClientSupplierReceive, FINAL_CLIENT_PROFILE_CANONICAL_CODES, FINAL_CLIENT_PRODUCT_TYPE_CODES, requireProfile, validateCondition, validateComponent, normalizeLooseDetails, describeLooseMeasurement, commercialNineRule, assertPieceBasedPayload, calculateGoldWeights, calculateVat, priceAsset };
