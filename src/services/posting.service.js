@@ -246,11 +246,20 @@ class PostingService {
       if (debitUnits <= 0n) throw new Error("Empty exact journal entry. Posting rejected.");
       return this.postExactFourDecimalEntry(companyId, opts, lines, debitUnits);
     }
-    const totalDebit = round(lines.reduce((s, l) => s + (Number(l.debit) || 0), 0));
-    const totalCredit = round(lines.reduce((s, l) => s + (Number(l.credit) || 0), 0));
+    // The persisted JournalLine values are rounded to cents below. Build the
+    // totals from those same values and require exact cent equality. A
+    // tolerance that admits 0.01 creates a posted, financially unbalanced
+    // journal without an approved residual-line authority.
+    const roundedLines = lines.map((line) => ({
+      ...line,
+      debit: round(line.debit),
+      credit: round(line.credit),
+    }));
+    const totalDebit = round(roundedLines.reduce((s, l) => s + l.debit, 0));
+    const totalCredit = round(roundedLines.reduce((s, l) => s + l.credit, 0));
 
     // Posting validation: reject unbalanced entries.
-    if (Math.abs(totalDebit - totalCredit) > 0.01) {
+    if (Math.round(totalDebit * 100) !== Math.round(totalCredit * 100)) {
       throw new Error(
         `Unbalanced journal entry: debit ${totalDebit} ≠ credit ${totalCredit}. Posting rejected.`
       );
@@ -302,9 +311,11 @@ class PostingService {
       );
 
       let i = 0;
-      for (const { line, account } of resolvedLines) {
-        const debit = round(line.debit);
-        const credit = round(line.credit);
+      for (let lineIndex = 0; lineIndex < resolvedLines.length; lineIndex += 1) {
+        const { account } = resolvedLines[lineIndex];
+        const line = roundedLines[lineIndex];
+        const debit = line.debit;
+        const credit = line.credit;
 
         await JournalLine.create(
           {

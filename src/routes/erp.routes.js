@@ -57,6 +57,7 @@ const accountingLockService = require("../services/accounting-lock.service");
 const accountBalanceService = require("../services/account-balance.service");
 const cashRegisterService = require("../services/cash-register.service");
 const companyBootstrapService = require("../services/company-bootstrap.service");
+const operationalReadinessService = require("../services/operational-readiness.service");
 const ledgerReportingService = require("../services/ledger-reporting.service");
 const financialBootstrapService = require("../services/financial-bootstrap.service");
 const financialAccountService = require("../services/financial-account.service");
@@ -102,6 +103,22 @@ router.get("/readiness/operations", authMiddleware, async (req, res, next) => {
   } catch (error) {
     return next(error);
   }
+});
+
+// One read-only, company-scoped onboarding authority. The branch is resolved
+// from the authenticated branch context or the existing server-validated
+// branch header; no client body can override either scope.
+router.get("/settings/operational-readiness", authMiddleware, requirePermission("settings.view"), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.branchId || req.headers["x-branch-id"] || req.query.branchId, { required: true });
+    const data = await operationalReadinessService.getOperationalReadiness({
+      companyId: req.companyId,
+      branchId,
+      workflow: String(req.query.workflow || "SUPPLIER_RECEIVE").toUpperCase() === "SUPPLIER_RECEIVE" ? "SUPPLIER_RECEIVE" : "SUPPLIER_RECEIVE",
+    });
+    res.set("Cache-Control", "no-store");
+    return res.status(200).json({ success: true, data });
+  } catch (error) { return next(error); }
 });
 
 router.post("/bootstrap/branch-accounts", authMiddleware, requirePermission("settings.update"), async (req, res, next) => {
