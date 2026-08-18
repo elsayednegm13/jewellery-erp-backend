@@ -119,6 +119,14 @@ async function bootstrapFirstRun({ models, body, token, idempotencyKey, environm
     if (!role) throw fail("FIRST_RUN_ROLE_BASELINE_INCOMPLETE", 422);
     const branch = await models.Branch.create({ id: id("BR"), companyId: company.id, name: input.branchName, code: input.branchCode, type: "store", isActive: true }, { transaction });
     await ensureFinancialReadiness(models, { company, branch, actorId: user.id, transaction });
+    // Inventory reference data is an explicit first-run setup step, not a
+    // server-startup side effect.  The model guard keeps the existing isolated
+    // first-run unit fixtures compatible while the real schema gets the same
+    // company-scoped bootstrap inside this transaction.
+    if (models.InventoryMasterDataBootstrapState || dependencies.inventoryMasterDataBootstrap) {
+      const inventoryBootstrap = dependencies.inventoryMasterDataBootstrap || require("./inventory-master-data-bootstrap.service");
+      await inventoryBootstrap.bootstrapInventoryMasterData({ models, companyId: company.id, actorId: user.id, transaction });
+    }
     const [activeSuperAdmins, activeBranches, userRoleCount, mappingCount] = await Promise.all([
       models.User.count({ where: { companyId: company.id, accountType: "super_admin", isActive: true }, transaction }),
       models.Branch.count({ where: { companyId: company.id, isActive: true }, transaction }),

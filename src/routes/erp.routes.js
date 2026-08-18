@@ -12,6 +12,8 @@ const goldService = require("../services/gold.service");
 const goldCenterReferencePriceService = require("../services/gold-center-reference-price.service");
 const goldPriceApprovalService = require("../services/gold-price-approval.service");
 const settingsService = require("../services/settings.service");
+const companyTaxPolicyService = require("../services/company-tax-policy.service");
+const transactionTaxContextService = require("../services/transaction-tax-context.service");
 const salesService = require("../services/sales.service");
 const exchangePolicyService = require("../services/exchange-policy.service");
 const exchangeDisplayService = require("../services/exchange-display.service");
@@ -31,10 +33,12 @@ const pearlSizeMasterDataService = require("../services/pearl-size-master-data.s
 const profileMasterDataService = require("../services/profile-master-data.service");
 const inventoryMasterPolicy = require("../services/inventory-master-policy.service");
 const inventoryV2Runtime = require("../services/inventory-v2-runtime.service");
+const inventoryMasterDataBootstrapService = require("../services/inventory-master-data-bootstrap.service");
 const cgpLegacyIsolation = require("../services/cgp-legacy-isolation.service");
 const goldValuationService = require("../services/gold-valuation.service");
 const looseProfileFinanceService = require("../services/loose-profile-finance.service");
 const supplierAcquisitionPreviewService = require("../services/supplier-acquisition-preview.service");
+const supplierReceiveContractService = require("../services/supplier-receive-contract.service");
 const goldSalePricingService = require("../services/gold-sale-pricing.service");
 const goldByPieceProfileService = require("../services/gold-by-piece-profile.service");
 const assetMetadataService = require("../services/asset-metadata.service");
@@ -5211,8 +5215,22 @@ router.get("/inventory-v2/profiles", authMiddleware, requireBusinessPermission("
 router.post("/inventory-v2/receive-preview", authMiddleware, requireAnyBusinessPermission(["inventory.view", "suppliers.create"]), async (req, res, next) => {
   try {
     const body = req.body || {};
-    const rawItems = Array.isArray(body.items) ? body.items : [];
+    let rawItems = Array.isArray(body.items) ? body.items : [];
     if (!rawItems.length) throw new ValidationError("Inventory V2 preview requires at least one item.");
+    supplierReceiveContractService.assertCanonicalReceiveInput({
+      body,
+      items: rawItems,
+      requestBranchId: req.branchId,
+      headerBranchId: req.headers["x-branch-id"],
+    });
+    const canonicalLocations = await supplierReceiveContractService.resolveAndCanonicalizeLocations({
+      models,
+      companyId: req.companyId,
+      branchId: req.branchId,
+      body,
+      items: rawItems,
+    });
+    rawItems = canonicalLocations.items;
     const vatRateDefault = await goldValuationService.resolveConfiguredVatRate({ models, companyId: req.companyId });
     const pieceSets = inventoryV2Runtime.requireV2ReceiptPieces(rawItems, { vatRateDefault });
     const normalizedItems = rawItems.map((item, index) => supplierAcquisitionPreviewService.normalizeItem(item, pieceSets[index]));
@@ -5274,6 +5292,18 @@ router.patch("/pearl-size-master-data/:id", authMiddleware, pearlSizeMasterWrite
 
 // Typed source-backed lists for Loose Pearl and Loose Gemstone. Pearl Size is
 // intentionally excluded: its numeric MM table above remains its sole owner.
+router.post("/inventory-master-data/bootstrap", authMiddleware, requireBusinessPermission("settings.update", { touch: true, operation: "inventory_master_data.bootstrap" }), async (req, res, next) => {
+  try {
+    const data = await inventoryMasterDataBootstrapService.bootstrapInventoryMasterData({
+      models,
+      companyId: req.companyId,
+      actorId: req.user?.id || "inventory-master-data-bootstrap",
+      dryRun: Boolean(req.body?.dryRun),
+    });
+    return res.status(200).json({ success: true, data });
+  } catch (error) { return next(error); }
+});
+
 router.get("/profile-master-data", authMiddleware, pearlSizeMasterReadGuard, async (req, res, next) => {
   try {
     const categories = String(req.query.categories || "").split(",").map((entry) => entry.trim()).filter(Boolean);
@@ -7766,7 +7796,7 @@ function assertFinalClientSupplierReceiveContract({ body = {}, items = [] } = {}
 
 router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMiddleware, requireBusinessPermission("suppliers.create", { touch: true }), async (req, res, next) => {
   const body = req.body || {};
-  const items = Array.isArray(body.items) && body.items.length ? body.items : [{
+  let items = Array.isArray(body.items) && body.items.length ? body.items : [{
     name: body.itemName || body.assetName,
     description: body.description,
     type: body.stockType || body.assetType,
@@ -7780,41 +7810,35 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
     price: body.price,
     notes: body.notes
   }];
+  let receiveContract;
   try {
     cgpLegacyIsolation.assertSupplierReceiveDoesNotMasqueradeAsCgp({ body, items });
     assertFinalClientSupplierReceiveContract({ body, items });
+    receiveContract = supplierReceiveContractService.assertCanonicalReceiveInput({
+      body,
+      items,
+      requestBranchId: req.branchId,
+      headerBranchId: req.headers["x-branch-id"],
+    });
   } catch (error) {
     return next(error);
   }
 
+  const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
+  if (!idempotencyKey || !String(idempotencyKey).trim()) {
+    return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لاستلام المشتريات" });
+  }
+  const idemScope = "purchase.receive";
+  const idemRequestHash = idempotencyService.hashRequest(idemScope, body);
   const t = await models.sequelize.transaction();
   try {
     const supplierId = body.supplierId;
-    const branchId = body.warehouseId || body.branchId || req.headers["x-branch-id"] || req.branchId;
+    const branchId = receiveContract.branchId;
     const paymentMethod = body.paymentMethod || "credit";
     const paidAmount = Number(body.paidAmount) || 0;
     const now = new Date();
     const dateStr = (body.purchaseDate || body.date || now.toISOString().slice(0, 10));
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
-
-    // Idempotency: a retried/double-clicked receive returns the original PO
-    // (and its stock) instead of receiving the goods twice.
-    const idempotencyKey = req.headers["idempotency-key"] || body.idempotencyKey;
-    // Phase 21.3 — central race-safe idempotency (unique company_id+scope+key).
-    if (!idempotencyKey) {
-      await t.rollback();
-      return res.status(400).json({ success: false, message: "مفتاح منع التكرار (Idempotency-Key) مطلوب لاستلام المشتريات" });
-    }
-    const idemScope = "purchase.receive";
-    const idemRequestHash = idempotencyService.hashRequest(idemScope, body);
-    const idemClaim = await idempotencyService.claim({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash, transaction: t });
-    if (!idemClaim.claimed) {
-      try { await t.rollback(); } catch (_) { /* transaction already aborted by the unique violation */ }
-      const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash });
-      if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
-      return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
-    }
-    const idemRequest = idemClaim.request;
 
     if (!supplierId) throw new ValidationError("المورد مطلوب لاستلام أمر الشراء");
     if (!branchId) throw new ValidationError("الفرع أو المستودع مطلوب لاستلام المشتريات");
@@ -7832,6 +7856,27 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       transaction: t
     });
     if (!branch) throw new ValidationError("الفرع المحدد غير موجود أو غير نشط");
+
+    const canonicalLocations = await supplierReceiveContractService.resolveAndCanonicalizeLocations({
+      models,
+      companyId: req.companyId,
+      branchId: branch.id,
+      body,
+      items,
+      transaction: t,
+    });
+    items = canonicalLocations.items;
+
+    // Claim only after supplier, branch, and active database Location checks
+    // have passed. Invalid requests therefore cannot reserve/poison a key.
+    const idemClaim = await idempotencyService.claim({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash, transaction: t });
+    if (!idemClaim.claimed) {
+      try { await t.rollback(); } catch (_) { /* transaction already aborted by the unique violation */ }
+      const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash });
+      if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+      return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+    }
+    const idemRequest = idemClaim.request;
 
     const normalizedItems = items.map((item, index) => {
       const quantity = Number(item.quantity);
@@ -7872,7 +7917,7 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
         price: Number(item.price) || Math.round(unitCost * 1.32),
         type: item.type || "gold-piece",
         category: item.category || "Received purchase",
-        location: item.location || "Showroom",
+        location: item.location || null,
         karat,
         purity
       };
@@ -7882,6 +7927,30 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
     // deliberately opt-in for compatibility, but once requested it cannot
     // fall back to Product quantity stock or inferred repeated item data.
     const settings = await settingsService.getCompanySettings(req.companyId, { transaction: t });
+    const companyTaxPolicy = await companyTaxPolicyService.getCompanyTaxPolicy(req.companyId, { transaction: t });
+    const requestedTaxTreatment = receiveContract.taxTreatment;
+    let taxSnapshot = null;
+    if (requestedTaxTreatment) {
+      const legacyRcmRequested = Boolean(body.isRcm || body.isDRC || body.reverseVat || body.useReverseCharge);
+      if (body.taxTreatment && requestedTaxTreatment === "REVERSE_CHARGE" && !legacyRcmRequested) {
+        body.isRcm = true;
+      }
+      if (body.taxTreatment && requestedTaxTreatment !== "REVERSE_CHARGE" && legacyRcmRequested) {
+        throw new ValidationError("Tax treatment conflicts with the reverse-charge request.");
+      }
+      if (requestedTaxTreatment === "STANDARD_VAT") {
+        if (settings.vatEnabled === false) throw new ValidationError("STANDARD_VAT is unavailable while company VAT is disabled.");
+        body.applyVat = true;
+        body.vatRate = companyTaxPolicy.vatRate;
+      } else if (requestedTaxTreatment === "REVERSE_CHARGE") {
+        body.isRcm = true;
+        body.rcmRate = companyTaxPolicy.vatRate;
+        body.vatRate = companyTaxPolicy.vatRate;
+      } else {
+        body.applyVat = false;
+        body.isRcm = false;
+      }
+    }
     const inventoryV2Target = body.inventoryV2 === true || normalizedItems.some((item) => Array.isArray(item.perPiece));
     if (inventoryV2Target) {
       if (normalizedItems.some((item) => item.productCode || item.productId)) {
@@ -8052,6 +8121,25 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       remainingAmount, paymentStatus } = purchaseTotals;
     const vatRequested = (body.isRcm || body.isDRC || body.reverseVat || body.useReverseCharge || body.applyVat === true) && settings.vatEnabled !== false;
 
+    if (requestedTaxTreatment) {
+      const snapshotTaxableBase = ["ZERO_RATED", "EXEMPT", "OUT_OF_SCOPE"].includes(requestedTaxTreatment)
+        ? goodsTotal
+        : taxBaseSnap;
+      taxSnapshot = transactionTaxContextService.buildImmutableTaxSnapshot({
+        requestedTaxTreatment,
+        companyPolicy: companyTaxPolicy,
+        rcmContext: transactionTaxContextService.rcmContextFromBody(body),
+        taxableBase: snapshotTaxableBase,
+        vatAmount: isRcmSnap ? rcmVatSnap : inputVatSnap,
+        roundingScale: normalizedItems.some((item) => (item.v2Pieces || []).some((piece) => piece.profile === "GOLD_BY_PIECE")) ? 8 : 2,
+      });
+      const calculatedAmount = Number(taxSnapshot.vatAmount || 0);
+      const persistedAmount = Number(isRcmSnap ? rcmVatSnap : inputVatSnap) || 0;
+      if (Math.abs(calculatedAmount - persistedAmount) > 0.00000001) {
+        throw new ValidationError("Server tax calculation does not reconcile with the purchase tax total.");
+      }
+    }
+
     if (total <= 0) throw new ValidationError("إجمالي أمر الشراء يجب أن يكون أكبر من صفر");
     if (paidAmount > total) throw new ValidationError("المبلغ المدفوع لا يمكن أن يتجاوز إجمالي الشراء");
 
@@ -8091,6 +8179,8 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       isRcm: isRcmSnap,
       rcmVatAmount: rcmVatSnap,
       rcmRate: rcmRateSnap,
+      taxTreatment: requestedTaxTreatment,
+      taxSnapshot,
       branch: branch.name,
       notes: [body.notes, drcNote, `Payment: ${paymentStatus}`, `Total weight: ${totalWeight}g`].filter(Boolean).join(" | "),
       isConsignment: Boolean(body.isConsignment ?? supplier.isConsignment),
@@ -8316,6 +8406,7 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
             itemCode: v2Piece?.itemCode || item.itemCode,
             karat: v2Piece?.karat ?? item.karat,
             inventorySubtype: v2Piece?.inventorySubtype || item.inventorySubtype,
+            inventoryProfile: v2Piece?.profile || item.inventoryProfile || item.profile,
             transaction: t,
           });
           const asset = await models.Asset.create({
@@ -8525,7 +8616,7 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
         totalWeight,
         isDRC: Boolean(body.isDRC || body.reverseVat || body.useReverseCharge),
         // Phase 12I — tax snapshot persisted on the PO (source of truth).
-        tax: { taxBase: taxBaseSnap, vatRate: vatRateSnap, inputVatAmount: inputVatSnap, taxIncluded: taxIncludedSnap, isRecoverable: isRecoverableSnap, isRcm: isRcmSnap, rcmVatAmount: rcmVatSnap, rcmRate: rcmRateSnap }
+        tax: { taxBase: taxBaseSnap, vatRate: vatRateSnap, inputVatAmount: inputVatSnap, taxIncluded: taxIncludedSnap, isRecoverable: isRecoverableSnap, isRcm: isRcmSnap, rcmVatAmount: rcmVatSnap, rcmRate: rcmRateSnap, taxTreatment: requestedTaxTreatment, taxSnapshot }
       })
     }, { transaction: t });
 
@@ -9048,6 +9139,7 @@ router.patch("/barcode-settings/item-codes/:id", authMiddleware, barcodeSettings
 router.get("/settings", authMiddleware, requirePermission("settings.view"), async (req, res, next) => {
   try {
     const normalized = await settingsService.getCompanySettings(req.companyId);
+    const taxPolicy = await companyTaxPolicyService.getCompanyTaxPolicy(req.companyId);
     return res.status(200).json({
       success: true,
       data: {
@@ -9073,7 +9165,8 @@ router.get("/settings", authMiddleware, requirePermission("settings.view"), asyn
         lowStockThreshold: normalized.lowStockThreshold,
         decimalPrecision: normalized.decimalPrecision,
         installment: normalized.installment,
-        reservationExpiryWarningHours: normalized.reservationExpiryWarningHours
+        reservationExpiryWarningHours: normalized.reservationExpiryWarningHours,
+        taxPolicy
       }
     });
   } catch (error) {
@@ -9110,10 +9203,44 @@ router.get(
   }
 );
 
+const TAX_POLICY_INPUT_KEYS = new Set([
+  "vatRegistered",
+  "vatRate",
+  "vatEnabled",
+  "enabledTaxTreatments",
+  "defaultTaxTreatment",
+  "preciousGoodsRcmEnabled",
+]);
+
+function hasTaxPolicyInput(body) {
+  return Object.keys(body || {}).some((key) => TAX_POLICY_INPUT_KEYS.has(key));
+}
+
+function isTaxPolicyOnlyInput(body) {
+  const keys = Object.keys(body || {});
+  return keys.length > 0 && keys.every((key) => TAX_POLICY_INPUT_KEYS.has(key));
+}
+
+async function hasFrozenTaxPolicyAuthority(user) {
+  if (!user) return false;
+  if (user.accountType === "super_admin" || ["admin", "owner", "accountant"].includes(user.role)) return true;
+  const roles = await permissionService.getUserRoles(user);
+  return roles.some((role) => role.isAdmin === true || ["admin", "owner", "accountant"].includes(role.slug));
+}
+
 const authorizeSettingsUpdate = async (req, _res, next) => {
   try {
     const canUpdateAllSettings = await permissionService.userHasPermission(req.user, "settings.update");
-    if (canUpdateAllSettings) return next();
+    if (canUpdateAllSettings) {
+      if (hasTaxPolicyInput(req.body) && !(await hasFrozenTaxPolicyAuthority(req.user))) {
+        return next(new ForbiddenError("Tax policy changes require Admin, Owner, or Accounting authority."));
+      }
+      return next();
+    }
+
+    // Accounting has settings.view but not the broad settings.update grant in
+    // the immutable catalog. Permit only a tax-policy-only payload here.
+    if (isTaxPolicyOnlyInput(req.body) && await hasFrozenTaxPolicyAuthority(req.user)) return next();
 
     const canConfigureReservationAccount = await permissionService.userHasPermission(req.user, "reservations.configure_account");
     const submittedKeys = Object.keys(req.body || {});
@@ -9155,6 +9282,17 @@ router.patch("/settings", authMiddleware, authorizeSettingsUpdate, async (req, r
   try {
     const body = req.body || {};
     await validateReservationAdvancesAccountSetting(body, req.companyId);
+
+    let taxPolicyUpdate = null;
+    if (hasTaxPolicyInput(body)) {
+      if (!isTaxPolicyOnlyInput(body) && !(await permissionService.userHasPermission(req.user, "settings.update"))) {
+        throw new ForbiddenError("Accounting tax-policy writes cannot be mixed with general settings changes.");
+      }
+      taxPolicyUpdate = await companyTaxPolicyService.updateCompanyTaxPolicy({
+        companyId: req.companyId,
+        patch: body,
+      });
+    }
 
     // Phase 12E: validate the purchase-VAT / RCM foundation keys when present.
     // Scoped to these keys only — no general settings refactor. These are a
@@ -9210,7 +9348,7 @@ router.patch("/settings", authMiddleware, authorizeSettingsUpdate, async (req, r
       await models.Company.update(companyUpdates, { where: { id: req.companyId } });
     }
 
-    const settingKeys = ["language", "theme", "vatRate", "goldKaratDefaults", "goldPricingMode", "accountingByKarat", "invoicePrefix", "invoiceNumbering", "dateFormat", "decimalPrecision", "print", "notifications", "lowStockThreshold", "receipt", "allowZeroDownPayment", "paymentMethods", "installmentEnabled", "installmentDefaultFrequency", "installmentMaxCount", "installmentMinDownPaymentPercent", "barcode", "reservationAdvancesAccountId", "vatEnabled", "purchaseVatRate", "purchaseTaxIncludedDefault", "purchaseVatRecoverableDefault", "inputVatAccountCode", "rcmOutputAccountCode", "goldCostSource", "goldCostWeightBasis", "allowGoldCostOverride", "goldCostOverridePermission", "nonRecoverableVatCapitalization", "reservationExpiryWarningHours"];
+    const settingKeys = ["language", "theme", "vatRate", "goldKaratDefaults", "goldPricingMode", "accountingByKarat", "invoicePrefix", "invoiceNumbering", "dateFormat", "decimalPrecision", "print", "notifications", "lowStockThreshold", "receipt", "allowZeroDownPayment", "paymentMethods", "installmentEnabled", "installmentDefaultFrequency", "installmentMaxCount", "installmentMinDownPaymentPercent", "barcode", "reservationAdvancesAccountId", "vatEnabled", "purchaseVatRate", "purchaseTaxIncludedDefault", "purchaseVatRecoverableDefault", "inputVatAccountCode", "rcmOutputAccountCode", "goldCostSource", "goldCostWeightBasis", "allowGoldCostOverride", "goldCostOverridePermission", "nonRecoverableVatCapitalization", "reservationExpiryWarningHours"].filter((key) => !companyTaxPolicyService.POLICY_SETTING_KEYS.includes(key));
     for (const key of settingKeys) {
       if (body[key] === undefined) continue;
       const [row, created] = await models.Setting.findOrCreate({
@@ -9218,6 +9356,36 @@ router.patch("/settings", authMiddleware, authorizeSettingsUpdate, async (req, r
         defaults: { companyId: req.companyId, key, value: body[key] }
       });
       if (!created) await row.update({ value: body[key] });
+    }
+
+    if (taxPolicyUpdate) {
+      const actor = `${req.user.firstName || ""} ${req.user.lastName || ""}`.trim() || req.user.id;
+      const before = JSON.stringify(taxPolicyUpdate.before);
+      const after = JSON.stringify(taxPolicyUpdate.after);
+      if (taxPolicyUpdate.before.vatRegistered !== taxPolicyUpdate.after.vatRegistered) {
+        await auditService.record(req.companyId, {
+          action: "company.vat_registration.updated",
+          description: "Company VAT registration status updated",
+          user: actor,
+          userId: req.user.id,
+          place: req.branchId || "System",
+          sourceDocument: "company-tax-policy",
+          severity: "info",
+          before,
+          after,
+        });
+      }
+      await auditService.record(req.companyId, {
+        action: "company.tax_policy.updated",
+        description: "Company tax policy updated",
+        user: actor,
+        userId: req.user.id,
+        place: req.branchId || "System",
+        sourceDocument: "company-tax-policy",
+        severity: "info",
+        before,
+        after,
+      });
     }
 
     await auditService.record(req.companyId, {
@@ -14555,6 +14723,45 @@ router.get("/settings/by-key/:key", authMiddleware, requirePermission("settings.
 router.put("/settings/by-key/:key", authMiddleware, requirePermission("settings.update"), async (req, res, next) => {
   try {
     const value = req.body && req.body.value !== undefined ? req.body.value : req.body;
+
+    if (TAX_POLICY_INPUT_KEYS.has(req.params.key)) {
+      if (!(await hasFrozenTaxPolicyAuthority(req.user))) {
+        throw new ForbiddenError("Tax policy changes require Admin, Owner, or Accounting authority.");
+      }
+      const taxPolicyUpdate = await companyTaxPolicyService.updateCompanyTaxPolicy({
+        companyId: req.companyId,
+        patch: { [req.params.key]: value },
+      });
+      const before = JSON.stringify(taxPolicyUpdate.before);
+      const after = JSON.stringify(taxPolicyUpdate.after);
+      if (req.params.key === "vatRegistered" && taxPolicyUpdate.before.vatRegistered !== taxPolicyUpdate.after.vatRegistered) {
+        await auditService.record(req.companyId, {
+          action: "company.vat_registration.updated",
+          description: "Company VAT registration status updated",
+          user: req.user ? `${req.user.firstName || ""} ${req.user.lastName || ""}`.trim() : "System",
+          userId: req.user ? req.user.id : null,
+          place: req.branchId || "System",
+          sourceDocument: "company-tax-policy",
+          severity: "info",
+          before,
+          after,
+        });
+      }
+      await auditService.record(req.companyId, {
+        action: "company.tax_policy.updated",
+        description: "Company tax policy updated",
+        user: req.user ? `${req.user.firstName || ""} ${req.user.lastName || ""}`.trim() : "System",
+        userId: req.user ? req.user.id : null,
+        place: req.branchId || "System",
+        sourceDocument: "company-tax-policy",
+        severity: "info",
+        before,
+        after,
+      });
+      const persistedValue = taxPolicyUpdate.after[req.params.key];
+      return res.status(200).json({ success: true, key: req.params.key, value: persistedValue, data: persistedValue });
+    }
+
     const [row, created] = await models.Setting.findOrCreate({
       where: { companyId: req.companyId, key: req.params.key },
       defaults: { companyId: req.companyId, key: req.params.key, value }

@@ -105,9 +105,11 @@ const BranchFinancialMapping = require("./branchFinancialMapping.model");
 const ReservationDepositReceiptDocument = require("./reservationDepositReceiptDocument.model");
 const ReservationDepositReceiptSequence = require("./reservationDepositReceiptSequence.model");
 const FirstRunSetupState = require("./firstRunSetupState.model");
+const InventoryMasterDataBootstrapState = require("./inventoryMasterDataBootstrapState.model");
 const GoldMarketQuote = require("./goldMarketQuote.model");
 const GoldMarketSetting = require("./goldMarketSetting.model");
 const GoldPricingPolicy = require("./goldPricingPolicy.model");
+const InventoryLocation = require("./inventoryLocation.model");
 
 // Define Associations
 
@@ -138,6 +140,10 @@ Role.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
 Company.hasMany(Branch, { foreignKey: "companyId", as: "branches" });
 Branch.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Company.hasMany(InventoryLocation, { foreignKey: "companyId", as: "inventoryLocations" });
+InventoryLocation.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(InventoryLocation, { foreignKey: "branchId", as: "inventoryLocations" });
+InventoryLocation.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
 
 // Product relationships
 Company.hasMany(Product, { foreignKey: "companyId", as: "products" });
@@ -186,6 +192,8 @@ Company.hasMany(BarcodeItemCode, { foreignKey: "companyId", as: "barcodeItemCode
 BarcodeItemCode.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 Company.hasMany(BarcodeSequence, { foreignKey: "companyId", as: "barcodeSequences" });
 BarcodeSequence.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Company.hasMany(InventoryMasterDataBootstrapState, { foreignKey: "companyId", as: "inventoryMasterDataBootstrapStates" });
+InventoryMasterDataBootstrapState.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
 Company.hasMany(Customer, { foreignKey: "companyId", as: "customers" });
 Customer.belongsTo(Company, { foreignKey: "companyId", as: "company" });
@@ -753,7 +761,9 @@ module.exports = {
   ReservationDepositReceiptDocument,
   ReservationDepositReceiptSequence,
   FirstRunSetupState,
+  InventoryMasterDataBootstrapState,
   GoldMarketQuote,
   GoldMarketSetting,
   GoldPricingPolicy
+  ,InventoryLocation
 };

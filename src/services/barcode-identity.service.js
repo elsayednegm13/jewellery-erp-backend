@@ -153,6 +153,19 @@ async function getCodeUsageSummary(companyId, options = {}) {
   return summary;
 }
 
+function resolveKaratCodeForProfile({ profile, karat, defaultKaratCode = null }) {
+  const normalizedProfile = String(profile || "").trim().toUpperCase();
+  const isLooseProfile = ["LOOSE_DIAMOND", "LOOSE_GEMSTONE", "LOOSE_PEARL"].includes(normalizedProfile);
+  if (isLooseProfile) {
+    const supplied = karat === undefined || karat === null || String(karat).trim() === ""
+      ? null
+      : normalizeKaratCode(karat, null);
+    if (supplied && supplied !== "00") throw new ValidationError("LOOSE_PROFILE_KARAT_MUST_BE_00");
+    return "00";
+  }
+  return normalizeKaratCode(karat, defaultKaratCode);
+}
+
 async function generateBarcodeForAsset({
   companyId,
   assetType,
@@ -160,6 +173,7 @@ async function generateBarcodeForAsset({
   itemCode,
   karat,
   inventorySubtype,
+  inventoryProfile,
   transaction = null,
 }) {
   const models = require("../models");
@@ -188,13 +202,13 @@ async function generateBarcodeForAsset({
     throw new ValidationError(`Item code ${item.code} is not allowed for inventory code ${inventory.code}.`);
   }
 
-  const isLoose = /loose/i.test(String(inventorySubtype || ""));
-  const hasKarat = karat !== undefined && karat !== null && String(karat).trim() !== "";
+  const isLoose = /loose/i.test(String(inventorySubtype || "")) || ["LOOSE_DIAMOND", "LOOSE_GEMSTONE", "LOOSE_PEARL"].includes(String(inventoryProfile || "").trim().toUpperCase());
+  const karatCode = resolveKaratCodeForProfile({ profile: inventoryProfile, karat, defaultKaratCode: inventory.defaultKaratCode });
+  const hasKarat = Boolean(karatCode);
   if (inventory.requiresKarat && !hasKarat && !inventory.defaultKaratCode) {
     const qualifier = isLoose ? "Loose inventory" : "This inventory type";
     throw new ValidationError(`${qualifier} requires a karat or a configured default karat code before barcode generation.`);
   }
-  const karatCode = normalizeKaratCode(karat, inventory.defaultKaratCode);
 
   // Skip a historical collision without rewriting it. Sequence gaps are valid;
   // barcode reuse is not.
@@ -261,6 +275,7 @@ async function replaceAssetBarcode({ asset, companyId, context = {}, reason, tra
     itemCode: asset.itemCode,
     karat: asset.karat,
     inventorySubtype: asset.inventorySubtype,
+    inventoryProfile: asset.inventoryProfile || asset.profile,
     transaction,
   });
   const now = context.occurredAt || new Date();
@@ -299,6 +314,7 @@ module.exports = {
   validateInventoryCode,
   validateItemCode,
   normalizeKaratCode,
+  resolveKaratCodeForProfile,
   getEffectiveBarcodeSettings,
   allocateBarcodeSerial,
   generateBarcodeForAsset,

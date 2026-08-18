@@ -80,10 +80,8 @@ test("01A source contract has fail-closed Supplier Receive and no Product final-
 });
 
 test("01A frontend never presents legacy quantity mode for final profiles", () => {
-  assert.match(supplierPageSource, /const FINAL_CLIENT_PROFILE_KEYS = new Set/);
-  assert.match(supplierPageSource, /disabled=\{isFinalClientProfile \|\| isPosting\}/);
-  assert.match(supplierPageSource, /if \(isFinalClientProfile && isQuantityBased\)/);
-  assert.match(supplierPageSource, /inventoryV2: true/);
+  assert.match(supplierPageSource, /redirect\("\/inventory"\)/);
+  assert.doesNotMatch(supplierPageSource, /purchase-orders\/receive|Post Purchase|استلام وتسجيل الأصل/);
 });
 
 test("01A guardrails identify official DB and safe rehearsal boundary", () => {

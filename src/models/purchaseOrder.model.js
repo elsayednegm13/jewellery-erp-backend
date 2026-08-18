@@ -92,6 +92,16 @@ const PurchaseOrder = sequelize.define("PurchaseOrder", {
     defaultValue: 0,
     field: "rcm_rate"
   },
+  taxTreatment: {
+    type: DataTypes.STRING(32),
+    allowNull: true,
+    field: "tax_treatment"
+  },
+  taxSnapshot: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    field: "tax_snapshot"
+  },
   branch: {
     type: DataTypes.STRING,
     allowNull: false
@@ -113,6 +123,24 @@ const PurchaseOrder = sequelize.define("PurchaseOrder", {
   timestamps: true,
   underscored: true,
   paranoid: true
+});
+
+PurchaseOrder.addHook("beforeUpdate", "immutableTransactionTaxSnapshot", (purchaseOrder) => {
+  if (purchaseOrder.changed("taxTreatment") || purchaseOrder.changed("taxSnapshot")) {
+    const error = new Error("Finalized transaction tax treatment and snapshot are immutable; use a canonical reversal or revision flow.");
+    error.statusCode = 409;
+    error.errorCode = "TAX_SNAPSHOT_IMMUTABLE";
+    throw error;
+  }
+});
+
+PurchaseOrder.addHook("beforeDestroy", "protectTransactionTaxSnapshot", (purchaseOrder) => {
+  if (purchaseOrder.taxSnapshot) {
+    const error = new Error("A purchase order with a finalized tax snapshot cannot be deleted.");
+    error.statusCode = 409;
+    error.errorCode = "TAX_SNAPSHOT_IMMUTABLE";
+    throw error;
+  }
 });
 
 module.exports = PurchaseOrder;

@@ -53,6 +53,11 @@ const Company = sequelize.define("Company", {
     type: DataTypes.STRING,
     field: "tax_number"
   },
+  vatRegistered: {
+    type: DataTypes.BOOLEAN,
+    allowNull: true,
+    field: "vat_registered"
+  },
   phone: {
     type: DataTypes.STRING(40)
   },

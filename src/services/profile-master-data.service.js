@@ -10,7 +10,8 @@ const CATEGORIES = Object.freeze({
   GOLD_ITEM_DESCRIPTION: "GOLD_ITEM_DESCRIPTION", GOLD_COLOR: "GOLD_COLOR",
   DIAMOND_TYPE: "DIAMOND_TYPE", DIAMOND_COLOR: "DIAMOND_COLOR", DIAMOND_CLARITY: "DIAMOND_CLARITY",
   DIAMOND_CUT: "DIAMOND_CUT", DIAMOND_SHAPE: "DIAMOND_SHAPE", DIAMOND_TREATMENT: "DIAMOND_TREATMENT",
-  DIAMOND_ORIGIN: "DIAMOND_ORIGIN",
+  DIAMOND_ORIGIN: "DIAMOND_ORIGIN", DIAMOND_TONE: "DIAMOND_TONE", DIAMOND_TONE_LEVEL: "DIAMOND_TONE_LEVEL",
+  DIAMOND_SATURATION: "DIAMOND_SATURATION", DIAMOND_POSITION: "DIAMOND_POSITION", DIAMOND_SETTING: "DIAMOND_SETTING",
   PEARL_TYPE: "PEARL_TYPE", PEARL_COLOR: "PEARL_COLOR", PEARL_OVERTONE: "PEARL_OVERTONE",
   PEARL_ORIENT: "PEARL_ORIENT", PEARL_SHAPE: "PEARL_SHAPE", PEARL_LUSTER: "PEARL_LUSTER",
   PEARL_SURFACE_QUALITY: "PEARL_SURFACE_QUALITY", PEARL_NACRE_QUALITY: "PEARL_NACRE_QUALITY",
@@ -19,6 +20,7 @@ const CATEGORIES = Object.freeze({
   GEMSTONE_SHAPE: "GEMSTONE_SHAPE", GEMSTONE_COLOR: "GEMSTONE_COLOR", GEMSTONE_TONE: "GEMSTONE_TONE",
   GEMSTONE_TONE_LEVEL: "GEMSTONE_TONE_LEVEL", GEMSTONE_SATURATION: "GEMSTONE_SATURATION",
   GEMSTONE_OPTICAL_EFFECT: "GEMSTONE_OPTICAL_EFFECT", GEMSTONE_ORIGIN: "GEMSTONE_ORIGIN",
+  GEMSTONE_POSITION: "GEMSTONE_POSITION", GEMSTONE_SETTING: "GEMSTONE_SETTING",
   CERTIFICATE_AUTHORITY: "CERTIFICATE_AUTHORITY",
 });
 
@@ -29,18 +31,22 @@ const PROFILE_CATEGORIES = Object.freeze({
   DIAMOND_JEWELLERY: Object.freeze([
     CATEGORIES.DIAMOND_TYPE, CATEGORIES.DIAMOND_COLOR, CATEGORIES.DIAMOND_CLARITY,
     CATEGORIES.DIAMOND_CUT, CATEGORIES.DIAMOND_SHAPE, CATEGORIES.DIAMOND_TREATMENT,
-    CATEGORIES.DIAMOND_ORIGIN, CATEGORIES.CERTIFICATE_AUTHORITY,
+    CATEGORIES.DIAMOND_ORIGIN, CATEGORIES.DIAMOND_TONE, CATEGORIES.DIAMOND_TONE_LEVEL,
+    CATEGORIES.DIAMOND_SATURATION, CATEGORIES.DIAMOND_POSITION, CATEGORIES.DIAMOND_SETTING,
+    CATEGORIES.CERTIFICATE_AUTHORITY,
   ]),
   LOOSE_DIAMOND: Object.freeze([
     CATEGORIES.DIAMOND_TYPE, CATEGORIES.DIAMOND_COLOR, CATEGORIES.DIAMOND_CLARITY,
     CATEGORIES.DIAMOND_CUT, CATEGORIES.DIAMOND_SHAPE, CATEGORIES.DIAMOND_TREATMENT,
-    CATEGORIES.DIAMOND_ORIGIN, CATEGORIES.CERTIFICATE_AUTHORITY,
+    CATEGORIES.DIAMOND_ORIGIN, CATEGORIES.DIAMOND_TONE, CATEGORIES.DIAMOND_TONE_LEVEL,
+    CATEGORIES.DIAMOND_SATURATION, CATEGORIES.CERTIFICATE_AUTHORITY,
   ]),
   GEMSTONE_JEWELLERY: Object.freeze([
     CATEGORIES.GEMSTONE_NAME, CATEGORIES.GEMSTONE_TYPE, CATEGORIES.GEMSTONE_TREATMENT,
     CATEGORIES.GEMSTONE_SHAPE, CATEGORIES.GEMSTONE_COLOR, CATEGORIES.GEMSTONE_TONE,
     CATEGORIES.GEMSTONE_TONE_LEVEL, CATEGORIES.GEMSTONE_SATURATION,
-    CATEGORIES.GEMSTONE_OPTICAL_EFFECT, CATEGORIES.GEMSTONE_ORIGIN, CATEGORIES.CERTIFICATE_AUTHORITY,
+    CATEGORIES.GEMSTONE_OPTICAL_EFFECT, CATEGORIES.GEMSTONE_ORIGIN, CATEGORIES.GEMSTONE_POSITION,
+    CATEGORIES.GEMSTONE_SETTING, CATEGORIES.CERTIFICATE_AUTHORITY,
   ]),
   LOOSE_GEMSTONE: Object.freeze([
     CATEGORIES.GEMSTONE_NAME, CATEGORIES.GEMSTONE_TYPE, CATEGORIES.GEMSTONE_TREATMENT,
@@ -68,11 +74,15 @@ const FIELD_CATEGORY = Object.freeze({
   cut: CATEGORIES.DIAMOND_CUT, diamondCut: CATEGORIES.DIAMOND_CUT,
   diamondShape: CATEGORIES.DIAMOND_SHAPE, diamondTreatment: CATEGORIES.DIAMOND_TREATMENT,
   diamondOrigin: CATEGORIES.DIAMOND_ORIGIN,
+  diamondTone: CATEGORIES.DIAMOND_TONE, diamondToneLevel: CATEGORIES.DIAMOND_TONE_LEVEL,
+  diamondSaturation: CATEGORIES.DIAMOND_SATURATION, diamondPosition: CATEGORIES.DIAMOND_POSITION,
+  diamondSetting: CATEGORIES.DIAMOND_SETTING,
   stoneName: CATEGORIES.GEMSTONE_NAME, stoneType: CATEGORIES.GEMSTONE_TYPE,
   treatment: CATEGORIES.GEMSTONE_TREATMENT, shape: CATEGORIES.GEMSTONE_SHAPE,
   color: CATEGORIES.GEMSTONE_COLOR, tone: CATEGORIES.GEMSTONE_TONE,
   toneLevel: CATEGORIES.GEMSTONE_TONE_LEVEL, saturation: CATEGORIES.GEMSTONE_SATURATION,
   opticalEffect: CATEGORIES.GEMSTONE_OPTICAL_EFFECT, origin: CATEGORIES.GEMSTONE_ORIGIN,
+  gemstonePosition: CATEGORIES.GEMSTONE_POSITION, gemstoneSetting: CATEGORIES.GEMSTONE_SETTING,
   pearlType: CATEGORIES.PEARL_TYPE, pearlColor: CATEGORIES.PEARL_COLOR,
   overtone: CATEGORIES.PEARL_OVERTONE, orient: CATEGORIES.PEARL_ORIENT,
   pearlShape: CATEGORIES.PEARL_SHAPE, luster: CATEGORIES.PEARL_LUSTER,
@@ -96,6 +106,18 @@ function serialize(row) {
   return Object.freeze({ id: row.id, category: row.category_key || row.categoryKey, value: row.canonical_value || row.canonicalValue, label: row.display_label || row.displayLabel, isActive: row.is_active ?? row.isActive, sortOrder: Number(row.sort_order ?? row.sortOrder ?? 0) });
 }
 function categoriesForProfile(profile) { return PROFILE_CATEGORIES[profile] || []; }
+function categoryForField(profile, field) {
+  const normalizedProfile = String(profile || "").trim().toUpperCase();
+  const normalizedField = String(field || "").trim();
+  if (normalizedProfile.includes("DIAMOND") && normalizedField === "tone") return CATEGORIES.DIAMOND_TONE;
+  if (normalizedProfile.includes("DIAMOND") && normalizedField === "toneLevel") return CATEGORIES.DIAMOND_TONE_LEVEL;
+  if (normalizedProfile.includes("DIAMOND") && normalizedField === "saturation") return CATEGORIES.DIAMOND_SATURATION;
+  if (normalizedProfile.includes("DIAMOND") && normalizedField === "position") return CATEGORIES.DIAMOND_POSITION;
+  if (normalizedProfile.includes("DIAMOND") && normalizedField === "setting") return CATEGORIES.DIAMOND_SETTING;
+  if (normalizedProfile.includes("GEMSTONE") && normalizedField === "position") return CATEGORIES.GEMSTONE_POSITION;
+  if (normalizedProfile.includes("GEMSTONE") && normalizedField === "setting") return CATEGORIES.GEMSTONE_SETTING;
+  return FIELD_CATEGORY[normalizedField] || (Object.values(CATEGORIES).includes(normalizedField.toUpperCase()) ? normalizedField.toUpperCase() : null);
+}
 
 async function list({ models, companyId, categories = null, activeOnly = true, transaction = null }) {
   const values = Array.isArray(categories) && categories.length ? categories.map(normalizeCategory) : null;
@@ -166,7 +188,7 @@ async function resolveLooseReferences({ models, companyId, profile, looseDetails
   const refs = [];
   for (const [field, rowId] of Object.entries(requested)) {
     if (rowId === null || rowId === undefined || rowId === "") continue;
-    const category = FIELD_CATEGORY[field] || (Object.values(CATEGORIES).includes(String(field).toUpperCase()) ? String(field).toUpperCase() : null);
+    const category = categoryForField(profile, field);
     if (!category || !allowed.has(category)) throw new ValidationError("PROFILE_MASTER_DATA_WRONG_CATEGORY");
     refs.push({ field, category, master: await requireActive({ models, companyId, category, id: rowId, transaction }) });
   }
@@ -175,14 +197,14 @@ async function resolveLooseReferences({ models, companyId, profile, looseDetails
   // value.  The current UI always sends ids; this branch protects existing
   // accepted callers while keeping the server as the authority.
   const fallbackFields = profile === "LOOSE_DIAMOND"
-    ? ["diamondType", "diamondColor", "clarity", "cut", "diamondShape", "diamondTreatment", "diamondOrigin"]
+    ? ["diamondType", "diamondColor", "clarity", "cut", "diamondShape", "diamondTreatment", "diamondOrigin", "diamondTone", "diamondToneLevel", "diamondSaturation"]
     : profile === "LOOSE_GEMSTONE"
     ? ["stoneName", "stoneType", "treatment", "shape", "color", "tone", "toneLevel", "saturation", "opticalEffect", "origin"]
     : profile === "LOOSE_PEARL"
       ? ["pearlType", "pearlColor", "overtone", "orient", "pearlShape", "luster", "surfaceQuality", "nacreQuality", "pearlOrigin", "description"]
       : [];
   for (const field of fallbackFields) {
-    const category = FIELD_CATEGORY[field];
+    const category = categoryForField(profile, field);
     const text = String(looseDetails[field] ?? "").trim();
     if (!category || !text || refs.some((ref) => ref.category === category)) continue;
     const match = await models.sequelize.query(`SELECT id,category_key,canonical_value,display_label,is_active,sort_order
@@ -199,8 +221,12 @@ async function resolveLooseReferences({ models, companyId, profile, looseDetails
     diamondType: masterValue(profile === "LOOSE_DIAMOND" ? CATEGORIES.DIAMOND_TYPE : CATEGORIES.GEMSTONE_TYPE, looseDetails.diamondType),
     treatment: masterValue(CATEGORIES.GEMSTONE_TREATMENT, looseDetails.treatment),
     shape: masterValue(profile === "LOOSE_PEARL" ? CATEGORIES.PEARL_SHAPE : CATEGORIES.GEMSTONE_SHAPE, looseDetails.shape), color: masterValue(profile === "LOOSE_PEARL" ? CATEGORIES.PEARL_COLOR : CATEGORIES.GEMSTONE_COLOR, looseDetails.color),
-    tone: masterValue(CATEGORIES.GEMSTONE_TONE, looseDetails.tone), toneLevel: masterValue(CATEGORIES.GEMSTONE_TONE_LEVEL, looseDetails.toneLevel),
-    saturation: masterValue(CATEGORIES.GEMSTONE_SATURATION, looseDetails.saturation), opticalEffect: masterValue(CATEGORIES.GEMSTONE_OPTICAL_EFFECT, looseDetails.opticalEffect), origin: masterValue(profile === "LOOSE_PEARL" ? CATEGORIES.PEARL_ORIGIN : CATEGORIES.GEMSTONE_ORIGIN, looseDetails.origin),
+    tone: masterValue(profile === "LOOSE_DIAMOND" ? CATEGORIES.DIAMOND_TONE : CATEGORIES.GEMSTONE_TONE, looseDetails.tone),
+    toneLevel: masterValue(profile === "LOOSE_DIAMOND" ? CATEGORIES.DIAMOND_TONE_LEVEL : CATEGORIES.GEMSTONE_TONE_LEVEL, looseDetails.toneLevel),
+    saturation: masterValue(profile === "LOOSE_DIAMOND" ? CATEGORIES.DIAMOND_SATURATION : CATEGORIES.GEMSTONE_SATURATION, looseDetails.saturation),
+    opticalEffect: masterValue(CATEGORIES.GEMSTONE_OPTICAL_EFFECT, looseDetails.opticalEffect), origin: masterValue(profile === "LOOSE_PEARL" ? CATEGORIES.PEARL_ORIGIN : profile === "LOOSE_DIAMOND" ? CATEGORIES.DIAMOND_ORIGIN : CATEGORIES.GEMSTONE_ORIGIN, looseDetails.origin),
+    position: masterValue(profile === "LOOSE_DIAMOND" ? CATEGORIES.DIAMOND_POSITION : CATEGORIES.GEMSTONE_POSITION, looseDetails.position),
+    setting: masterValue(profile === "LOOSE_DIAMOND" ? CATEGORIES.DIAMOND_SETTING : CATEGORIES.GEMSTONE_SETTING, looseDetails.setting),
     pearlType: masterValue(CATEGORIES.PEARL_TYPE, looseDetails.pearlType), pearlColor: masterValue(CATEGORIES.PEARL_COLOR, looseDetails.pearlColor), pearlShape: masterValue(CATEGORIES.PEARL_SHAPE, looseDetails.pearlShape), overtone: masterValue(CATEGORIES.PEARL_OVERTONE, looseDetails.overtone), orient: masterValue(CATEGORIES.PEARL_ORIENT, looseDetails.orient), luster: masterValue(CATEGORIES.PEARL_LUSTER, looseDetails.luster), surfaceQuality: masterValue(CATEGORIES.PEARL_SURFACE_QUALITY, looseDetails.surfaceQuality), nacreQuality: masterValue(CATEGORIES.PEARL_NACRE_QUALITY, looseDetails.nacreQuality), origin: masterValue(profile === "LOOSE_PEARL" ? CATEGORIES.PEARL_ORIGIN : CATEGORIES.GEMSTONE_ORIGIN, looseDetails.origin),
   });
   return { details, references: refs };
@@ -215,4 +241,4 @@ async function persistAssetReferences({ models, companyId, assetId, references, 
   });
 }
 
-module.exports = { CATEGORIES, PROFILE_CATEGORIES, FIELD_CATEGORY, categoriesForProfile, list, create, update, requireActive, resolveLooseReferences, persistAssetReferences };
+module.exports = { CATEGORIES, PROFILE_CATEGORIES, FIELD_CATEGORY, categoryForField, categoriesForProfile, list, create, update, requireActive, resolveLooseReferences, persistAssetReferences };

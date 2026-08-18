@@ -6,6 +6,7 @@ const models = require("../models");
 const { authMiddleware, requirePermission } = require("../middleware/auth.middleware");
 const { ValidationError } = require("../utils/errors");
 const settingsService = require("../services/settings.service");
+const companyTaxPolicyService = require("../services/company-tax-policy.service");
 const permissionService = require("../services/permission.service");
 const profileMasterDataService = require("../services/profile-master-data.service");
 const goldByPiece = require("../services/gold-by-piece-profile.service");
@@ -17,12 +18,13 @@ const readGuard = [authMiddleware, requirePermission("inventory.view")];
 router.get("/contract", ...readGuard, async (req, res, next) => {
   try {
     const settings = await settingsService.getCompanySettings(req.companyId);
+    const taxPolicy = await companyTaxPolicyService.getCompanyTaxPolicy(req.companyId);
     const categories = [profileMasterDataService.CATEGORIES.GOLD_ITEM_DESCRIPTION, profileMasterDataService.CATEGORIES.GOLD_COLOR];
     const masters = await profileMasterDataService.list({ models, companyId: req.companyId, categories, activeOnly: true });
     const branchId = req.headers["x-branch-id"] || req.branchId;
     const locations = branchId ? await models.sequelize.query(`SELECT id,code,name,location_type AS "locationType",is_active AS "isActive"
       FROM inventory_locations WHERE company_id=:companyId AND branch_id=:branchId AND is_active=true ORDER BY name,id`, { replacements: { companyId: req.companyId, branchId }, type: models.sequelize.QueryTypes.SELECT }) : [];
-    const suppliers = await models.Supplier.findAll({ where: { companyId: req.companyId }, attributes: ["id", "name", "status"], order: [["name", "ASC"]] });
+    const suppliers = await models.Supplier.findAll({ where: { companyId: req.companyId }, attributes: ["id", "name", "status", "taxNumber"], order: [["name", "ASC"]] });
     const barcode = await barcodeIdentityService.getEffectiveBarcodeSettings(req.companyId);
     const health = await readCanonicalGoldHealth();
     const explicitOverrideConfig = Object.prototype.hasOwnProperty.call(settings._raw || {}, "allowGoldCostOverride") && Object.prototype.hasOwnProperty.call(settings._raw || {}, "goldCostOverridePermission");
@@ -39,6 +41,7 @@ router.get("/contract", ...readGuard, async (req, res, next) => {
       tagStates: ["PENDING", "PRINTED"],
       currency: goldByPiece.CURRENCY,
       vat: { enabled: settings.vatEnabled !== false, rate: settings.vatRate, purchaseRate: settings.purchaseVatRate },
+      taxPolicy,
       gold: { health, provider: health.provider, mode: health.mode, currency: goldByPiece.CURRENCY, source: "GOLD_CENTER", rateTypes: ["GLOBAL", "RETAIL"], retailAvailable: retailConfigured },
       currentCost: { rateMode: currentRateMode, allowedRateModes: ["GLOBAL", "RETAIL"], retailAvailable: retailConfigured, retailStatus: "NOT_CONFIGURED_FAIL_CLOSED" },
       settings: { manualOverride: { available: explicitOverrideConfig && settings.allowGoldCostOverride === true && overridePermission, permission: settings.goldCostOverridePermission, reasonRequired: true } },
