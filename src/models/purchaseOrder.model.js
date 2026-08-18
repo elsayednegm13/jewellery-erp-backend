@@ -45,7 +45,7 @@ const PurchaseOrder = sequelize.define("PurchaseOrder", {
   // Phase 12F — header-level purchase VAT / RCM foundation. Forward-only: no
   // posting reads these yet (12G). Safe defaults reproduce today's behaviour.
   taxBase: {
-    type: DataTypes.DECIMAL(15, 4),
+    type: DataTypes.DECIMAL(20, 8),
     allowNull: false,
     defaultValue: 0,
     field: "tax_base"
@@ -57,7 +57,7 @@ const PurchaseOrder = sequelize.define("PurchaseOrder", {
     field: "vat_rate"
   },
   inputVatAmount: {
-    type: DataTypes.DECIMAL(15, 4),
+    type: DataTypes.DECIMAL(20, 8),
     allowNull: false,
     defaultValue: 0,
     field: "input_vat_amount"
