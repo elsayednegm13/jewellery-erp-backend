@@ -5,6 +5,7 @@ const policy = require("./inventory-master-policy.service");
 const profileMasterDataService = require("./profile-master-data.service");
 const goldValuationService = require("./gold-valuation.service");
 const looseProfileFinanceService = require("./loose-profile-finance.service");
+const diamondJewelleryProfileService = require("./diamond-jewellery-profile.service");
 const { ValidationError } = require("../utils/errors");
 
 const OPERATIONAL_STATUS = Object.freeze([
@@ -145,34 +146,50 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
   if (certificateInput !== null && (typeof certificateInput !== "object" || Array.isArray(certificateInput))) throw new Error("INVENTORY_CERTIFICATE_INVALID");
   const certificateIssuerId = certificateInput === null ? null : normalizeText(certificateInput.issuerId || certificateInput.certificateAuthorityId);
   const certificate = certificateInput === null ? null : Object.freeze({
-    issuer: normalizeText(certificateInput.issuer || certificateInput.name),
+    issuer: normalizeText(certificateInput.issuer || certificateInput.authority || certificateInput.name),
     ...(certificateIssuerId ? { issuerId: certificateIssuerId } : {}),
     certificateNumber: normalizeText(certificateInput.certificateNumber || certificateInput.number),
     issueDate: normalizeText(certificateInput.issueDate || context.purchaseDate),
     url: normalizeText(certificateInput.url || certificateInput.imageUrl || certificateInput.attachmentUrl),
   });
   if (certificate && (!(certificate.issuer || certificate.issuerId) || !certificate.certificateNumber || !certificate.issueDate)) throw new Error("INVENTORY_CERTIFICATE_REQUIRED_FIELDS");
-  const components = normalizeComponentsForProfile(profile, piece.components || []);
+  const diamondPiece = profile === "DIAMOND_JEWELLERY"
+    ? diamondJewelleryProfileService.normalizePiece(piece, { masterData: context.diamondMasterData || null, requireSalePrice: true })
+    : null;
+  const components = diamondPiece
+    ? diamondPiece.components
+    : normalizeComponentsForProfile(profile, piece.components || []);
   const looseDetails = policy.normalizeLooseDetails(profile, piece.looseDetails);
   const type = receiptTypes[profile];
   if (!type) throw new Error("INVENTORY_PROFILE_INVALID");
 
-  const grossWeight = finiteOrNull(piece.grossWeight, "GROSS_WEIGHT");
+  const grossWeight = diamondPiece ? Number(diamondPiece.grossWeight) : finiteOrNull(piece.grossWeight, "GROSS_WEIGHT");
   if (profile === "GOLD_BY_PIECE" && !Object.prototype.hasOwnProperty.call(piece, "stoneWeight")) {
     throw new Error("GBP_STONE_WEIGHT_REQUIRED");
   }
-  const stoneWeight = finiteOrNull(piece.stoneWeight ?? 0, "STONE_WEIGHT");
-  const karat = finiteOrNull(piece.karat, "KARAT");
+  const stoneWeight = diamondPiece ? Number(diamondPiece.stoneWeight) : finiteOrNull(piece.stoneWeight ?? 0, "STONE_WEIGHT");
+  const karat = diamondPiece ? Number(diamondPiece.karat) : finiteOrNull(piece.karat, "KARAT");
   let weights = null;
   if (grossWeight === null || grossWeight <= 0) throw new Error("INVENTORY_V2_GROSS_WEIGHT_REQUIRED");
   if (goldProfiles.has(profile)) {
     if (grossWeight === null || karat === null) throw new Error("INVENTORY_V2_GOLD_WEIGHT_FACTS_REQUIRED");
     weights = policy.calculateGoldWeights({ grossWeight, stoneWeight, karat });
   }
+  if (diamondPiece) {
+    weights = {
+      grossWeight: diamondPiece.grossWeight,
+      stoneWeight: diamondPiece.stoneWeight,
+      netGoldWeight: diamondPiece.netGoldWeight,
+      karat: Number(diamondPiece.karat).toFixed(6),
+      purityRatio: Number(diamondPiece.karat / 24).toFixed(8),
+      pureGold9999: diamondPiece.pureGoldWeight9999,
+    };
+  }
   if (profile === "GOLD_BAR_24K" && Number(karat) !== 24) throw new Error("INVENTORY_V2_GOLD_BAR_24K_KARAT_REQUIRED");
 
   const specializedValuation = goldValuationService.calculateReceiptGoldValuation({
     profile,
+    ...(diamondPiece ? { totalDiamondWeight: diamondPiece.totalDiamondWeight, pureGoldWeight9999: diamondPiece.pureGoldWeight9999, netGoldWeight: diamondPiece.netGoldWeight } : {}),
     weights,
     input: piece.goldValuation,
     configuredVatRate: context.vatRateDefault,
@@ -214,6 +231,7 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
     type,
     condition,
     components,
+    componentCost: diamondPiece?.componentCost ?? finiteOrNull(piece.componentCost, "COMPONENT_COST"),
     looseDetails,
     grossWeight,
     stoneWeight,
@@ -329,6 +347,21 @@ async function persistReceiptEvidence({ models, transaction, asset, poItem, piec
   const effectiveCertificate = certificateAuthority && piece.certificate
     ? { ...piece.certificate, issuer: certificateAuthority.label }
     : piece.certificate;
+  const assertCertificateAvailable = async (certificate) => {
+    if (!certificate || piece.profile !== "DIAMOND_JEWELLERY") return;
+    const duplicate = await models.sequelize.query(`SELECT ac.id
+      FROM asset_certificates ac
+      INNER JOIN assets a ON a.id=ac.asset_id
+      WHERE a.company_id=:companyId
+        AND lower(ac.issuer)=lower(:issuer)
+        AND ac.certificate_number=:certificateNumber
+      LIMIT 1`, {
+      replacements: { companyId: context.companyId, issuer: certificate.issuer || certificate.authority, certificateNumber: certificate.certificateNumber },
+      transaction, type: models.sequelize.QueryTypes.SELECT,
+    });
+    if (duplicate[0]) throw new ValidationError("DIAMOND_CERTIFICATE_DUPLICATE");
+  };
+  await assertCertificateAvailable(effectiveCertificate);
   if (effectiveCertificate) {
     await models.AssetCertificate.create({
       id: newId("IMCERT"), assetId: asset.id, type: "PROFILE_CERTIFICATE",
@@ -343,9 +376,25 @@ async function persistReceiptEvidence({ models, transaction, asset, poItem, piec
       replacements: { assetId: asset.id, companyId: context.companyId, ...piece.weights }, transaction,
     });
   }
-  const resolvedPiece = { ...piece, looseDetails: resolvedLoose.details };
+  let componentsWithCertificates = piece.components;
+  if (piece.profile === "DIAMOND_JEWELLERY" && Array.isArray(piece.components)) {
+    componentsWithCertificates = [];
+    for (const component of piece.components) {
+      if (!component.certificate) { componentsWithCertificates.push(component); continue; }
+      const issuer = component.certificate.authority || component.certificate.issuer;
+      const certificate = { ...component.certificate, issuer, issueDate: component.certificate.issueDate || context.purchaseDate };
+      await assertCertificateAvailable(certificate);
+      const certificateId = newId("IMCERT");
+      await models.AssetCertificate.create({
+        id: certificateId, assetId: asset.id, type: "DIAMOND_COMPONENT_CERTIFICATE", issuer,
+        certificateNumber: certificate.certificateNumber, issueDate: certificate.issueDate, url: certificate.url || null,
+      }, { transaction });
+      componentsWithCertificates.push({ ...component, certificateId });
+    }
+  }
+  const resolvedPiece = { ...piece, components: componentsWithCertificates, looseDetails: resolvedLoose.details };
   const loosePrimarySubject = looseDetailsAsPrimarySubject(resolvedPiece.looseDetails);
-  await persistAssetComponents({ models, transaction, asset, components: loosePrimarySubject ? [loosePrimarySubject] : piece.components, companyId: context.companyId });
+  await persistAssetComponents({ models, transaction, asset, components: loosePrimarySubject ? [loosePrimarySubject] : resolvedPiece.components, companyId: context.companyId });
   await profileMasterDataService.persistAssetReferences({ models, companyId: context.companyId, assetId: asset.id, references: resolvedLoose.references, transaction });
   const currentValuation = piece.currentValuation || {
     rateSource: "RECEIPT_INITIAL", goldRate: piece.purchaseGoldRate ?? null, goldValue: piece.goldValue,
@@ -479,6 +528,31 @@ async function assignRfid({ models, transaction, asset, context, rfidNumber, rea
   return { assignmentId, replacedAssignmentId: isReplacement ? current[0][0].id : null, rfidNumber: normalized };
 }
 
+async function unassignRfid({ models, transaction, asset, context, reason, idempotencyKey }) {
+  const normalizedReason = String(reason || "").trim();
+  if (!normalizedReason) throw new Error("INVENTORY_V2_RFID_UNASSIGN_REASON_REQUIRED");
+  const [current] = await models.sequelize.query(`SELECT id,rfid_number FROM asset_rfid_assignments
+    WHERE asset_id=:assetId AND is_current=true AND status='ACTIVE' FOR UPDATE`, {
+    replacements: { assetId: asset.id }, transaction,
+  });
+  if (!current.length) throw new Error("INVENTORY_V2_RFID_NOT_ASSIGNED");
+  const assignment = current[0];
+  const occurredAt = context.occurredAt || new Date();
+  await models.sequelize.query(`UPDATE asset_rfid_assignments
+    SET is_current=false,status='INACTIVE',ended_at=:occurredAt,ended_by=:actorId,replacement_reason=:reason
+    WHERE id=:id`, {
+    replacements: { id: assignment.id, occurredAt, actorId: context.actorId || null, reason: normalizedReason }, transaction,
+  });
+  await asset.update({ rfid: null, updatedBy: context.actorId || null }, { transaction });
+  const event = await recordAssetEvent({
+    models, transaction, asset, context, eventType: "RFID_UNASSIGNED",
+    oldStatus: asset.operationalStatus, newStatus: asset.operationalStatus,
+    sourceType: "RFID_ASSIGNMENT", sourceId: assignment.id,
+    note: normalizedReason, idempotencyKey,
+  });
+  return { assignmentId: assignment.id, rfidNumber: assignment.rfid_number, eventId: event.id, reason: normalizedReason };
+}
+
 async function recordRfidScan({ models, transaction, context, rfidNumber, sourceType = "RFID_SCAN", sourceId = null, deviceId = null }) {
   const normalized = String(rfidNumber || "").trim();
   if (!normalized) throw new Error("INVENTORY_V2_RFID_REQUIRED");
@@ -517,6 +591,7 @@ async function recordTagPrint({ models, transaction, asset, context, printKind, 
 }
 
 function normalizeComponentsForProfile(profile, components = []) {
+  if (profile === "DIAMOND_JEWELLERY") return diamondJewelleryProfileService.normalizeComponents(components);
   const contract = policy.requireProfile(profile);
   if (!Array.isArray(components)) throw new Error("INVENTORY_COMPONENTS_MUST_BE_ARRAY");
   if (components.length > 0 && contract.componentsSupported === false) {
@@ -572,8 +647,15 @@ async function persistAssetComponents({ models, transaction, asset, components, 
     const measurementUnit = component.measurementUnit ? String(component.measurementUnit).toUpperCase() : null;
     const name = component.name ? String(component.name).trim() : null;
     const componentType = component.componentType ? String(component.componentType).trim() : null;
-    const purchaseCost = finiteOrNull(component.purchaseCost ?? component.cost ?? component.stoneCost ?? component.pearlCost, "PURCHASE_COST") || 0;
-    const currentValue = finiteOrNull(component.currentValue ?? purchaseCost, "CURRENT_VALUE") || 0;
+    const isDiamondJewelleryComponent = asset.inventoryProfile === "DIAMOND_JEWELLERY" && componentKind === "DIAMOND";
+    const purchaseCostInput = component.purchaseCost ?? component.cost ?? component.stoneCost ?? component.pearlCost;
+    const currentValueInput = component.currentValue ?? purchaseCostInput;
+    const purchaseCost = isDiamondJewelleryComponent && (purchaseCostInput === undefined || purchaseCostInput === null || purchaseCostInput === "")
+      ? null
+      : (finiteOrNull(purchaseCostInput, "PURCHASE_COST") || 0);
+    const currentValue = isDiamondJewelleryComponent && (currentValueInput === undefined || currentValueInput === null || currentValueInput === "")
+      ? null
+      : (finiteOrNull(currentValueInput, "CURRENT_VALUE") || 0);
     const certificateId = component.certificateId ?? null;
     const notes = component.notes ? String(component.notes).trim() : null;
 
@@ -766,4 +848,4 @@ async function updateAssetComponents({ models, transaction, asset, context, comp
   return fetchAssetComponents({ models, transaction, assetId: asset.id });
 }
 
-module.exports = { OPERATIONAL_STATUS, CONDITION, TAG_STATE, EVENT_ONLY_TERMS, LEGACY_STATUS, TRANSITIONS, legacySubtypeForProfile, operationalStatusOf, createCgpAvailabilityTransitionContext, createCgpReversalHoldTransitionContext, createCgpReversalFinalizeTransitionContext, requireV2ReceiptPieces, normalizeReceiptPiece, looseDetailsAsPrimarySubject, newId, recordAssetEvent, recordMovement, persistReceiptEvidence, persistManufacturingEvidence, linkInvoiceAsset, transitionAsset, assignRfid, recordRfidScan, recordTagPrint, normalizeComponentsForProfile, persistAssetComponents, fetchAssetComponents, updateAssetComponents };
+module.exports = { OPERATIONAL_STATUS, CONDITION, TAG_STATE, EVENT_ONLY_TERMS, LEGACY_STATUS, TRANSITIONS, legacySubtypeForProfile, operationalStatusOf, createCgpAvailabilityTransitionContext, createCgpReversalHoldTransitionContext, createCgpReversalFinalizeTransitionContext, requireV2ReceiptPieces, normalizeReceiptPiece, looseDetailsAsPrimarySubject, newId, recordAssetEvent, recordMovement, persistReceiptEvidence, persistManufacturingEvidence, linkInvoiceAsset, transitionAsset, assignRfid, unassignRfid, recordRfidScan, recordTagPrint, normalizeComponentsForProfile, persistAssetComponents, fetchAssetComponents, updateAssetComponents };

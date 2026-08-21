@@ -8,7 +8,7 @@ const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
 
 test("G2C legacy Supplier receive URL redirects to canonical Inventory", () => {
   const page = read("app/[locale]/(dashboard)/suppliers/purchases/page.tsx");
-  assert.match(page, /redirect\("\/inventory"\)/);
+  assert.match(page, /redirect\(`\/\$\{locale\}\/inventory`\)/);
   assert.doesNotMatch(page, /purchase-orders\/receive|Post Purchase|استلام وتسجيل الأصل/);
 });
 

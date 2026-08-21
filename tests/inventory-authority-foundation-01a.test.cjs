@@ -80,7 +80,7 @@ test("01A source contract has fail-closed Supplier Receive and no Product final-
 });
 
 test("01A frontend never presents legacy quantity mode for final profiles", () => {
-  assert.match(supplierPageSource, /redirect\("\/inventory"\)/);
+  assert.match(supplierPageSource, /redirect\(`\/\$\{locale\}\/inventory`\)/);
   assert.doesNotMatch(supplierPageSource, /purchase-orders\/receive|Post Purchase|استلام وتسجيل الأصل/);
 });
 

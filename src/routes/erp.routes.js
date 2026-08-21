@@ -31,6 +31,7 @@ const installmentPrecisionRemediationService = require("../services/installment-
 const barcodeIdentityService = require("../services/barcode-identity.service");
 const pearlSizeMasterDataService = require("../services/pearl-size-master-data.service");
 const profileMasterDataService = require("../services/profile-master-data.service");
+const diamondJewelleryProfileService = require("../services/diamond-jewellery-profile.service");
 const inventoryMasterPolicy = require("../services/inventory-master-policy.service");
 const inventoryV2Runtime = require("../services/inventory-v2-runtime.service");
 const inventoryMasterDataBootstrapService = require("../services/inventory-master-data-bootstrap.service");
@@ -73,6 +74,12 @@ const { moveUploadedFileSafe } = require("../utils/file-move");
 
 const router = express.Router();
 const allowAuthenticated = (req, res, next) => next();
+
+async function loadDiamondMasterData(companyId, transaction = null) {
+  const categories = ["GOLD_ITEM_DESCRIPTION", ...profileMasterDataService.categoriesForProfile(diamondJewelleryProfileService.PROFILE)];
+  const masters = await profileMasterDataService.list({ models, companyId, categories, activeOnly: true, transaction });
+  return diamondJewelleryProfileService.masterIndex(masters);
+}
 
 const reservationPerms = {
   view: ["reservations.view", "reservations.view_all", "reservations.view_branch", "reservations.view_own", "sales.view"],
@@ -5249,12 +5256,17 @@ router.post("/inventory-v2/receive-preview", authMiddleware, requireAnyBusinessP
     });
     rawItems = canonicalLocations.items;
     const vatRateDefault = await goldValuationService.resolveConfiguredVatRate({ models, companyId: req.companyId });
-    const pieceSets = inventoryV2Runtime.requireV2ReceiptPieces(rawItems, { vatRateDefault });
+    const diamondMasterData = await loadDiamondMasterData(req.companyId);
+    const pieceSets = inventoryV2Runtime.requireV2ReceiptPieces(rawItems, { vatRateDefault, diamondMasterData });
     const normalizedItems = rawItems.map((item, index) => supplierAcquisitionPreviewService.normalizeItem(item, pieceSets[index]));
     const settings = await settingsService.getCompanySettings(req.companyId);
     const preview = supplierAcquisitionPreviewService.previewFromPieces({ normalizedItems, body, settings, inventoryV2Target: true });
     return res.status(200).json({ success: true, data: preview, readOnly: true });
   } catch (error) {
+    const diamondProfile = require("../services/diamond-jewellery-profile.service");
+    const hasDiamondProfile = Array.isArray(req.body?.items) && req.body.items.some((item) => Array.isArray(item?.perPiece) && item.perPiece.some((piece) => String(piece?.profile || piece?.inventoryProfile || "").toUpperCase() === diamondProfile.PROFILE));
+    const diamondValidation = diamondProfile.toValidationError(error) || (hasDiamondProfile && error?.message === "INVENTORY_CERTIFICATE_REQUIRED_FIELDS" ? diamondProfile.toValidationError(new Error("DIAMOND_CERTIFICATE_AUTHORITY_REQUIRED")) : null);
+    if (diamondValidation) return next(diamondValidation);
     return next(error);
   }
 });
@@ -5633,6 +5645,35 @@ router.post("/inventory-v2/assets/:id/rfid", authMiddleware, requireBusinessPerm
     await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory_v2.rfid_assigned", description: `RFID assigned to Asset ${asset.id}`, sourceDocument: data.assignmentId, metadata: { assetId: asset.id, rfidNumber: data.rfidNumber } }), { transaction });
     await transaction.commit();
     return res.status(201).json({ success: true, data });
+  } catch (error) { await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/assets/:id/rfid/unassign", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const idempotencyKey = requireInventoryV2IdempotencyKey(req);
+    const reason = String(req.body?.reason || "").trim();
+    if (!reason) throw new ValidationError("RFID unassign reason is required.");
+    const asset = await findScopedInventoryV2Asset(req, req.params.id, branchId, transaction, { lock: true });
+    const replay = await models.sequelize.query("SELECT source_id,asset_id,notes,event_type FROM asset_events WHERE company_id=:companyId AND idempotency_key=:idempotencyKey", { replacements: { companyId: req.companyId, idempotencyKey }, transaction, type: require("sequelize").QueryTypes.SELECT });
+    if (replay.length) {
+      const prior = replay[0];
+      const [assignment] = await models.sequelize.query("SELECT id,rfid_number AS \"rfidNumber\",status,is_current AS \"isCurrent\" FROM asset_rfid_assignments WHERE id=:id", { replacements: { id: prior.source_id }, transaction, type: require("sequelize").QueryTypes.SELECT });
+      if (prior.asset_id !== req.params.id || prior.event_type !== "RFID_UNASSIGNED" || prior.notes !== reason) throw new ConflictError("Idempotency-Key body conflict.");
+      await transaction.commit();
+      return res.status(200).json({ success: true, replayed: true, data: { assignmentId: assignment?.id || prior.source_id, rfidNumber: assignment?.rfidNumber || null, eventId: null, reason, isCurrent: Boolean(assignment?.isCurrent) } });
+    }
+    let data;
+    try {
+      data = await inventoryV2Runtime.unassignRfid({ models, transaction, asset, context: { ...inventoryV2Context(req, branchId), branchName: asset.branch }, reason, idempotencyKey });
+    } catch (error) {
+      if (String(error?.message || "").startsWith("INVENTORY_V2_RFID_NOT_ASSIGNED")) throw new ConflictError("Asset has no current RFID assignment.");
+      throw error;
+    }
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory_v2.rfid_unassigned", description: `RFID unassigned from Asset ${asset.id}`, sourceDocument: data.assignmentId, metadata: { assetId: asset.id, rfidNumber: data.rfidNumber, reason } }), { transaction });
+    await transaction.commit();
+    return res.status(200).json({ success: true, data });
   } catch (error) { await transaction.rollback(); return next(error); }
 });
 
@@ -8099,7 +8140,49 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       normalizedItems.splice(0, normalizedItems.length, ...rateAwareItems);
       let rawPieceSets;
       try {
-        rawPieceSets = inventoryV2Runtime.requireV2ReceiptPieces(normalizedItems, { vatRateDefault });
+        const diamondMasterData = await loadDiamondMasterData(req.companyId, t);
+        rawPieceSets = inventoryV2Runtime.requireV2ReceiptPieces(normalizedItems, { vatRateDefault, diamondMasterData });
+        rawPieceSets = await Promise.all(rawPieceSets.map(async (pieces) => Promise.all(pieces.map(async (diamondPiece) => {
+          if (diamondPiece.profile !== diamondJewelleryProfileService.PROFILE) return diamondPiece;
+          const diamondPreview = await diamondJewelleryProfileService.calculatePreview({
+            companyId: req.companyId,
+            input: diamondPiece,
+            settings,
+            taxPolicy: companyTaxPolicy,
+            masterData: diamondMasterData,
+          });
+          if (!diamondPreview.sale?.priceAccepted) throw new ValidationError("DIAMOND_SALE_PRICE_BELOW_MINIMUM");
+          // Diamond Jewellery has two distinct economic snapshots.  The
+          // historical purchase base is the Supplier V2 pre-tax cost input;
+          // the current valuation is display/valuation evidence and must not
+          // become the PO or accounting cost.  Resolve both server-side so a
+          // client cannot turn an inclusive preview total into a second tax
+          // base or replace current values with historical values.
+          const historicalBase = diamondPreview.historicalPurchase.purchaseBasePreTax;
+          const current = diamondPreview.currentCost;
+          return Object.freeze({
+            ...diamondPiece,
+            purchaseCost: historicalBase,
+            unitCost: historicalBase,
+            goldValue: diamondPreview.historicalPurchase.goldValue,
+            makingTotal: diamondPreview.historicalPurchase.makingTotal,
+            componentCost: diamondPreview.historicalPurchase.diamondCost,
+            vatBase: historicalBase,
+            currentValuation: {
+              rateSource: "GOLD_CENTER_GLOBAL_SPOT",
+              goldRate: diamondPreview.gold.currentRate,
+              goldValue: current.goldValue,
+              makingValue: current.makingValue,
+              certificateValue: "0.00000000",
+              componentValue: current.diamondValue,
+              vatRate: current.vatRate,
+              vatRateSource: "TAX_ENGINE",
+              vatBase: current.currentValuationBasePreTax,
+              vatAmount: current.vatAmount,
+              totalValue: current.currentValuationTotalTaxInclusive,
+            },
+          });
+        }))));
       } catch (error) {
         throw new ValidationError(error.message || "Inventory V2 receipt piece validation failed.");
       }
@@ -8810,8 +8893,10 @@ router.post("/purchase-orders/:id/pay", authMiddleware, requireBusinessPermissio
       throw new ValidationError("Consignment purchase orders cannot be paid here.");
     }
 
-    // 3. Amount + account validation.
-    const amount = round4(b.amount);
+    // 3. Amount + account validation. Supplier settlement is always 2DP AED;
+    // the PO/tax economic history remains 8DP and is not used as the payment
+    // authority.
+    const amount = supplierPaymentState.round2(b.amount);
     if (!Number.isFinite(amount) || amount <= 0) {
       throw new ValidationError("Payment amount must be a finite number greater than zero.");
     }
@@ -8829,22 +8914,22 @@ router.post("/purchase-orders/:id/pay", authMiddleware, requireBusinessPermissio
       throw new ValidationError("Invalid 'date' (expected YYYY-MM-DD).");
     }
 
-    // 4. paidSoFar from existing supplier-payment cash-outs for THIS PO.
-    const paidAgg = await models.CashTransaction.findOne({
-      attributes: [[models.sequelize.fn("COALESCE", models.sequelize.fn("SUM", models.sequelize.col("amount")), 0), "paid"]],
-      where: { companyId: req.companyId, type: "cash_out", category: "supplier_purchase", reference: po.id },
-      transaction: t,
-      raw: true,
-    });
-    const paidSoFarBefore = round4(paidAgg ? paidAgg.paid : 0);
-    const total = round4(po.total);
-    const remainingBefore = round4(total - paidSoFarBefore);
+    // 4. Posted AP from the canonical purchase journal, then effective
+    // allocations (payments minus append-only reversals), all at 2DP.
+    const payableMap = await supplierPaymentState.postedPayableByReference(models, req.companyId, [po.id], t);
+    const originalPayable = payableMap.get(po.id);
+    if (!Number.isFinite(originalPayable)) {
+      throw new AppError("The posted supplier payable amount is unavailable for this purchase order.", 422, "POSTED_AP_AMOUNT_REQUIRED");
+    }
+    const paidMap = await supplierPaymentState.paidByReference(models, req.companyId, [po.id], t);
+    const paidSoFarBefore = supplierPaymentState.round2(paidMap.get(po.id) || 0);
+    const remainingBefore = supplierPaymentState.round2(originalPayable - paidSoFarBefore);
 
     // 5. Overpayment / nothing-due guards.
-    if (remainingBefore <= 0.01) {
-      throw new ValidationError(`Purchase order ${po.id} is already fully paid (paid ${paidSoFarBefore} of ${total}).`);
+    if (remainingBefore <= 0) {
+      throw new ValidationError(`Purchase order ${po.id} is already fully paid (paid ${paidSoFarBefore} of ${originalPayable}).`);
     }
-    if (amount > remainingBefore + 0.01) {
+    if (amount > remainingBefore) {
       throw new ValidationError(`Overpayment rejected: amount ${amount} exceeds remaining ${remainingBefore} for PO ${po.id}.`);
     }
 
@@ -8877,8 +8962,8 @@ router.post("/purchase-orders/:id/pay", authMiddleware, requireBusinessPermissio
     });
     await cashTx.update({ journalEntryId: journalEntry.id }, { transaction: t });
 
-    const paidSoFarAfter = round4(paidSoFarBefore + amount);
-    const remainingAfter = round4(total - paidSoFarAfter);
+    const paidSoFarAfter = supplierPaymentState.round2(paidSoFarBefore + amount);
+    const remainingAfter = supplierPaymentState.round2(originalPayable - paidSoFarAfter);
 
     // 7. Audit inside the same transaction. Supplier.due is NOT modified.
     await auditService.record(req.companyId, {
@@ -8890,7 +8975,7 @@ router.post("/purchase-orders/:id/pay", authMiddleware, requireBusinessPermissio
       branch: po.branch,
       sourceDocument: po.id,
       severity: "info",
-      before: JSON.stringify({ purchaseOrderId: po.id, supplierId: po.supplierId, total, paidSoFarBefore, remainingBefore }),
+      before: JSON.stringify({ purchaseOrderId: po.id, supplierId: po.supplierId, originalPayable, paidSoFarBefore, remainingBefore }),
       after: JSON.stringify({ purchaseOrderId: po.id, supplierId: po.supplierId, amount, paidSoFarAfter, remainingAfter, cashTransactionId: cashTx.id, journalEntryId: journalEntry.id }),
     }, { transaction: t });
 
@@ -8898,7 +8983,7 @@ router.post("/purchase-orders/:id/pay", authMiddleware, requireBusinessPermissio
     const supplierRow = await models.Supplier.findByPk(po.supplierId, { transaction: t });
 
     const output = {
-      purchaseOrder: { id: po.id, supplierId: po.supplierId, total },
+      purchaseOrder: { id: po.id, supplierId: po.supplierId, total: po.total, originalPayable },
       payment: {
         id: cashTx.id,
         amount,
@@ -8908,6 +8993,8 @@ router.post("/purchase-orders/:id/pay", authMiddleware, requireBusinessPermissio
         journalEntryId: journalEntry.id,
         idempotencyKey: String(idempotencyKey),
       },
+      originalPayable,
+      paid: paidSoFarAfter,
       paidSoFarBefore,
       paidSoFarAfter,
       remainingAfter,
@@ -8926,6 +9013,177 @@ router.post("/purchase-orders/:id/pay", authMiddleware, requireBusinessPermissio
     emitEntityChanged(req.companyId, { entity: "Treasury", action: "create", id: cashTx.id, related: { supplierId: po.supplierId, purchaseOrderId: po.id } });
     emitEntityChanged(req.companyId, { entity: "Accounting", action: "create", id: journalEntry.id, related: { supplierId: po.supplierId, purchaseOrderId: po.id } });
 
+    return res.status(201).json(idemResponseBody);
+  } catch (error) {
+    await t.rollback();
+    next(error);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SUPPLIER PAYMENT REVERSAL — append-only financial reversal.
+// The original cash transaction and journal remain immutable. A new cash_in
+// transaction and balanced cash_transaction journal reverse Dr AP / Cr Cash
+// into Dr Cash / Cr AP. The reversal journal links to the original via the
+// existing JournalEntry.reversalOf field; payment state and statement consume
+// the reversal as an effective negative allocation.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post("/purchase-orders/:poId/payments/:paymentId/reverse", authMiddleware, requireBusinessPermission("treasury.update", { touch: true }), async (req, res, next) => {
+  const b = req.body || {};
+  const idempotencyKey = req.headers["idempotency-key"] || b.idempotencyKey;
+  if (!idempotencyKey || !String(idempotencyKey).trim()) {
+    return next(new ValidationError("Idempotency-Key header is required for supplier payment reversals."));
+  }
+  const reason = String(b.reason || "").trim();
+  if (!reason) return next(new ValidationError("A reason is required to reverse a supplier payment."));
+
+  const idemScope = "purchase.payment.reversal";
+  const idemRequestHash = idempotencyService.hashRequest(idemScope, b, req.params);
+  const t = await models.sequelize.transaction();
+  try {
+    const idemClaim = await idempotencyService.claim({
+      models,
+      companyId: req.companyId,
+      scope: idemScope,
+      key: idempotencyKey,
+      requestHash: idemRequestHash,
+      transaction: t,
+    });
+    if (!idemClaim.claimed) {
+      try { await t.rollback(); } catch (_) { /* aborted by unique violation */ }
+      const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope: idemScope, key: idempotencyKey, requestHash: idemRequestHash });
+      if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+      return res.status(prior.statusCode || 409).json({ success: false, message: prior.message });
+    }
+    const idemRequest = idemClaim.request;
+
+    const po = await models.PurchaseOrder.findOne({
+      where: { id: req.params.poId, companyId: req.companyId },
+      lock: t.LOCK.UPDATE,
+      transaction: t,
+    });
+    if (!po) throw new NotFoundError("Purchase order not found.");
+    const supplier = await models.Supplier.findOne({ where: { id: po.supplierId, companyId: req.companyId }, transaction: t });
+    if (!supplier) throw new NotFoundError("Supplier for this purchase order was not found.");
+
+    const payment = await models.CashTransaction.findOne({
+      where: {
+        id: req.params.paymentId,
+        companyId: req.companyId,
+        type: "cash_out",
+        category: "supplier_purchase",
+        reference: po.id,
+      },
+      lock: t.LOCK.UPDATE,
+      transaction: t,
+    });
+    if (!payment) throw new NotFoundError("Supplier payment was not found for this purchase order.");
+    if (payment.status !== "posted") throw new ConflictError("Only posted supplier payments can be reversed.");
+    if (!payment.journalEntryId) throw new AppError("Supplier payment has no posted journal.", 422, "SUPPLIER_PAYMENT_JOURNAL_REQUIRED");
+
+    const originalJournal = await models.JournalEntry.findOne({
+      where: { id: payment.journalEntryId, companyId: req.companyId, sourceType: "cash_transaction", sourceId: payment.id },
+      lock: t.LOCK.UPDATE,
+      transaction: t,
+    });
+    if (!originalJournal || originalJournal.status !== "posted") {
+      throw new ConflictError("Supplier payment journal is not currently reversible.");
+    }
+    if (supplierPaymentState.round2(originalJournal.totalDebit) !== supplierPaymentState.round2(originalJournal.totalCredit)) {
+      throw new ValidationError("An unbalanced supplier payment journal cannot be reversed.");
+    }
+    const existingReversal = await models.JournalEntry.findOne({
+      where: { companyId: req.companyId, reversalOf: originalJournal.id },
+      transaction: t,
+    });
+    if (existingReversal) throw new ConflictError("This supplier payment has already been reversed.");
+
+    const paymentBranchId = payment.branchId || req.branchId;
+    await resolveAuthorizedBranchId(req, paymentBranchId, { required: true, transaction: t });
+    const account = normalizeTreasuryAccount(payment.account, "account");
+    const treasuryAccount = await resolveTreasuryAccount(req.companyId, paymentBranchId, account, { transaction: t });
+    const supplierPayableAccount = await financialAccountResolver.resolveRequiredBranchFinancialAccount({
+      companyId: req.companyId,
+      branchId: paymentBranchId,
+      mappingRole: "SUPPLIER_PAYABLE",
+      transaction: t,
+    });
+
+    const payableMap = await supplierPaymentState.postedPayableByReference(models, req.companyId, [po.id], t);
+    const originalPayable = payableMap.get(po.id);
+    if (!Number.isFinite(originalPayable)) throw new AppError("The posted supplier payable amount is unavailable.", 422, "POSTED_AP_AMOUNT_REQUIRED");
+    const paidMap = await supplierPaymentState.paidByReference(models, req.companyId, [po.id], t);
+    const paidBefore = supplierPaymentState.round2(paidMap.get(po.id) || 0);
+    const reversalAmount = supplierPaymentState.round2(payment.amount);
+    if (reversalAmount <= 0 || reversalAmount > paidBefore) {
+      throw new ConflictError("Supplier payment reversal would produce an invalid effective allocation.");
+    }
+
+    const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";
+    const reversalTx = await models.CashTransaction.create({
+      id: `TX-REV-PAY-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      companyId: req.companyId,
+      type: "cash_in",
+      account,
+      amount: reversalAmount,
+      category: "supplier_payment_reversal",
+      counterAccountCode: supplierPayableAccount.code,
+      description: `عكس سداد المورد ${payment.id} عن أمر الشراء ${po.id}: ${reason}`,
+      reference: po.id,
+      branch: payment.branch || po.branch || req.branchId || "Main Branch",
+      branchId: paymentBranchId,
+      date: new Date().toISOString().slice(0, 10),
+      createdBy: actor,
+      status: "posted",
+      idempotencyKey: String(idempotencyKey),
+    }, { transaction: t });
+
+    const reversalJournal = await postingService.postCashEntry(reversalTx.toJSON(), actor, {
+      transaction: t,
+      treasuryAccountId: treasuryAccount.id,
+      counterAccountId: supplierPayableAccount.id,
+    });
+    // postCashEntry/postEntry returns a plain JSON journal snapshot. Re-load
+    // the persisted row inside the same transaction before attaching the
+    // reversal lineage; changing the global posting-service return contract
+    // would broaden this focused reversal fix to unrelated callers.
+    const persistedReversalJournal = await models.JournalEntry.findOne({
+      where: { id: reversalJournal.id, companyId: req.companyId, sourceType: "cash_transaction", sourceId: reversalTx.id },
+      lock: t.LOCK.UPDATE,
+      transaction: t,
+    });
+    if (!persistedReversalJournal) throw new AppError("Reversal journal was not persisted.", 500, "SUPPLIER_REVERSAL_JOURNAL_REQUIRED");
+    await persistedReversalJournal.update({ reversalOf: originalJournal.id }, { transaction: t });
+    await reversalTx.update({ journalEntryId: reversalJournal.id }, { transaction: t });
+
+    const paidAfter = supplierPaymentState.round2(paidBefore - reversalAmount);
+    const outstandingAfter = supplierPaymentState.round2(originalPayable - paidAfter);
+    await auditService.record(req.companyId, {
+      action: "supplier.payment.reversal",
+      description: `Supplier payment reversal ${payment.id} for PO ${po.id}`,
+      user: actor,
+      userId: req.user ? req.user.id : null,
+      place: payment.branch || po.branch,
+      branch: payment.branch || po.branch,
+      sourceDocument: po.id,
+      severity: "info",
+      before: JSON.stringify({ purchaseOrderId: po.id, supplierId: po.supplierId, paymentId: payment.id, originalPayable, paidBefore, outstandingBefore: supplierPaymentState.round2(originalPayable - paidBefore) }),
+      after: JSON.stringify({ purchaseOrderId: po.id, supplierId: po.supplierId, paymentId: payment.id, reversalPaymentId: reversalTx.id, reversalJournalId: reversalJournal.id, amount: reversalAmount, reason, paidAfter, outstandingAfter }),
+    }, { transaction: t });
+
+    const output = {
+      purchaseOrder: { id: po.id, supplierId: po.supplierId, originalPayable },
+      originalPayment: { id: payment.id, amount: reversalAmount, journalEntryId: originalJournal.id },
+      reversal: { id: reversalTx.id, amount: reversalAmount, journalEntryId: reversalJournal.id, reversalOf: originalJournal.id, reason, idempotencyKey: String(idempotencyKey) },
+      paid: paidAfter,
+      remainingAfter: outstandingAfter,
+    };
+    const idemResponseBody = { success: true, data: output, meta: { supplierDueUpdated: false, paymentReversal: true } };
+    await idempotencyService.succeed({ request: idemRequest, statusCode: 201, responseBody: idemResponseBody, transaction: t });
+    await t.commit();
+
+    emitEntityChanged(req.companyId, { entity: "Treasury", action: "create", id: reversalTx.id, related: { supplierId: po.supplierId, purchaseOrderId: po.id, reversedPaymentId: payment.id } });
+    emitEntityChanged(req.companyId, { entity: "Accounting", action: "create", id: reversalJournal.id, related: { supplierId: po.supplierId, purchaseOrderId: po.id, reversedPaymentId: payment.id } });
     return res.status(201).json(idemResponseBody);
   } catch (error) {
     await t.rollback();
@@ -13378,12 +13636,16 @@ router.get("/suppliers/:id/purchase-orders", authMiddleware, requireBusinessPerm
       ],
       order: [["date", "DESC"], ["createdAt", "DESC"]],
     });
-    // Phase 17B — augment each PO with computed payment state so the UI can show
-    // paid/remaining/status and gate the Pay button. paid is summed from supplier
-    // -payment cash-outs (reference = PO.id) in ONE grouped query (no N+1).
-    // Supplier.due is NOT used; no writes; /purchase-orders/:id/pay is unchanged.
+    // Phase 17B/settlement closure — state is based on the posted AP line and
+    // effective 2DP payment allocations, never the raw 8DP PO total.
     const paidMap = await supplierPaymentState.paidByReference(models, req.companyId, pos.map((p) => p.id));
-    const items = pos.map((p) => ({ ...p.toJSON(), ...supplierPaymentState.computePoPaymentState(p, paidMap.get(p.id) || 0) }));
+    const payableMap = await supplierPaymentState.postedPayableByReference(models, req.companyId, pos.map((p) => p.id));
+    const historyMap = await supplierPaymentState.paymentHistoryByReference(models, req.companyId, pos.map((p) => p.id));
+    const items = pos.map((p) => ({
+      ...p.toJSON(),
+      ...supplierPaymentState.computePoPaymentState(p, paidMap.get(p.id) || 0, payableMap.get(p.id) || 0),
+      paymentHistory: historyMap.get(p.id) || [],
+    }));
     return res.status(200).json({ success: true, items, data: items });
   } catch (error) {
     next(error);
@@ -13428,12 +13690,18 @@ router.get("/suppliers/:id/statement", authMiddleware, requireBusinessPermission
       raw: true,
     });
 
-    // 5. Source 2 — supplier-payment cash-outs, linked to THIS supplier via the
-    //    free-text reference -> PO id. We resolve POs with paranoid:false so a
-    //    soft-deleted order still maps its payment to the supplier.
+    // 5. Source 2 — supplier payments and append-only reversals, linked to THIS
+    //    supplier via reference -> PO id. We resolve POs with paranoid:false so
+    //    a soft-deleted order still maps its payment evidence to the supplier.
     const payTx = await models.CashTransaction.findAll({
-      where: { companyId: req.companyId, type: "cash_out", category: "supplier_purchase" },
-      attributes: ["id", "amount", "reference", "date", "createdAt", "description"],
+      where: {
+        companyId: req.companyId,
+        [Op.or]: [
+          { type: "cash_out", category: "supplier_purchase" },
+          { type: "cash_in", category: "supplier_payment_reversal" },
+        ],
+      },
+      attributes: ["id", "amount", "reference", "date", "createdAt", "description", "type", "category"],
       raw: true,
     });
     const refIds = [...new Set(payTx.map((tx) => tx.reference).filter(Boolean))];
@@ -13448,11 +13716,13 @@ router.get("/suppliers/:id/statement", authMiddleware, requireBusinessPermission
       for (const p of refPos) supplierPoIds.add(p.id);
     }
 
+    const postedPayableMap = await supplierPaymentState.postedPayableByReference(models, req.companyId, pos.map((p) => p.id));
+
     // 6. Unify into ledger rows. Supplier-payable convention: a receipt raises
-    //    what we owe (credit); a payment lowers it (debit).
+    //    what we owe (credit); a payment lowers it (debit); a reversal reopens it.
     const rowsAll = [];
     for (const po of pos) {
-      const amount = round4(po.total);
+      const amount = supplierPaymentState.round2(postedPayableMap.get(po.id) || 0);
       rowsAll.push({
         id: `PO-${po.id}`,
         type: "purchase_order",
@@ -13468,18 +13738,19 @@ router.get("/suppliers/:id/statement", authMiddleware, requireBusinessPermission
     }
     for (const tx of payTx) {
       if (!tx.reference || !supplierPoIds.has(tx.reference)) continue; // only this supplier's payments
-      const amount = round4(tx.amount);
+      const amount = supplierPaymentState.round2(tx.amount);
+      const isReversal = tx.type === "cash_in" && tx.category === "supplier_payment_reversal";
       rowsAll.push({
         id: `TX-${tx.id}`,
-        type: "supplier_payment",
+        type: isReversal ? "supplier_payment_reversal" : "supplier_payment",
         sourceId: tx.id,
         sourceNumber: tx.reference || tx.id,
         date: (tx.date || "").slice(0, 10),
         createdAt: tx.createdAt,
         description: tx.description || `سداد للمورّد (${tx.reference})`,
-        debit: amount,
-        credit: 0,
-        sortType: "1_payment",
+        debit: isReversal ? 0 : amount,
+        credit: isReversal ? amount : 0,
+        sortType: isReversal ? "2_reversal" : "1_payment",
       });
     }
 
@@ -13499,9 +13770,9 @@ router.get("/suppliers/:id/statement", authMiddleware, requireBusinessPermission
     let openingBalance = 0;
     const periodRows = [];
     for (const r of rowsAll) {
-      const delta = round4(r.credit - r.debit);
+      const delta = supplierPaymentState.round2(r.credit - r.debit);
       if (from && r.date < from) {
-        openingBalance = round4(openingBalance + delta);
+        openingBalance = supplierPaymentState.round2(openingBalance + delta);
         continue;
       }
       if (to && r.date > to) continue;
@@ -13510,7 +13781,7 @@ router.get("/suppliers/:id/statement", authMiddleware, requireBusinessPermission
 
     let running = openingBalance;
     const withRunning = periodRows.map((r) => {
-      running = round4(running + r.delta);
+      running = supplierPaymentState.round2(running + r.delta);
       return {
         id: r.id,
         type: r.type,
@@ -13532,8 +13803,8 @@ router.get("/suppliers/:id/statement", authMiddleware, requireBusinessPermission
     const items = withRunning.slice(start, start + pageSize);
 
     // 9. Supplier.due is reference-only; difference reported, never fixed.
-    const supplierDueReference = round4(supplier.due);
-    const difference = round4(supplierDueReference - closingBalance);
+    const supplierDueReference = supplierPaymentState.round2(supplier.due);
+    const difference = supplierPaymentState.round2(supplierDueReference - closingBalance);
 
     return res.status(200).json({
       success: true,

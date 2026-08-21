@@ -65,7 +65,7 @@ const byId = (list, id) => list.find((p) => p.id === id);
 
   try {
     console.log("0) pure helper computePoPaymentState:");
-    check(JSON.stringify(sps.computePoPaymentState({ total: 984, status: "received", isConsignment: false }, 0)) === JSON.stringify({ payableAmount: 984, paidAmount: 0, remainingAmount: 984, paymentStatus: "unpaid", canPay: true }), "unpaid → remaining=total, canPay=true");
+    check(JSON.stringify(sps.computePoPaymentState({ total: 984, status: "received", isConsignment: false }, 0)) === JSON.stringify({ originalPayable: 984, payableAmount: 984, paid: 0, paidAmount: 0, remainingAmount: 984, paymentStatus: "unpaid", canPay: true }), "unpaid → posted AP/remaining=984, canPay=true");
     check(sps.computePoPaymentState({ total: 1000, status: "received", isConsignment: false }, 500).paymentStatus === "partial", "partial → paymentStatus=partial");
     const full = sps.computePoPaymentState({ total: 600, status: "received", isConsignment: false }, 600);
     check(full.remainingAmount === 0 && full.paymentStatus === "paid" && full.canPay === false, "fully paid → remaining=0, paid, canPay=false");

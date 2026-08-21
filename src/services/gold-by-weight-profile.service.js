@@ -71,6 +71,7 @@ function normalizeInput(input = {}) {
   if (grossWeight.lte(0)) throw fail("GBW_GROSS_WEIGHT_INVALID");
   const stoneWeight = decimal(input.stoneWeight ?? 0, "STONE_WEIGHT", { required: true, min: 0 });
   if (stoneWeight.gt(grossWeight)) throw fail("GBW_STONE_WEIGHT_EXCEEDS_GROSS");
+  if (grossWeight.minus(stoneWeight).lte(0)) throw fail("GBW_NET_WEIGHT_INVALID");
   const makingPerGram = profile === PROFILE_JEWELLERY
     ? decimal(input.makingPerGram ?? input.makingCostPerGram, "MAKING_PER_GRAM", { required: true, min: 0 })
     : null;

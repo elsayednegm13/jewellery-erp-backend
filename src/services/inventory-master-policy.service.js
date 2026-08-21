@@ -198,7 +198,7 @@ function calculateGoldWeights({ grossWeight, stoneWeight, karat }) {
   const stone = decimal(stoneWeight, "stoneWeight");
   const k = decimal(karat, "karat");
   if (!gross || !stone || !k) throw new Error("INVENTORY_WEIGHT_FACTS_REQUIRED");
-  if (gross.lt(0) || stone.lt(0) || stone.gt(gross) || k.lte(0) || k.gt(24)) throw new Error("INVENTORY_WEIGHT_FACTS_INVALID");
+  if (gross.lt(0) || stone.lt(0) || stone.gt(gross) || gross.minus(stone).lte(0) || k.lte(0) || k.gt(24)) throw new Error("INVENTORY_WEIGHT_FACTS_INVALID");
   const net = gross.minus(stone);
   const purity = k.div(24);
   return Object.freeze({

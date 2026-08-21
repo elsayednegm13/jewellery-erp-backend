@@ -5,7 +5,9 @@ const test = require("node:test");
 
 const root = path.resolve(__dirname, "..", "..");
 const route = fs.readFileSync(path.join(root, "backend/src/routes/erp.routes.js"), "utf8");
-const page = fs.readFileSync(path.join(root, "app/[locale]/(dashboard)/suppliers/purchases/page.tsx"), "utf8");
+// Supplier purchases is now redirect-only; the canonical serialized-profile
+// receive contract lives in the Gold By Piece inventory entry point.
+const page = fs.readFileSync(path.join(root, "app/[locale]/(dashboard)/inventory/gold-by-piece/page.tsx"), "utf8");
 const preview = require(path.join(root, "backend/src/services/supplier-acquisition-preview.service.js"));
 
 test("supplier preview reuses the canonical V2 normalization boundary", () => {
@@ -19,11 +21,10 @@ test("supplier preview reuses the canonical V2 normalization boundary", () => {
 
 test("all serialized profiles have a server-preview path and CGP is blocked", () => {
   assert.match(page, /\/inventory-v2\/receive-preview/);
-  assert.match(page, /canonicalPreview/);
-  assert.match(page, /disabled=\{isCgpOption\}/);
-  assert.match(page, /previewUnavailable/);
-  assert.match(page, /goldValuationApplicable \? undefined/);
-  assert.match(page, /is24kGoldBar \? parseDecimal\(piece\.certificateCost\)/);
+  assert.match(page, /SharedReceiveSection/);
+  assert.match(page, /inventoryV2: true/);
+  assert.match(page, /perPiece: \[piece\]/);
+  assert.match(page, /\/purchase-orders\/receive/);
 });
 
 test("preview preserves profile-specific acquisition totals without persistence", () => {

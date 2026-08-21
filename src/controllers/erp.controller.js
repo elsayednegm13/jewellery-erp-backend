@@ -116,6 +116,11 @@ const ASSET_IDENTITY_FIELDS = Object.freeze({
   barcode_generated_at: "barcodeGeneratedAt",
   barcodeRevision: "barcodeRevision",
   barcode_revision: "barcodeRevision",
+  // RFID is an optional serialized identity, not descriptive metadata. Once
+  // an Asset has its canonical Barcode, RFID changes must use the governed
+  // Inventory V2 assignment/replacement route so history and uniqueness stay
+  // aligned with assets.rfid.
+  rfid: "rfid",
 });
 
 function changedAssetIdentityField(item, body = {}) {
@@ -574,6 +579,10 @@ class ErpController {
       // default (0); the supplier statement is the source of truth for balance.
       if (this.model.name === "Supplier") {
         delete payload.due;
+        // Supplier IDs are backend authority. The canonical Supplier UI never
+        // exposes an ID input, so a generic API caller must not be able to turn
+        // a client-provided primary key into the persisted Supplier identity.
+        delete payload.id;
       }
 
       // Phase 10R: Customer.balance is maintained by business flows (sales/
