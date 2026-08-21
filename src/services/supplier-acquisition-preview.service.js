@@ -26,7 +26,7 @@ function calculateTotals({ normalizedItems = [], body = {}, settings = {}, inven
   const finalProfile = normalizedItems.some((item) => containsGoldByPiece(item.v2Pieces || []));
   const exactGoodsTotal = normalizedItems.reduce((sum, item) => sum.plus(item.totalCost || 0), new Decimal(0));
   const exactTotalWeight = normalizedItems.reduce((sum, item) => sum.plus(item.totalWeight || 0), new Decimal(0));
-  const goodsTotal = finalProfile ? scale8(exactGoodsTotal) : round2(exactGoodsTotal);
+  let goodsTotal = finalProfile ? scale8(exactGoodsTotal) : round2(exactGoodsTotal);
   const totalWeight = finalProfile ? scale8(exactTotalWeight) : exactTotalWeight.toDecimalPlaces(4, Decimal.ROUND_HALF_UP).toNumber();
   const rcmRequested = Boolean(body.isRcm || body.isDRC || body.reverseVat || body.useReverseCharge);
   const vatRequested = (rcmRequested || body.applyVat === true) && settings.vatEnabled !== false;
@@ -67,6 +67,8 @@ function calculateTotals({ normalizedItems = [], body = {}, settings = {}, inven
     isRecoverable = Boolean(body.isRecoverable ?? settings.purchaseVatRecoverableDefault ?? true);
     const exactInputVat = pieceVats.reduce((sum, vat) => sum.plus(vat.vatAmount || 0), new Decimal(0));
     inputVatAmount = finalProfile ? scale8(exactInputVat) : round2(exactInputVat);
+    const hasPreTaxLoose = normalizedItems.some((item) => (item.v2Pieces || []).some((piece) => ["LOOSE_DIAMOND", "LOOSE_GEMSTONE", "LOOSE_PEARL"].includes(piece.profile)));
+    if (hasPreTaxLoose) goodsTotal = scale8(new Decimal(goodsTotal).plus(inputVatAmount));
     taxBase = finalProfile ? scale8(new Decimal(goodsTotal).minus(inputVatAmount)) : round2(new Decimal(goodsTotal).minus(inputVatAmount));
     total = goodsTotal;
   } else if (vatRequested) {
@@ -99,7 +101,7 @@ function summarizePieces(normalizedItems = []) {
     const profile = piece.profile || piece.inventoryProfile || null;
     const isGold = profile === "GOLD_BY_WEIGHT_JEWELLERY" || profile === "GOLD_BAR_24K";
     const isBar = profile === "GOLD_BAR_24K";
-    const isLoose = profile === "LOOSE_GEMSTONE" || profile === "LOOSE_PEARL";
+    const isLoose = profile === "LOOSE_DIAMOND" || profile === "LOOSE_GEMSTONE" || profile === "LOOSE_PEARL";
     return {
       profile,
       grossWeight: piece.grossWeight,
@@ -113,7 +115,7 @@ function summarizePieces(normalizedItems = []) {
       certificateCost: isBar ? Number(piece.certificateCost || 0) : 0,
       purchaseVat: Number(piece.vat?.vatAmount || 0),
       certificateVat: isBar ? Number(piece.vat?.vatAmount || 0) : 0,
-      purchaseTotal: Number(piece.purchaseCost || 0),
+      purchaseTotal: Number(piece.purchaseCost || 0) + Number(piece.vat?.vatAmount || 0),
       vatRate: Number(piece.vat?.vatRate || 0),
       vatRateSource: piece.vat?.vatRateSource || null,
     };

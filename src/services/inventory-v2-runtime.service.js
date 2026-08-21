@@ -1,11 +1,13 @@
 "use strict";
 
 const crypto = require("crypto");
+const Decimal = require("decimal.js");
 const policy = require("./inventory-master-policy.service");
 const profileMasterDataService = require("./profile-master-data.service");
 const goldValuationService = require("./gold-valuation.service");
 const looseProfileFinanceService = require("./loose-profile-finance.service");
 const diamondJewelleryProfileService = require("./diamond-jewellery-profile.service");
+const salePricingService = require("./gold-sale-pricing.service");
 const { ValidationError } = require("../utils/errors");
 
 const OPERATIONAL_STATUS = Object.freeze([
@@ -138,6 +140,7 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
   if (piece.operationalStatus !== undefined || piece.status !== undefined) throw new Error("INVENTORY_OPERATIONAL_STATUS_PAYLOAD_FORBIDDEN");
   const profile = policy.normalizeProfile(piece.profile || piece.inventoryProfile);
   const contract = policy.requireProfile(profile);
+  const isLooseDiamond = profile === "LOOSE_DIAMOND";
   const condition = policy.validateCondition(profile, piece.condition);
   const description = String(piece.description || piece.name || "").trim();
   if (!description) throw new Error("INVENTORY_V2_DESCRIPTION_REQUIRED");
@@ -156,6 +159,9 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
   const diamondPiece = profile === "DIAMOND_JEWELLERY"
     ? diamondJewelleryProfileService.normalizePiece(piece, { masterData: context.diamondMasterData || null, requireSalePrice: true })
     : null;
+  if (isLooseDiamond && Array.isArray(piece.components) && piece.components.length) {
+    throw new Error("INVENTORY_LOOSE_DIAMOND_COMPONENTS_FORBIDDEN");
+  }
   const components = diamondPiece
     ? diamondPiece.components
     : normalizeComponentsForProfile(profile, piece.components || []);
@@ -163,14 +169,18 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
   const type = receiptTypes[profile];
   if (!type) throw new Error("INVENTORY_PROFILE_INVALID");
 
-  const grossWeight = diamondPiece ? Number(diamondPiece.grossWeight) : finiteOrNull(piece.grossWeight, "GROSS_WEIGHT");
+  const grossWeight = diamondPiece
+    ? Number(diamondPiece.grossWeight)
+    : isLooseDiamond
+      ? Number(new Decimal(String(looseDetails.carat)).times("0.20").toFixed(8))
+      : finiteOrNull(piece.grossWeight, "GROSS_WEIGHT");
   if (profile === "GOLD_BY_PIECE" && !Object.prototype.hasOwnProperty.call(piece, "stoneWeight")) {
     throw new Error("GBP_STONE_WEIGHT_REQUIRED");
   }
   const stoneWeight = diamondPiece ? Number(diamondPiece.stoneWeight) : finiteOrNull(piece.stoneWeight ?? 0, "STONE_WEIGHT");
-  const karat = diamondPiece ? Number(diamondPiece.karat) : finiteOrNull(piece.karat, "KARAT");
+  const karat = diamondPiece ? Number(diamondPiece.karat) : (isLooseDiamond ? null : finiteOrNull(piece.karat, "KARAT"));
   let weights = null;
-  if (grossWeight === null || grossWeight <= 0) throw new Error("INVENTORY_V2_GROSS_WEIGHT_REQUIRED");
+  if (!isLooseDiamond && (grossWeight === null || grossWeight <= 0)) throw new Error("INVENTORY_V2_GROSS_WEIGHT_REQUIRED");
   if (goldProfiles.has(profile)) {
     if (grossWeight === null || karat === null) throw new Error("INVENTORY_V2_GOLD_WEIGHT_FACTS_REQUIRED");
     weights = policy.calculateGoldWeights({ grossWeight, stoneWeight, karat });
@@ -197,7 +207,7 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
   const loosePurchase = looseProfileFinanceService.calculatePurchase({ profile, input: piece.looseFinancial || piece, configuredVatRate: context.vatRateDefault });
   const purchaseCost = specializedValuation
     ? Number(specializedValuation.purchase.totalPurchaseCost)
-    : loosePurchase ? Number(loosePurchase.totalPurchaseCost) : finiteOrNull(piece.purchaseCost ?? piece.unitCost, "PURCHASE_COST");
+    : loosePurchase ? Number(loosePurchase.purchaseBaseCost) : finiteOrNull(piece.purchaseCost ?? piece.unitCost, "PURCHASE_COST");
   if (purchaseCost === null || purchaseCost < 0) {
     throw new ValidationError(
       "purchaseCost is required and must be a non-negative economic evidence value.",
@@ -213,6 +223,24 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
     ? { vatBase: specializedValuation.purchase.vatBase, vatRate: specializedValuation.purchase.vatRate, vatAmount: specializedValuation.purchase.vatAmount }
     : loosePurchase ? { vatBase: loosePurchase.vatBase, vatRate: loosePurchase.vatRate, vatAmount: loosePurchase.vatAmount } : policy.calculateVat({ base: vatBase, rate: vatRate });
   const pricing = piece.pricing || {};
+  const currentValuation = specializedValuation?.current
+    ?? piece.currentValuation
+    ?? (loosePurchase && piece.looseCurrentValuation
+      ? looseProfileFinanceService.calculateCurrent({ profile, input: piece.looseCurrentValuation, configuredVatRate: context.vatRateDefault })
+      : null);
+  if (isLooseDiamond) {
+    const sale = salePricingService.calculateLooseProfileSalePrice({
+      profile,
+      currentTotalCost: currentValuation?.totalValue ?? 0,
+      markupPercent: pricing.markupPercent,
+      sellingPrice: piece.sellingPrice ?? piece.salePrice ?? pricing.sellingPrice,
+      maximumDiscountPercent: pricing.maximumDiscountPercent,
+      minimumSellingPrice: pricing.minimumSellingPrice,
+      proposedDiscount: pricing.proposedDiscount,
+      configuredVatRate: context.vatRateDefault,
+    });
+    if (sale.approvalRequired) throw new ValidationError("LOOSE_DIAMOND_SALE_PRICE_BELOW_MINIMUM");
+  }
 
   return Object.freeze({
     ...piece,
@@ -246,7 +274,7 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
     makingTotal: specializedValuation?.purchase.makingTotal ?? finiteOrNull(piece.makingTotal, "MAKING_TOTAL"),
     certificateCost,
     vat: { ...vat, vatRateSource: specializedValuation?.purchase.vatRateSource ?? (piece.vatRate === undefined ? "SETTINGS_DEFAULT" : "MANUAL") },
-    currentValuation: specializedValuation?.current ?? piece.currentValuation ?? (loosePurchase ? looseProfileFinanceService.calculateCurrent({ profile, input: piece.looseCurrentValuation || { currentValue: loosePurchase.purchaseBaseCost, currentVatRate: loosePurchase.vatRate }, configuredVatRate: context.vatRateDefault }) : null),
+    currentValuation,
     pricing,
   });
 }
@@ -257,8 +285,8 @@ function looseDetailsAsPrimarySubject(looseDetails) {
     role: "PRIMARY_SUBJECT", componentKind: looseDetails.kind, componentCount: 1, sequence: 0,
     name: looseDetails.stoneName || (looseDetails.kind === "PEARL" ? "لؤلؤ" : "حجر"),
     componentType: looseDetails.diamondType || looseDetails.pearlType || null,
-    componentCarat: looseDetails.carat, componentWeight: looseDetails.totalPearlWeight,
-    measurementUnit: "CT", notes: looseDetails.notes,
+    componentCarat: looseDetails.carat, componentWeight: looseDetails.totalPearlWeight || null,
+    measurementUnit: looseDetails.carat !== null && looseDetails.carat !== undefined ? "CT" : "GRAM", notes: looseDetails.notes,
   };
   if (looseDetails.kind === "DIAMOND") return { ...base, diamondDetails: looseDetails };
   if (looseDetails.kind === "GEMSTONE") return { ...base, gemstoneDetails: looseDetails };
@@ -396,14 +424,14 @@ async function persistReceiptEvidence({ models, transaction, asset, poItem, piec
   const loosePrimarySubject = looseDetailsAsPrimarySubject(resolvedPiece.looseDetails);
   await persistAssetComponents({ models, transaction, asset, components: loosePrimarySubject ? [loosePrimarySubject] : resolvedPiece.components, companyId: context.companyId });
   await profileMasterDataService.persistAssetReferences({ models, companyId: context.companyId, assetId: asset.id, references: resolvedLoose.references, transaction });
-  const currentValuation = piece.currentValuation || {
+  const currentValuation = piece.currentValuation || (piece.profile === "LOOSE_DIAMOND" ? null : {
     rateSource: "RECEIPT_INITIAL", goldRate: piece.purchaseGoldRate ?? null, goldValue: piece.goldValue,
     makingValue: piece.makingTotal ?? null, certificateValue: piece.certificateCost,
     componentValue: piece.componentCost ?? null, vatRate: piece.vat.vatRate,
     vatRateSource: piece.vat.vatRateSource, vatBase: piece.vat.vatBase,
     vatAmount: piece.vat.vatAmount, totalValue: piece.purchaseCost,
-  };
-  await models.sequelize.query(`INSERT INTO asset_current_valuations
+  });
+  if (currentValuation) await models.sequelize.query(`INSERT INTO asset_current_valuations
     (asset_id,company_id,branch_id,rate_source,gold_rate,gold_value,making_value,certificate_value,component_value,vat_rate,vat_rate_source,vat_base,vat_amount,total_value,as_of)
     VALUES (:assetId,:companyId,:branchId,:rateSource,:goldRate,:goldValue,:makingValue,:certificateValue,:componentValue,:vatRate,:vatRateSource,:vatBase,:vatAmount,:totalValue,:asOf)`, {
     replacements: { assetId: asset.id, companyId: context.companyId, branchId: context.branchId, rateSource: currentValuation.rateSource, goldRate: currentValuation.goldRate, goldValue: currentValuation.goldValue, makingValue: currentValuation.makingValue, certificateValue: currentValuation.certificateValue, componentValue: currentValuation.componentValue, vatRate: currentValuation.vatRate, vatRateSource: currentValuation.vatRateSource, vatBase: currentValuation.vatBase, vatAmount: currentValuation.vatAmount, totalValue: currentValuation.totalValue, asOf: receivedAt }, transaction,
@@ -691,7 +719,7 @@ async function persistAssetComponents({ models, transaction, asset, components, 
         replacements: {
           id: componentId,
           treatment: d.treatment ?? d.treatmentType ?? null,
-          color: d.color ?? d.stoneColor ?? null,
+          color: Array.isArray(d.color) ? d.color.join(", ") : (d.color ?? d.stoneColor ?? null),
           tone: d.tone ?? null,
           saturation: d.saturation ?? null,
           clarity: d.clarity ?? null,

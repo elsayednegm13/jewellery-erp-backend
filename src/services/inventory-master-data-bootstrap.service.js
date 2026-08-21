@@ -17,8 +17,10 @@ const BASELINE_ITEM_CODE_COUNT = manifest.DATASET_MANIFEST.baseline.barcodeItemC
 
 function stableId(category, canonicalValue) {
   const digest = crypto.createHash("sha256").update(`${manifest.DATASET_ID}|${manifest.CANONICAL_DATASET_VERSION}|${category}|${canonicalValue}`).digest("hex");
-  return `PMD-R2-${digest.slice(0, 26)}`;
+  return `PMD-R${manifest.CANONICAL_DATASET_VERSION}-${digest.slice(0, 26)}`;
 }
+
+const CURRENT_PROFILE_MASTER_DATA_ROWS = manifest.CURRENT_PROFILE_MASTER_DATA_ROWS || manifest.R1_PROFILE_MASTER_DATA_ROWS;
 
 function stableStateId(companyId) {
   return `IMDBS-${String(companyId)}-${manifest.DATASET_ID}`;
@@ -33,7 +35,7 @@ function countByCategory(rows) {
 
 function validateManifest() {
   const seen = new Set();
-  for (const row of manifest.R1_PROFILE_MASTER_DATA_ROWS) {
+  for (const row of CURRENT_PROFILE_MASTER_DATA_ROWS) {
     const key = `${row.category}|${row.canonicalValue}`;
     if (seen.has(key)) throw new ConflictError(`INVENTORY_MASTER_DATA_MANIFEST_DUPLICATE:${key}`);
     seen.add(key);
@@ -43,7 +45,7 @@ function validateManifest() {
   if (inventoryCodes.includes("WT") || itemCodes.includes("WCH")) throw new ConflictError("INVENTORY_MASTER_DATA_NONCANONICAL_BARCODE_CODE");
   if (manifest.DATASET_MANIFEST.gemstoneTreatmentInitialValues.length !== 0) throw new ConflictError("INVENTORY_MASTER_DATA_UNAPPROVED_TREATMENT_VALUES");
   if (manifest.V1_PROFILE_MASTER_DATA_ROWS.length !== BASELINE_PROFILE_COUNT) throw new ConflictError("INVENTORY_MASTER_DATA_BASELINE_MANIFEST_COUNT_MISMATCH");
-  return { rowCount: manifest.R1_PROFILE_MASTER_DATA_ROWS.length, categoryCounts: countByCategory(manifest.R1_PROFILE_MASTER_DATA_ROWS) };
+  return { rowCount: CURRENT_PROFILE_MASTER_DATA_ROWS.length, categoryCounts: countByCategory(CURRENT_PROFILE_MASTER_DATA_ROWS) };
 }
 
 async function readBaseline({ models, companyId, transaction }) {
@@ -101,7 +103,7 @@ async function reconcileProfileRows({ models, companyId, actorId, transaction, d
   const created = [];
   const existing = [];
   const aliasMatched = [];
-  for (const row of manifest.R1_PROFILE_MASTER_DATA_ROWS) {
+  for (const row of CURRENT_PROFILE_MASTER_DATA_ROWS) {
     const candidates = [row.canonicalValue, ...aliasesFor(row)];
     const found = await models.sequelize.query(`SELECT id,category_key,canonical_value,display_label,is_active,sort_order
       FROM profile_master_data
@@ -206,14 +208,11 @@ async function initializeV1Foundation({ models, companyId, actorId, transaction,
 async function verifyR2Result({ models, companyId, transaction }) {
   const rows = await models.sequelize.query("SELECT category_key AS category, COUNT(*)::int AS count FROM profile_master_data WHERE company_id=:companyId GROUP BY category_key", { replacements: { companyId }, transaction, type: QueryTypes.SELECT });
   const counts = Object.fromEntries(rows.map((row) => [row.category, Number(row.count)]));
-  const expected = {
-    CERTIFICATE_AUTHORITY: 16, DIAMOND_TONE: 14, DIAMOND_TONE_LEVEL: 9, DIAMOND_SATURATION: 10,
-    DIAMOND_POSITION: 7, DIAMOND_SETTING: 47, GEMSTONE_POSITION: 7, GEMSTONE_SETTING: 47,
-  };
+  const expected = countByCategory(CURRENT_PROFILE_MASTER_DATA_ROWS);
   for (const [category, count] of Object.entries(expected)) if (counts[category] !== count) throw new ConflictError(`INVENTORY_MASTER_DATA_RESULT_MISMATCH:${category}:${counts[category] || 0}`);
   if (counts.GEMSTONE_TREATMENT) throw new ConflictError("INVENTORY_MASTER_DATA_GEMSTONE_TREATMENT_NOT_EMPTY");
   const baseline = await readBaseline({ models, companyId, transaction });
-  if (baseline.profileMasterData !== BASELINE_PROFILE_COUNT + manifest.R1_PROFILE_MASTER_DATA_ROWS.length) throw new ConflictError("INVENTORY_MASTER_DATA_PROFILE_TOTAL_MISMATCH");
+  if (baseline.profileMasterData !== BASELINE_PROFILE_COUNT + CURRENT_PROFILE_MASTER_DATA_ROWS.length) throw new ConflictError("INVENTORY_MASTER_DATA_PROFILE_TOTAL_MISMATCH");
   return { categoryCounts: counts, totals: baseline };
 }
 
@@ -247,7 +246,7 @@ async function runBootstrap({ models, companyId, actorId, transaction, dryRun, t
     datasetId: manifest.DATASET_ID, version: targetVersion, manifestHash: hash, before: foundation.before,
     expectedInsertionCount: manifestInfo.rowCount, insertedCount: reconciliation.created.length,
     existingCount: reconciliation.existing.length, aliasMatchedCount: reconciliation.aliasMatched.length,
-    insertedByCategory: countByCategory(manifest.R1_PROFILE_MASTER_DATA_ROWS.filter((row) => reconciliation.created.includes(row.canonicalKey))),
+    insertedByCategory: countByCategory(CURRENT_PROFILE_MASTER_DATA_ROWS.filter((row) => reconciliation.created.includes(row.canonicalKey))),
     ...result, changes: { inserted: reconciliation.created.length, updated: 0, deleted: 0 },
   };
   if (reconciliation.created.length !== manifestInfo.rowCount) throw new ConflictError("INVENTORY_MASTER_DATA_DELTA_NOT_EXACT");

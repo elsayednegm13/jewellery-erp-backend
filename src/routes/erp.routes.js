@@ -76,7 +76,11 @@ const router = express.Router();
 const allowAuthenticated = (req, res, next) => next();
 
 async function loadDiamondMasterData(companyId, transaction = null) {
-  const categories = ["GOLD_ITEM_DESCRIPTION", ...profileMasterDataService.categoriesForProfile(diamondJewelleryProfileService.PROFILE)];
+  const categories = Array.from(new Set([
+    "GOLD_ITEM_DESCRIPTION",
+    ...profileMasterDataService.categoriesForProfile(diamondJewelleryProfileService.PROFILE),
+    ...profileMasterDataService.categoriesForProfile("LOOSE_DIAMOND"),
+  ]));
   const masters = await profileMasterDataService.list({ models, companyId, categories, activeOnly: true, transaction });
   return diamondJewelleryProfileService.masterIndex(masters);
 }
@@ -8488,8 +8492,9 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
           // Recoverable V2 input VAT is a tax receivable, not Asset book cost.
           // The immutable purchase revision retains the gross source evidence;
           // the operational Asset/COGS cost remains the canonical net basis.
+          const looseDiamondPiece = v2Piece?.profile === "LOOSE_DIAMOND";
           const effectiveCost = v2Piece
-            ? (isRecoverableSnap && !isRcmSnap ? Number(v2Piece.purchaseCost) - Number(v2Piece.vat?.vatAmount || 0) : v2Piece.purchaseCost)
+            ? (looseDiamondPiece ? Number(v2Piece.purchaseCost) : (isRecoverableSnap && !isRcmSnap ? Number(v2Piece.purchaseCost) - Number(v2Piece.vat?.vatAmount || 0) : v2Piece.purchaseCost))
             : capUnitCost;
           const assetSnap = await governSnapshot(goldCostService.buildGoldCostSnapshot({
             goldCostSource, weight: v2Piece?.weights?.netGoldWeight ?? perUnitGoldWeight, karat: v2Piece?.karat ?? itemKarat,
@@ -8519,7 +8524,7 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
             purity: v2Piece?.weights?.purityRatio ?? item.purity ?? null,
             grossWeight: v2Piece?.grossWeight ?? item.weightPerUnit,
             netWeight: v2Piece?.weights?.netGoldWeight ?? v2Piece?.grossWeight ?? item.netWeight,
-            goldWeight: v2Piece?.weights?.netGoldWeight ?? v2Piece?.grossWeight ?? item.goldWeight ?? item.netWeight,
+            goldWeight: looseDiamondPiece ? null : (v2Piece?.weights?.netGoldWeight ?? v2Piece?.grossWeight ?? item.goldWeight ?? item.netWeight),
             price: v2Piece?.salePrice ?? item.price,
             // Phase 15G — capitalised book cost (legacy unless non-recoverable VAT).
             cost: effectiveCost,

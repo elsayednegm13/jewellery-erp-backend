@@ -8,7 +8,7 @@ const { ValidationError } = require("../utils/errors");
 
 const CATEGORIES = Object.freeze({
   GOLD_ITEM_DESCRIPTION: "GOLD_ITEM_DESCRIPTION", GOLD_COLOR: "GOLD_COLOR",
-  DIAMOND_TYPE: "DIAMOND_TYPE", DIAMOND_COLOR: "DIAMOND_COLOR", DIAMOND_CLARITY: "DIAMOND_CLARITY",
+  DIAMOND_NAME: "DIAMOND_NAME", DIAMOND_TYPE: "DIAMOND_TYPE", DIAMOND_COLOR: "DIAMOND_COLOR", DIAMOND_CLARITY: "DIAMOND_CLARITY",
   DIAMOND_CUT: "DIAMOND_CUT", DIAMOND_SHAPE: "DIAMOND_SHAPE", DIAMOND_TREATMENT: "DIAMOND_TREATMENT",
   DIAMOND_ORIGIN: "DIAMOND_ORIGIN", DIAMOND_TONE: "DIAMOND_TONE", DIAMOND_TONE_LEVEL: "DIAMOND_TONE_LEVEL",
   DIAMOND_SATURATION: "DIAMOND_SATURATION", DIAMOND_POSITION: "DIAMOND_POSITION", DIAMOND_SETTING: "DIAMOND_SETTING",
@@ -29,14 +29,14 @@ const PROFILE_CATEGORIES = Object.freeze({
   GOLD_BAR_24K: Object.freeze([CATEGORIES.GOLD_ITEM_DESCRIPTION, CATEGORIES.GOLD_COLOR]),
   GOLD_BY_PIECE: Object.freeze([CATEGORIES.GOLD_ITEM_DESCRIPTION, CATEGORIES.GOLD_COLOR]),
   DIAMOND_JEWELLERY: Object.freeze([
-    CATEGORIES.DIAMOND_TYPE, CATEGORIES.DIAMOND_COLOR, CATEGORIES.DIAMOND_CLARITY,
+    CATEGORIES.DIAMOND_NAME, CATEGORIES.DIAMOND_TYPE, CATEGORIES.DIAMOND_COLOR, CATEGORIES.DIAMOND_CLARITY,
     CATEGORIES.DIAMOND_CUT, CATEGORIES.DIAMOND_SHAPE, CATEGORIES.DIAMOND_TREATMENT,
     CATEGORIES.DIAMOND_ORIGIN, CATEGORIES.DIAMOND_TONE, CATEGORIES.DIAMOND_TONE_LEVEL,
     CATEGORIES.DIAMOND_SATURATION, CATEGORIES.DIAMOND_POSITION, CATEGORIES.DIAMOND_SETTING,
     CATEGORIES.CERTIFICATE_AUTHORITY,
   ]),
   LOOSE_DIAMOND: Object.freeze([
-    CATEGORIES.DIAMOND_TYPE, CATEGORIES.DIAMOND_COLOR, CATEGORIES.DIAMOND_CLARITY,
+    CATEGORIES.DIAMOND_NAME, CATEGORIES.DIAMOND_TYPE, CATEGORIES.DIAMOND_COLOR, CATEGORIES.DIAMOND_CLARITY,
     CATEGORIES.DIAMOND_CUT, CATEGORIES.DIAMOND_SHAPE, CATEGORIES.DIAMOND_TREATMENT,
     CATEGORIES.DIAMOND_ORIGIN, CATEGORIES.DIAMOND_TONE, CATEGORIES.DIAMOND_TONE_LEVEL,
     CATEGORIES.DIAMOND_SATURATION, CATEGORIES.CERTIFICATE_AUTHORITY,
@@ -109,6 +109,10 @@ function categoriesForProfile(profile) { return PROFILE_CATEGORIES[profile] || [
 function categoryForField(profile, field) {
   const normalizedProfile = String(profile || "").trim().toUpperCase();
   const normalizedField = String(field || "").trim();
+  if (normalizedProfile === "LOOSE_DIAMOND" && normalizedField === "stoneName") return CATEGORIES.DIAMOND_NAME;
+  if (normalizedProfile === "LOOSE_DIAMOND" && normalizedField === "diamondColor") return CATEGORIES.DIAMOND_COLOR;
+  if (normalizedProfile === "LOOSE_DIAMOND" && normalizedField === "diamondTreatment") return CATEGORIES.DIAMOND_TREATMENT;
+  if (normalizedProfile === "LOOSE_DIAMOND" && normalizedField === "treatment") return CATEGORIES.DIAMOND_TREATMENT;
   if (normalizedProfile.includes("DIAMOND") && normalizedField === "tone") return CATEGORIES.DIAMOND_TONE;
   if (normalizedProfile.includes("DIAMOND") && normalizedField === "toneLevel") return CATEGORIES.DIAMOND_TONE_LEVEL;
   if (normalizedProfile.includes("DIAMOND") && normalizedField === "saturation") return CATEGORIES.DIAMOND_SATURATION;
@@ -197,7 +201,7 @@ async function resolveLooseReferences({ models, companyId, profile, looseDetails
   // value.  The current UI always sends ids; this branch protects existing
   // accepted callers while keeping the server as the authority.
   const fallbackFields = profile === "LOOSE_DIAMOND"
-    ? ["diamondType", "diamondColor", "clarity", "cut", "diamondShape", "diamondTreatment", "diamondOrigin", "diamondTone", "diamondToneLevel", "diamondSaturation"]
+    ? ["stoneName", "diamondType", "diamondColor", "clarity", "cut", "diamondShape", "diamondTreatment", "diamondOrigin", "diamondTone", "diamondToneLevel", "diamondSaturation"]
     : profile === "LOOSE_GEMSTONE"
     ? ["stoneName", "stoneType", "treatment", "shape", "color", "tone", "toneLevel", "saturation", "opticalEffect", "origin"]
     : profile === "LOOSE_PEARL"
@@ -214,13 +218,27 @@ async function resolveLooseReferences({ models, companyId, profile, looseDetails
     if (!match[0]) throw new ValidationError("PROFILE_MASTER_DATA_ACTIVE_VALUE_REQUIRED");
     refs.push({ field, category, master: serialize(match[0]) });
   }
-  const byCategory = new Map(refs.map((ref) => [ref.category, ref.master]));
-  const masterValue = (category, fallback) => byCategory.get(category)?.label ?? fallback;
+  const byCategory = new Map();
+  for (const ref of refs) {
+    const values = byCategory.get(ref.category) || [];
+    values.push(ref.master);
+    byCategory.set(ref.category, values);
+  }
+  const masterValue = (category, fallback) => {
+    const values = byCategory.get(category) || [];
+    return values.length > 1 ? values.map((row) => row.label).join(", ") : (values[0]?.label ?? fallback);
+  };
+  const masterValues = (category, fallback) => {
+    const values = (byCategory.get(category) || []).map((row) => row.label).filter(Boolean);
+    return values.length ? values : fallback;
+  };
   const details = Object.freeze({ ...looseDetails,
-    stoneName: masterValue(CATEGORIES.GEMSTONE_NAME, looseDetails.stoneName),
+    stoneName: masterValue(profile === "LOOSE_DIAMOND" ? CATEGORIES.DIAMOND_NAME : CATEGORIES.GEMSTONE_NAME, looseDetails.stoneName),
     diamondType: masterValue(profile === "LOOSE_DIAMOND" ? CATEGORIES.DIAMOND_TYPE : CATEGORIES.GEMSTONE_TYPE, looseDetails.diamondType),
-    treatment: masterValue(CATEGORIES.GEMSTONE_TREATMENT, looseDetails.treatment),
-    shape: masterValue(profile === "LOOSE_PEARL" ? CATEGORIES.PEARL_SHAPE : CATEGORIES.GEMSTONE_SHAPE, looseDetails.shape), color: masterValue(profile === "LOOSE_PEARL" ? CATEGORIES.PEARL_COLOR : CATEGORIES.GEMSTONE_COLOR, looseDetails.color),
+    treatment: masterValue(profile === "LOOSE_DIAMOND" ? CATEGORIES.DIAMOND_TREATMENT : CATEGORIES.GEMSTONE_TREATMENT, looseDetails.treatment),
+    shape: masterValue(profile === "LOOSE_PEARL" ? CATEGORIES.PEARL_SHAPE : profile === "LOOSE_DIAMOND" ? CATEGORIES.DIAMOND_SHAPE : CATEGORIES.GEMSTONE_SHAPE, looseDetails.shape),
+    color: masterValue(profile === "LOOSE_PEARL" ? CATEGORIES.PEARL_COLOR : profile === "LOOSE_DIAMOND" ? CATEGORIES.DIAMOND_COLOR : CATEGORIES.GEMSTONE_COLOR, looseDetails.color),
+    colors: profile === "LOOSE_DIAMOND" ? masterValues(CATEGORIES.DIAMOND_COLOR, looseDetails.color || []) : looseDetails.colors,
     tone: masterValue(profile === "LOOSE_DIAMOND" ? CATEGORIES.DIAMOND_TONE : CATEGORIES.GEMSTONE_TONE, looseDetails.tone),
     toneLevel: masterValue(profile === "LOOSE_DIAMOND" ? CATEGORIES.DIAMOND_TONE_LEVEL : CATEGORIES.GEMSTONE_TONE_LEVEL, looseDetails.toneLevel),
     saturation: masterValue(profile === "LOOSE_DIAMOND" ? CATEGORIES.DIAMOND_SATURATION : CATEGORIES.GEMSTONE_SATURATION, looseDetails.saturation),
@@ -236,7 +254,7 @@ async function persistAssetReferences({ models, companyId, assetId, references, 
   for (const ref of references) await models.sequelize.query(`INSERT INTO asset_profile_master_data_references
     (id,asset_id,company_id,category_key,master_data_id,value_snapshot,label_snapshot,created_at)
     VALUES (:id,:assetId,:companyId,:categoryKey,:masterDataId,:valueSnapshot,:labelSnapshot,CURRENT_TIMESTAMP)
-    ON CONFLICT (asset_id,category_key) DO NOTHING`, {
+    ON CONFLICT DO NOTHING`, {
     replacements: { id: `APMR-${crypto.randomUUID().replaceAll("-", "").slice(0, 25)}`, assetId, companyId, categoryKey: ref.category, masterDataId: ref.master.id, valueSnapshot: ref.master.value, labelSnapshot: ref.master.label }, transaction,
   });
 }

@@ -6,7 +6,7 @@ const CONDITION = Object.freeze({ REQUIRED: "REQUIRED", OPTIONAL: "OPTIONAL", NO
 
 const COMMON_OPTIONAL_FIELDS = Object.freeze(["goldColor", "brand", "model", "modelNumber", "supplierReference", "locationId", "rfid", "certificate", "attachments", "components"]);
 const LOOSE_DETAIL_CONTRACTS = Object.freeze({
-  LOOSE_DIAMOND: Object.freeze({ kind: "DIAMOND", required: ["stoneName", "diamondType", "carat", "color", "clarity", "shape"], caratUnit: "CT", measurement: Object.freeze({ field: "carat", unit: "CT", inputPrecision: 3, displayPrecision: 2, commercialRounding: "CIBJO_GIA_9_RULE", excessPrecision: "REJECT" }) }),
+  LOOSE_DIAMOND: Object.freeze({ kind: "DIAMOND", required: ["stoneName", "diamondType", "carat", "color", "clarity", "shape"], multiColor: true, caratUnit: "CT", measurement: Object.freeze({ field: "carat", unit: "CT", inputPrecision: 3, displayPrecision: 2, commercialRounding: "CIBJO_GIA_9_RULE", excessPrecision: "REJECT" }) }),
   LOOSE_GEMSTONE: Object.freeze({ kind: "GEMSTONE", required: ["stoneName", "carat"], caratUnit: "CT", measurement: Object.freeze({ field: "carat", unit: "CT", inputPrecision: 3, displayPrecision: 2, commercialRounding: "CIBJO_9_RULE", excessPrecision: "REJECT" }) }),
   LOOSE_PEARL: Object.freeze({ kind: "PEARL", required: ["totalPearlWeight"], weightUnit: "CT", pearlSizeUnit: "MM", measurement: Object.freeze({ field: "totalPearlWeight", unit: "CT", inputPrecision: 2, displayPrecision: 2, commercialRounding: "NONE", excessPrecision: "REJECT" }), pearlSize: Object.freeze({ unit: "MM", authority: "SERVER_MASTER_DATA", freeTextForNewRecords: false, automaticRounding: "NONE" }) }),
 });
@@ -15,7 +15,7 @@ const PROFILE_REGISTRY = Object.freeze({
   GOLD_BAR_24K: Object.freeze({ aliases: ["GOLD_BY_WEIGHT_24", "GOLD_BAR"], assetType: "gold-weight", family: "GOLD", condition: CONDITION.NOT_APPLICABLE, pricing: "BAR_CERTIFICATE_STRATEGY", required: ["description", "grossWeight", "karat", "purchaseCost"], optional: COMMON_OPTIONAL_FIELDS, weightApplicable: true, certificateSupported: true, componentsSupported: false, rfidAllowed: true, locationOptional: true, goldValuation: Object.freeze({ enabled: true, purchaseGoldRateRequired: true, currentGoldRateRequired: true, makingPerGramSupported: false, certificateCostsSupported: true, certificateOnlyVat: true }) }),
   GOLD_BY_PIECE: Object.freeze({ aliases: [], assetType: "gold-piece", family: "GOLD", condition: CONDITION.REQUIRED, pricing: "PIECE_MARKUP_STRATEGY", required: ["description", "grossWeight", "karat", "purchaseCost", "condition"], optional: COMMON_OPTIONAL_FIELDS, weightApplicable: true, certificateSupported: true, componentsSupported: true, rfidAllowed: true, locationOptional: true }),
   DIAMOND_JEWELLERY: Object.freeze({ aliases: [], assetType: "diamond", family: "DIAMOND", condition: CONDITION.OPTIONAL, pricing: "DIAMOND_PROFILE_STRATEGY", required: ["description", "grossWeight", "purchaseCost"], optional: COMMON_OPTIONAL_FIELDS, weightApplicable: true, certificateSupported: true, componentsSupported: true, rfidAllowed: true, locationOptional: true }),
-  LOOSE_DIAMOND: Object.freeze({ aliases: [], assetType: "diamond", family: "DIAMOND", condition: CONDITION.OPTIONAL, pricing: "LOOSE_ASSET_STRATEGY", required: ["description", "grossWeight", "purchaseCost"], optional: COMMON_OPTIONAL_FIELDS, weightApplicable: true, certificateSupported: true, componentsSupported: false, rfidAllowed: true, locationOptional: true, looseDetails: LOOSE_DETAIL_CONTRACTS.LOOSE_DIAMOND }),
+  LOOSE_DIAMOND: Object.freeze({ aliases: [], assetType: "diamond", family: "DIAMOND", condition: CONDITION.OPTIONAL, pricing: "LOOSE_ASSET_STRATEGY", required: ["description", "purchaseCost", "looseDetails"], optional: COMMON_OPTIONAL_FIELDS, weightApplicable: false, certificateSupported: true, componentsSupported: false, rfidAllowed: true, locationOptional: false, looseDetails: LOOSE_DETAIL_CONTRACTS.LOOSE_DIAMOND }),
   GEMSTONE_JEWELLERY: Object.freeze({ aliases: [], assetType: "gemstone", family: "GEMSTONE", condition: CONDITION.OPTIONAL, pricing: "GEMSTONE_PROFILE_STRATEGY", required: ["description", "grossWeight", "purchaseCost"], optional: COMMON_OPTIONAL_FIELDS, weightApplicable: true, certificateSupported: true, componentsSupported: true, rfidAllowed: true, locationOptional: true }),
   LOOSE_GEMSTONE: Object.freeze({ aliases: [], assetType: "gemstone", family: "GEMSTONE", condition: CONDITION.OPTIONAL, pricing: "LOOSE_ASSET_STRATEGY", required: ["description", "grossWeight", "purchaseCost"], optional: COMMON_OPTIONAL_FIELDS, weightApplicable: true, certificateSupported: true, componentsSupported: false, rfidAllowed: true, locationOptional: true, looseDetails: LOOSE_DETAIL_CONTRACTS.LOOSE_GEMSTONE }),
   PEARL_JEWELLERY: Object.freeze({ aliases: [], assetType: "pearl", family: "PEARL", condition: CONDITION.OPTIONAL, pricing: "PEARL_PROFILE_STRATEGY", required: ["description", "grossWeight", "purchaseCost"], optional: COMMON_OPTIONAL_FIELDS, weightApplicable: true, certificateSupported: true, componentsSupported: true, rfidAllowed: true, locationOptional: true }),
@@ -110,6 +110,10 @@ function describeLooseMeasurement(profile, looseDetails) {
   if (!contract || !looseDetails) return null;
   const measurement = contract.measurement;
   const measuredValue = looseDetails[measurement.field];
+  const colorValues = (value) => {
+    const values = Array.isArray(value) ? value : String(value || "").split(/[,|]/);
+    return Array.from(new Set(values.map((entry) => String(entry).trim()).filter(Boolean)));
+  };
   const result = {
     measuredField: measurement.field,
     measuredValue,
@@ -153,6 +157,10 @@ function normalizeLooseDetails(profile, input = {}) {
   if (!contract) return null;
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("INVENTORY_LOOSE_DETAILS_REQUIRED");
   const text = (value) => value === null || value === undefined || String(value).trim() === "" ? null : String(value).trim();
+  const colorValues = (value) => {
+    const values = Array.isArray(value) ? value : String(value || "").split(/[,|]/);
+    return Array.from(new Set(values.map((entry) => String(entry).trim()).filter(Boolean)));
+  };
   const positive = (value, field, maxPlaces) => {
     const parsed = maxPlaces === undefined ? decimal(value, field) : measurementDecimal(value, field, maxPlaces);
     if (!parsed || parsed.lte(0)) throw new Error(`INVENTORY_LOOSE_${field}_REQUIRED`);
@@ -168,7 +176,7 @@ function normalizeLooseDetails(profile, input = {}) {
     diamondType: text(input.diamondType || input.stoneType),
     carat: input.carat ?? input.stoneCaratWeight ?? null,
     totalPearlWeight: input.totalPearlWeight ?? input.weight ?? null,
-    treatment: text(input.treatment || input.treatmentType), color: text(input.color || input.stoneColor),
+    treatment: text(input.treatment || input.treatmentType), color: colorValues(input.color ?? input.stoneColor),
     tone: text(input.tone || input.stoneTone), toneLevel: text(input.toneLevel || input.toneLevels),
     saturation: text(input.saturation || input.saturationLevels), clarity: text(input.clarity), cut: text(input.cut),
     shape: text(input.shape || input.stoneShape), opticalEffect: text(input.opticalEffect || input.stoneOpticalEffect),
@@ -181,8 +189,9 @@ function normalizeLooseDetails(profile, input = {}) {
   for (const field of contract.required) {
     if (field === "carat") result.carat = positive(result.carat, "CARAT", contract.measurement.inputPrecision);
     else if (field === "totalPearlWeight") result.totalPearlWeight = positive(result.totalPearlWeight, "TOTAL_PEARL_WEIGHT", contract.measurement.inputPrecision);
-    else if (!result[field]) throw new Error(`INVENTORY_LOOSE_${field.toUpperCase()}_REQUIRED`);
+    else if (field === "color" ? !result.color.length : !result[field]) throw new Error(`INVENTORY_LOOSE_${field.toUpperCase()}_REQUIRED`);
   }
+  if (canonical === "LOOSE_DIAMOND" && result.color.length === 0) throw new Error("INVENTORY_LOOSE_COLOR_REQUIRED");
   return Object.freeze(result);
 }
 

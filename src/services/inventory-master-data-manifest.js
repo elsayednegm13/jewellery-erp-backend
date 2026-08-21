@@ -6,7 +6,7 @@ const pearlSizeMasterData = require("./pearl-size-master-data.service");
 const profileMasterDataService = require("./profile-master-data.service");
 const { V1_PROFILE_MASTER_DATA_ROWS } = require("./inventory-master-data-baseline");
 
-const CANONICAL_DATASET_VERSION = 2;
+const CANONICAL_DATASET_VERSION = 3;
 const DATASET_ID = "INVENTORY_REFERENCE_MASTER_DATA";
 const FINAL_PROFILES = Object.freeze([
   "GOLD_BY_WEIGHT_JEWELLERY", "GOLD_BAR_24K", "GOLD_BY_PIECE",
@@ -67,6 +67,15 @@ const R1_PROFILE_MASTER_DATA_ROWS = Object.freeze([
   ...rows("GEMSTONE_SETTING", STONE_SETTINGS, GEM_JEWELLERY_ONLY, "Gem reference"),
 ]);
 
+const R2_PROFILE_MASTER_DATA_ROWS = Object.freeze([
+  ...rows("DIAMOND_NAME", ["Diamond"], ["LOOSE_DIAMOND"], "Loose Diamond client authority + FINAL_OWNER_AUTHORITY"),
+]);
+
+const CURRENT_PROFILE_MASTER_DATA_ROWS = Object.freeze([
+  ...R1_PROFILE_MASTER_DATA_ROWS,
+  ...R2_PROFILE_MASTER_DATA_ROWS,
+]);
+
 const V1_PROFILE_MASTER_DATA_MANIFEST_ROWS = Object.freeze(V1_PROFILE_MASTER_DATA_ROWS.map((row) => ({
   datasetId: DATASET_ID,
   version: 1,
@@ -91,7 +100,7 @@ const DATASET_MANIFEST = Object.freeze({
   barcodeInventoryCodes: DEFAULT_BARCODE_INVENTORY_CODES,
   barcodeItemCodes: DEFAULT_BARCODE_ITEM_CODES,
   pearlSizes: pearlSizeMasterData.INITIAL_VALUES.map((value) => value.toFixed(1)),
-  profileMasterDataRows: R1_PROFILE_MASTER_DATA_ROWS,
+  profileMasterDataRows: CURRENT_PROFILE_MASTER_DATA_ROWS,
   gemstoneTreatmentInitialValues: Object.freeze([]),
 });
 
@@ -121,6 +130,8 @@ module.exports = {
   STONE_POSITIONS,
   STONE_SETTINGS,
   R1_PROFILE_MASTER_DATA_ROWS,
+  R2_PROFILE_MASTER_DATA_ROWS,
+  CURRENT_PROFILE_MASTER_DATA_ROWS,
   V1_PROFILE_MASTER_DATA_ROWS,
   V1_PROFILE_MASTER_DATA_MANIFEST_ROWS,
   DATASET_MANIFEST,

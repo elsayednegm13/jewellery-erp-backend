@@ -188,13 +188,16 @@ async function generateBarcodeForAsset({
   // A configured inventory code can intentionally omit a default item code.
   // In that case select the first active compatible item code from the same
   // Company configuration; never invent a code in a workflow adapter.
+  const normalizedProfile = String(inventoryProfile || "").trim().toUpperCase();
+  const isLooseDiamond = normalizedProfile === "LOOSE_DIAMOND";
   const configuredFallbackItem = settings.itemCodes.find((row) => {
     const allowed = Array.isArray(row.allowedInventoryCodes) ? row.allowedInventoryCodes : [];
     return row.isActive && (!allowed.length || allowed.includes(inventory.code));
   });
-  const effectiveItemCode = validateItemCode(
-    itemCode || inventory.defaultItemCode || configuredFallbackItem?.code || ""
-  );
+  const requestedLooseItem = itemCode ? validateItemCode(itemCode) : null;
+  if (isLooseDiamond && requestedInventory && requestedInventory !== "DD") throw new ValidationError("LOOSE_DIAMOND_INVENTORY_CODE_MUST_BE_DD");
+  if (isLooseDiamond && requestedLooseItem && requestedLooseItem !== "LOS") throw new ValidationError("LOOSE_DIAMOND_ITEM_CODE_MUST_BE_LOS");
+  const effectiveItemCode = validateItemCode(isLooseDiamond ? "LOS" : (itemCode || inventory.defaultItemCode || configuredFallbackItem?.code || ""));
   const item = settings.itemCodes.find((row) => row.code === effectiveItemCode);
   if (!item || !item.isActive) throw new ValidationError("The selected item barcode code is missing or inactive.");
   const allowed = Array.isArray(item.allowedInventoryCodes) ? item.allowedInventoryCodes : [];
@@ -202,7 +205,7 @@ async function generateBarcodeForAsset({
     throw new ValidationError(`Item code ${item.code} is not allowed for inventory code ${inventory.code}.`);
   }
 
-  const isLoose = /loose/i.test(String(inventorySubtype || "")) || ["LOOSE_DIAMOND", "LOOSE_GEMSTONE", "LOOSE_PEARL"].includes(String(inventoryProfile || "").trim().toUpperCase());
+  const isLoose = /loose/i.test(String(inventorySubtype || "")) || ["LOOSE_DIAMOND", "LOOSE_GEMSTONE", "LOOSE_PEARL"].includes(normalizedProfile);
   const karatCode = resolveKaratCodeForProfile({ profile: inventoryProfile, karat, defaultKaratCode: inventory.defaultKaratCode });
   const hasKarat = Boolean(karatCode);
   if (inventory.requiresKarat && !hasKarat && !inventory.defaultKaratCode) {
