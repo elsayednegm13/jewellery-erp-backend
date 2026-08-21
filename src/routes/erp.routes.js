@@ -8543,7 +8543,7 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
           // Recoverable V2 input VAT is a tax receivable, not Asset book cost.
           // The immutable purchase revision retains the gross source evidence;
           // the operational Asset/COGS cost remains the canonical net basis.
-          const preTaxV2Piece = v2Piece?.profile === "LOOSE_DIAMOND" || v2Piece?.profile === "GEMSTONE_JEWELLERY";
+          const preTaxV2Piece = ["LOOSE_DIAMOND", "LOOSE_GEMSTONE", "LOOSE_PEARL", "GEMSTONE_JEWELLERY"].includes(v2Piece?.profile);
           const effectiveCost = v2Piece
             ? (preTaxV2Piece ? Number(v2Piece.purchaseCost) : (isRecoverableSnap && !isRcmSnap ? Number(v2Piece.purchaseCost) - Number(v2Piece.vat?.vatAmount || 0) : v2Piece.purchaseCost))
             : capUnitCost;

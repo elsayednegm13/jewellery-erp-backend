@@ -1,0 +1,11 @@
+{
+  "localeProof": ["ar", "en"],
+  "profile": "LOOSE_GEMSTONE",
+  "profilePreview": "READY",
+  "sharedPreview": "READY",
+  "synthetic": {"stoneName": "Ruby", "carat": "2.500 CT", "derivedGrams": "0.50000000", "purchaseCost": "5000.00000000", "additionalCost": "200.00000000", "currentStoneValue": "6200.00000000", "sellingPrice": "8000.00000000"},
+  "tax": {"rate": "14", "purchaseVat": "728.00000000", "purchaseTotal": "5928.00000000", "currentVat": "868.00000000", "currentTotal": "7068.00000000"},
+  "receiveButtonEnabled": true,
+  "technicalConsoleErrors": 0,
+  "finalReceiveSentDuringPreview": false
+}

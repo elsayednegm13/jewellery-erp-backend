@@ -190,6 +190,7 @@ async function generateBarcodeForAsset({
   // Company configuration; never invent a code in a workflow adapter.
   const normalizedProfile = String(inventoryProfile || "").trim().toUpperCase();
   const isLooseDiamond = normalizedProfile === "LOOSE_DIAMOND";
+  const isLooseGemstone = normalizedProfile === "LOOSE_GEMSTONE";
   const configuredFallbackItem = settings.itemCodes.find((row) => {
     const allowed = Array.isArray(row.allowedInventoryCodes) ? row.allowedInventoryCodes : [];
     return row.isActive && (!allowed.length || allowed.includes(inventory.code));
@@ -197,7 +198,9 @@ async function generateBarcodeForAsset({
   const requestedLooseItem = itemCode ? validateItemCode(itemCode) : null;
   if (isLooseDiamond && requestedInventory && requestedInventory !== "DD") throw new ValidationError("LOOSE_DIAMOND_INVENTORY_CODE_MUST_BE_DD");
   if (isLooseDiamond && requestedLooseItem && requestedLooseItem !== "LOS") throw new ValidationError("LOOSE_DIAMOND_ITEM_CODE_MUST_BE_LOS");
-  const effectiveItemCode = validateItemCode(isLooseDiamond ? "LOS" : (itemCode || inventory.defaultItemCode || configuredFallbackItem?.code || ""));
+  if (isLooseGemstone && requestedInventory && requestedInventory !== "GS") throw new ValidationError("LOOSE_GEMSTONE_INVENTORY_CODE_MUST_BE_GS");
+  if (isLooseGemstone && requestedLooseItem && requestedLooseItem !== "LOS") throw new ValidationError("LOOSE_GEMSTONE_ITEM_CODE_MUST_BE_LOS");
+  const effectiveItemCode = validateItemCode(isLooseDiamond || isLooseGemstone ? "LOS" : (itemCode || inventory.defaultItemCode || configuredFallbackItem?.code || ""));
   const item = settings.itemCodes.find((row) => row.code === effectiveItemCode);
   if (!item || !item.isActive) throw new ValidationError("The selected item barcode code is missing or inactive.");
   const allowed = Array.isArray(item.allowedInventoryCodes) ? item.allowedInventoryCodes : [];

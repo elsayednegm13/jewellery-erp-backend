@@ -31,7 +31,10 @@ function calculatePurchase({ profile, input = {}, configuredVatRate = null }) {
   const base = decimal(explicitPurchase ?? legacyStoneCost, "PURCHASE_COST", { required: true });
   const additional = profile === "LOOSE_GEMSTONE" ? (decimal(input.additionalCost ?? 0, "ADDITIONAL_COST") || new Decimal(0)) : new Decimal(0);
   const vat = resolveVat({ requestedRate: input.vatRate, configuredRate: configuredVatRate });
-  const vatAmount = base.times(vat.rate).div(100);
+  // Loose Gemstone's optional aggregate Additional Cost is part of the
+  // pre-tax acquisition base. VAT must be applied once to that same base;
+  // leaving it out here creates a preview/PO/accounting mismatch.
+  const vatAmount = base.plus(additional).times(vat.rate).div(100);
   return Object.freeze({ purchaseBaseCost: fixed(base), additionalCost: fixed(additional), vatRate: vat.rate, vatRateSource: vat.source, vatBase: fixed(base.plus(additional)), vatAmount: fixed(vatAmount), totalPurchaseCost: fixed(base.plus(additional).plus(vatAmount)), purchasePricePreTax: fixed(base), stoneCostCanonical: fixed(base) });
 }
 function calculateCurrent({ profile, input = {}, configuredVatRate = null }) {

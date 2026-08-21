@@ -49,7 +49,7 @@ const PROFILE_CATEGORIES = Object.freeze({
     CATEGORIES.GEMSTONE_SETTING, CATEGORIES.CERTIFICATE_AUTHORITY,
   ]),
   LOOSE_GEMSTONE: Object.freeze([
-    CATEGORIES.GEMSTONE_NAME, CATEGORIES.GEMSTONE_TYPE, CATEGORIES.GEMSTONE_TREATMENT,
+    CATEGORIES.GEMSTONE_NAME, CATEGORIES.GEMSTONE_TYPE,
     CATEGORIES.GEMSTONE_SHAPE, CATEGORIES.GEMSTONE_COLOR, CATEGORIES.GEMSTONE_TONE,
     CATEGORIES.GEMSTONE_TONE_LEVEL, CATEGORIES.GEMSTONE_SATURATION,
     CATEGORIES.GEMSTONE_OPTICAL_EFFECT, CATEGORIES.GEMSTONE_ORIGIN, CATEGORIES.CERTIFICATE_AUTHORITY,
@@ -207,7 +207,7 @@ async function resolveLooseReferences({ models, companyId, profile, looseDetails
   const fallbackFields = profile === "LOOSE_DIAMOND"
     ? ["stoneName", "diamondType", "diamondColor", "clarity", "cut", "diamondShape", "diamondTreatment", "diamondOrigin", "diamondTone", "diamondToneLevel", "diamondSaturation"]
     : profile === "LOOSE_GEMSTONE"
-    ? ["stoneName", "stoneType", "treatment", "shape", "color", "tone", "toneLevel", "saturation", "opticalEffect", "origin"]
+    ? ["stoneName", "stoneType", "shape", "color", "tone", "toneLevel", "saturation", "opticalEffect", "origin"]
     : profile === "LOOSE_PEARL"
       ? ["pearlType", "pearlColor", "overtone", "orient", "pearlShape", "luster", "surfaceQuality", "nacreQuality", "pearlOrigin", "description"]
       : [];

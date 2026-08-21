@@ -141,6 +141,7 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
   const profile = policy.normalizeProfile(piece.profile || piece.inventoryProfile);
   const contract = policy.requireProfile(profile);
   const isLooseDiamond = profile === "LOOSE_DIAMOND";
+  const isLooseGemstone = profile === "LOOSE_GEMSTONE";
   const condition = policy.validateCondition(profile, piece.condition);
   const description = String(piece.description || piece.name || "").trim();
   if (!description) throw new Error("INVENTORY_V2_DESCRIPTION_REQUIRED");
@@ -171,7 +172,7 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
 
   const grossWeight = diamondPiece
     ? Number(diamondPiece.grossWeight)
-    : isLooseDiamond
+    : (isLooseDiamond || isLooseGemstone)
       ? Number(new Decimal(String(looseDetails.carat)).times("0.20").toFixed(8))
       : finiteOrNull(piece.grossWeight, "GROSS_WEIGHT");
   if (profile === "GOLD_BY_PIECE" && !Object.prototype.hasOwnProperty.call(piece, "stoneWeight")) {
@@ -180,7 +181,7 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
   const stoneWeight = diamondPiece ? Number(diamondPiece.stoneWeight) : finiteOrNull(piece.stoneWeight ?? 0, "STONE_WEIGHT");
   const karat = diamondPiece ? Number(diamondPiece.karat) : (isLooseDiamond ? null : finiteOrNull(piece.karat, "KARAT"));
   let weights = null;
-  if (!isLooseDiamond && (grossWeight === null || grossWeight <= 0)) throw new Error("INVENTORY_V2_GROSS_WEIGHT_REQUIRED");
+  if (!isLooseDiamond && !isLooseGemstone && (grossWeight === null || grossWeight <= 0)) throw new Error("INVENTORY_V2_GROSS_WEIGHT_REQUIRED");
   if (goldProfiles.has(profile)) {
     if (grossWeight === null || karat === null) throw new Error("INVENTORY_V2_GOLD_WEIGHT_FACTS_REQUIRED");
     weights = policy.calculateGoldWeights({ grossWeight, stoneWeight, karat });
@@ -207,7 +208,7 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
   const loosePurchase = looseProfileFinanceService.calculatePurchase({ profile, input: piece.looseFinancial || piece, configuredVatRate: context.vatRateDefault });
   const purchaseCost = specializedValuation
     ? Number(specializedValuation.purchase.totalPurchaseCost)
-    : loosePurchase ? Number(loosePurchase.purchaseBaseCost) : finiteOrNull(piece.purchaseCost ?? piece.unitCost, "PURCHASE_COST");
+    : loosePurchase ? Number(loosePurchase.vatBase) : finiteOrNull(piece.purchaseCost ?? piece.unitCost, "PURCHASE_COST");
   if (purchaseCost === null || purchaseCost < 0) {
     throw new ValidationError(
       "purchaseCost is required and must be a non-negative economic evidence value.",
