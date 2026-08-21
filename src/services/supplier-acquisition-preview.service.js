@@ -67,7 +67,11 @@ function calculateTotals({ normalizedItems = [], body = {}, settings = {}, inven
     isRecoverable = Boolean(body.isRecoverable ?? settings.purchaseVatRecoverableDefault ?? true);
     const exactInputVat = pieceVats.reduce((sum, vat) => sum.plus(vat.vatAmount || 0), new Decimal(0));
     inputVatAmount = finalProfile ? scale8(exactInputVat) : round2(exactInputVat);
-    const hasPreTaxLoose = normalizedItems.some((item) => (item.v2Pieces || []).some((piece) => ["LOOSE_DIAMOND", "LOOSE_GEMSTONE", "LOOSE_PEARL"].includes(piece.profile)));
+    // Gem Stone Jewellery, like the loose profile contracts, submits a
+    // canonical pre-tax acquisition base. The explicit piece VAT is then
+    // added once to the document total; it must never be treated as already
+    // included in purchaseCost.
+    const hasPreTaxLoose = normalizedItems.some((item) => (item.v2Pieces || []).some((piece) => ["GEMSTONE_JEWELLERY", "LOOSE_DIAMOND", "LOOSE_GEMSTONE", "LOOSE_PEARL"].includes(piece.profile)));
     if (hasPreTaxLoose) goodsTotal = scale8(new Decimal(goodsTotal).plus(inputVatAmount));
     taxBase = finalProfile ? scale8(new Decimal(goodsTotal).minus(inputVatAmount)) : round2(new Decimal(goodsTotal).minus(inputVatAmount));
     total = goodsTotal;

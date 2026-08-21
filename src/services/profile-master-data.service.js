@@ -194,7 +194,11 @@ async function resolveLooseReferences({ models, companyId, profile, looseDetails
     if (rowId === null || rowId === undefined || rowId === "") continue;
     const category = categoryForField(profile, field);
     if (!category || !allowed.has(category)) throw new ValidationError("PROFILE_MASTER_DATA_WRONG_CATEGORY");
-    refs.push({ field, category, master: await requireActive({ models, companyId, category, id: rowId, transaction }) });
+    const rowIds = Array.isArray(rowId) ? rowId : [rowId];
+    if (!rowIds.length) continue;
+    for (const valueId of rowIds) {
+      refs.push({ field, category, master: await requireActive({ models, companyId, category, id: valueId, transaction }) });
+    }
   }
   // Older compatibility callers may still send source labels.  Resolve an
   // exact active master row, never accept arbitrary text as a durable master

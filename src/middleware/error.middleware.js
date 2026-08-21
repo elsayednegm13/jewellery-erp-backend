@@ -58,13 +58,16 @@ const errorMiddleware = (err, req, res, next) => {
     fieldErrors = {};
   }
 
-  logger.error("[Request Error]", {
+  logger.error(`[Request Error] code=${errorCode} message=${message} fields=${JSON.stringify(fieldErrors || {})}`, {
     requestId,
     method: req.method,
     path: req.path,
     statusCode,
     errorCode,
     errorName: err?.name || "Error",
+    errorMessage: message,
+    stack: err?.stack || null,
+    fieldErrors,
   });
 
   res.status(statusCode).json(canonicalErrorPayload({

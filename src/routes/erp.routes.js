@@ -32,6 +32,7 @@ const barcodeIdentityService = require("../services/barcode-identity.service");
 const pearlSizeMasterDataService = require("../services/pearl-size-master-data.service");
 const profileMasterDataService = require("../services/profile-master-data.service");
 const diamondJewelleryProfileService = require("../services/diamond-jewellery-profile.service");
+const gemStoneJewelleryProfileService = require("../services/gem-stone-jewellery-profile.service");
 const inventoryMasterPolicy = require("../services/inventory-master-policy.service");
 const inventoryV2Runtime = require("../services/inventory-v2-runtime.service");
 const inventoryMasterDataBootstrapService = require("../services/inventory-master-data-bootstrap.service");
@@ -43,6 +44,8 @@ const supplierReceiveContractService = require("../services/supplier-receive-con
 const goldSalePricingService = require("../services/gold-sale-pricing.service");
 const goldByPieceProfileService = require("../services/gold-by-piece-profile.service");
 const assetMetadataService = require("../services/asset-metadata.service");
+const assetSellingPriceService = require("../services/asset-selling-price.service");
+const inventoryV2PriceMappingService = require("../services/inventory-v2-price-mapping.service");
 const { calculateMakingChargeTotal, calculateGoldByWeightMakingTotal } = goldSalePricingService;
 const inventoryAuditCanonicalService = require("../services/inventory-audit-canonical.service");
 const reservationService = require("../services/reservation.service");
@@ -83,6 +86,12 @@ async function loadDiamondMasterData(companyId, transaction = null) {
   ]));
   const masters = await profileMasterDataService.list({ models, companyId, categories, activeOnly: true, transaction });
   return diamondJewelleryProfileService.masterIndex(masters);
+}
+
+async function loadGemStoneMasterData(companyId, transaction = null) {
+  const categories = profileMasterDataService.categoriesForProfile(gemStoneJewelleryProfileService.PROFILE);
+  const masters = await profileMasterDataService.list({ models, companyId, categories, activeOnly: true, transaction });
+  return gemStoneJewelleryProfileService.masterIndex(masters);
 }
 
 const reservationPerms = {
@@ -5261,9 +5270,14 @@ router.post("/inventory-v2/receive-preview", authMiddleware, requireAnyBusinessP
     rawItems = canonicalLocations.items;
     const vatRateDefault = await goldValuationService.resolveConfiguredVatRate({ models, companyId: req.companyId });
     const diamondMasterData = await loadDiamondMasterData(req.companyId);
+    const gemMasterData = await loadGemStoneMasterData(req.companyId);
     const pieceSets = inventoryV2Runtime.requireV2ReceiptPieces(rawItems, { vatRateDefault, diamondMasterData });
-    const normalizedItems = rawItems.map((item, index) => supplierAcquisitionPreviewService.normalizeItem(item, pieceSets[index]));
     const settings = await settingsService.getCompanySettings(req.companyId);
+    const companyTaxPolicy = await companyTaxPolicyService.getCompanyTaxPolicy(req.companyId);
+    const calculatedPieceSets = await Promise.all(pieceSets.map((pieces) => Promise.all(pieces.map(async (piece) => piece.profile === gemStoneJewelleryProfileService.PROFILE
+      ? gemStoneJewelleryProfileService.calculateReceiptPiece({ companyId: req.companyId, input: piece, settings, taxPolicy: companyTaxPolicy, masterData: gemMasterData, requireSalePrice: false })
+      : piece))));
+    const normalizedItems = rawItems.map((item, index) => supplierAcquisitionPreviewService.normalizeItem(item, calculatedPieceSets[index]));
     const preview = supplierAcquisitionPreviewService.previewFromPieces({ normalizedItems, body, settings, inventoryV2Target: true });
     return res.status(200).json({ success: true, data: preview, readOnly: true });
   } catch (error) {
@@ -5410,6 +5424,36 @@ router.get("/inventory-v2/assets/:id", authMiddleware, requireBusinessPermission
     ].sort((left, right) => new Date(right.occurredAt || 0).getTime() - new Date(left.occurredAt || 0).getTime());
     return res.status(200).json({ success: true, data: { asset: asset.toJSON(), origin: origin[0] || null, currentPurchaseCost: cost[0] || null, currentValuation: valuation[0] || null, goldDetails: goldDetails[0] || null, pricingPolicy: pricing[0] || null, components: looseDetailComponent ? components.filter((component) => component.id !== looseDetailComponent.id) : components, looseDetails: looseDetails ? { ...looseDetails, measurement: looseMeasurement, masterDataReferences: profileMasterReferences } : null, rfidAssignments: rfid, certificates, attachments, history, movements, timeline, documentLinks: links, salePricing, returnReviews, legalActions: Array.from(inventoryV2Runtime.TRANSITIONS[asset.operationalStatus] || []) } });
   } catch (error) { return next(error); }
+});
+
+// Dedicated operational selling-price command. Price is not part of generic
+// metadata editing because it is the POS/Sale/Return/Exchange authority.
+router.patch("/inventory-v2/assets/:id/selling-price", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true, operation: assetSellingPriceService.PRICE_EDIT_OPERATION }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const body = req.body || {};
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"] || req.branchId, { required: true });
+    const idempotencyKey = requireInventoryV2IdempotencyKey(req);
+    const scope = "inventory-v2.asset-selling-price";
+    const requestHash = idempotencyService.hashRequest(scope, body, { assetId: req.params.id, branchId });
+    const claim = await idempotencyService.claim({ models, companyId: req.companyId, scope, key: idempotencyKey, requestHash, transaction });
+    if (!claim.claimed) {
+      await transaction.rollback();
+      const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope, key: idempotencyKey, requestHash });
+      if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+      return res.status(prior.statusCode || 409).json({ success: false, message: prior.message, code: "IDEMPOTENCY_CONFLICT" });
+    }
+    const asset = await findScopedInventoryV2Asset(req, req.params.id, branchId, transaction, { lock: true });
+    const result = await assetSellingPriceService.updateSellingPrice({ models, asset, body, req, transaction });
+    const responseBody = { success: true, replayed: false, data: { assetId: asset.id, branchId, ...result } };
+    await idempotencyService.succeed({ request: claim.request, statusCode: 200, responseBody, transaction });
+    await transaction.commit();
+    if (result.changed) emitEntityChanged(req.companyId, { entity: "Asset", action: "selling_price_changed", id: asset.id, branchId });
+    return res.status(200).json(responseBody);
+  } catch (error) {
+    if (!transaction.finished) await transaction.rollback();
+    return next(error);
+  }
 });
 
 const RETURN_REVIEW_OUTCOMES = new Set(["GOOD", "NEEDS_INSPECTION", "DAMAGED", "BROKEN", "NEEDS_REPAIR"]);
@@ -6273,7 +6317,7 @@ async function executeInventoryV2Transformation(req, res, next, orderType) {
         id: inventoryV2Runtime.newId("ASTV2MFG"), companyId: req.companyId, name: piece.name || `${orderType === "melting" ? "Melt" : "Manufactured"} output ${ordinal + 1}`,
         type: piece.type, category: piece.category || "V2 transformation", karat: piece.karat, purity: piece.weights?.purityRatio ?? null,
         grossWeight: piece.grossWeight, netWeight: piece.weights?.netGoldWeight ?? piece.grossWeight, goldWeight: piece.weights?.netGoldWeight ?? piece.grossWeight,
-        price: piece.salePrice ?? piece.purchaseCost, cost: piece.purchaseCost, branch: branch.name, branchId, location: piece.location || "", status: "available", ...barcodeIdentity,
+        price: inventoryV2PriceMappingService.resolveAssetSellingPrice({ piece, fallback: piece.purchaseCost }), cost: piece.purchaseCost, branch: branch.name, branchId, location: piece.location || "", status: "available", ...barcodeIdentity,
         inventorySubtype: piece.inventorySubtype || inventoryV2Runtime.legacySubtypeForProfile(piece.profile), metadataSchemaVersion: piece.metadataSchemaVersion || 1, metadata: { ...(piece.metadata || {}), physicalEvidence: piece.physicalEvidence },
         source: orderType === "melting" ? "inventory_v2_melt_output" : "inventory_v2_manufacturing_output", manufacturingOrderId: orderId,
         inventoryProfile: piece.profile, operationalStatus: "AVAILABLE", condition: piece.condition, conditionClassification: piece.condition === null ? "V2_PROFILE_NULLABLE" : "V2_EXPLICIT", tagState: "PENDING", tagStateClassification: "V2_TRANSFORMATION_INITIAL", description: piece.description || null, brand: piece.brand || null, model: piece.model || null, modelNumber: piece.modelNumber || null, purchaseDate: now.toISOString().slice(0, 10), createdBy: context.actorId || null, updatedBy: context.actorId || null,
@@ -6342,7 +6386,7 @@ router.post("/inventory-v2/cgp-items/:id/disposition", authMiddleware, requireBu
       const barcodeIdentity = await barcodeIdentityService.generateBarcodeForAsset({ companyId: req.companyId, assetType: piece.type, inventoryCode: piece.inventoryCode, itemCode: piece.itemCode, karat: piece.karat, inventorySubtype: piece.inventorySubtype || inventoryV2Runtime.legacySubtypeForProfile(piece.profile), transaction });
       asset = await models.Asset.create({
         id: inventoryV2Runtime.newId("ASTV2CGP"), companyId: req.companyId, name: piece.name || `CGP conversion ${item.id}`, type: piece.type, category: piece.category || "CGP conversion", karat: piece.karat, purity: piece.weights?.purityRatio ?? null,
-        grossWeight: piece.grossWeight, netWeight: piece.weights?.netGoldWeight ?? piece.grossWeight, goldWeight: piece.weights?.netGoldWeight ?? piece.grossWeight, price: piece.salePrice ?? piece.purchaseCost, cost: piece.purchaseCost,
+        grossWeight: piece.grossWeight, netWeight: piece.weights?.netGoldWeight ?? piece.grossWeight, goldWeight: piece.weights?.netGoldWeight ?? piece.grossWeight, price: inventoryV2PriceMappingService.resolveAssetSellingPrice({ piece, fallback: piece.purchaseCost }), cost: piece.purchaseCost,
         branch: branch.name, branchId, location: piece.location || "", status: "available", ...barcodeIdentity, inventorySubtype: piece.inventorySubtype || inventoryV2Runtime.legacySubtypeForProfile(piece.profile), metadataSchemaVersion: piece.metadataSchemaVersion || 1, metadata: { ...(piece.metadata || {}), physicalEvidence: piece.physicalEvidence, cgpItemId: item.id }, source: "inventory_v2_cgp_conversion",
         inventoryProfile: piece.profile, operationalStatus: "AVAILABLE", condition: piece.condition, conditionClassification: piece.condition === null ? "V2_PROFILE_NULLABLE" : "V2_EXPLICIT", tagState: "PENDING", tagStateClassification: "V2_CGP_CONVERSION_INITIAL", purchaseDate: context.occurredAt.toISOString().slice(0, 10), createdBy: context.actorId || null, updatedBy: context.actorId || null,
       }, { transaction });
@@ -7685,13 +7729,15 @@ router.get("/pos/search", authMiddleware, requireAnyBusinessPermission(["pos.vie
         return { value: Number(asset.price || 0), unavailable: false };
       }
       try {
-        const sellingGoldRate = await goldSalePricingService.resolveCanonicalSellingGoldRate({
-          models,
-          companyId: req.companyId,
-          currency: "AED",
-          karat: asset.karat,
-          cache: pricingCache,
-        });
+        const sellingGoldRate = goldSalePricingService.isGoldSaleProfile(profile)
+          ? await goldSalePricingService.resolveCanonicalSellingGoldRate({
+            models,
+            companyId: req.companyId,
+            currency: "AED",
+            karat: asset.karat,
+            cache: pricingCache,
+          })
+          : null;
         const pricing = await goldSalePricingService.calculateGoldSalePriceForAsset({
           asset,
           models,
@@ -8146,6 +8192,7 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       try {
         const diamondMasterData = await loadDiamondMasterData(req.companyId, t);
         rawPieceSets = inventoryV2Runtime.requireV2ReceiptPieces(normalizedItems, { vatRateDefault, diamondMasterData });
+        const gemMasterData = await loadGemStoneMasterData(req.companyId, t);
         rawPieceSets = await Promise.all(rawPieceSets.map(async (pieces) => Promise.all(pieces.map(async (diamondPiece) => {
           if (diamondPiece.profile !== diamondJewelleryProfileService.PROFILE) return diamondPiece;
           const diamondPreview = await diamondJewelleryProfileService.calculatePreview({
@@ -8186,6 +8233,10 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
               totalValue: current.currentValuationTotalTaxInclusive,
             },
           });
+        }))));
+        rawPieceSets = await Promise.all(rawPieceSets.map(async (pieces) => Promise.all(pieces.map(async (piece) => {
+          if (piece.profile !== gemStoneJewelleryProfileService.PROFILE) return piece;
+          return gemStoneJewelleryProfileService.calculateReceiptPiece({ companyId: req.companyId, input: piece, settings, taxPolicy: companyTaxPolicy, masterData: gemMasterData, requireSalePrice: true });
         }))));
       } catch (error) {
         throw new ValidationError(error.message || "Inventory V2 receipt piece validation failed.");
@@ -8492,9 +8543,9 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
           // Recoverable V2 input VAT is a tax receivable, not Asset book cost.
           // The immutable purchase revision retains the gross source evidence;
           // the operational Asset/COGS cost remains the canonical net basis.
-          const looseDiamondPiece = v2Piece?.profile === "LOOSE_DIAMOND";
+          const preTaxV2Piece = v2Piece?.profile === "LOOSE_DIAMOND" || v2Piece?.profile === "GEMSTONE_JEWELLERY";
           const effectiveCost = v2Piece
-            ? (looseDiamondPiece ? Number(v2Piece.purchaseCost) : (isRecoverableSnap && !isRcmSnap ? Number(v2Piece.purchaseCost) - Number(v2Piece.vat?.vatAmount || 0) : v2Piece.purchaseCost))
+            ? (preTaxV2Piece ? Number(v2Piece.purchaseCost) : (isRecoverableSnap && !isRcmSnap ? Number(v2Piece.purchaseCost) - Number(v2Piece.vat?.vatAmount || 0) : v2Piece.purchaseCost))
             : capUnitCost;
           const assetSnap = await governSnapshot(goldCostService.buildGoldCostSnapshot({
             goldCostSource, weight: v2Piece?.weights?.netGoldWeight ?? perUnitGoldWeight, karat: v2Piece?.karat ?? itemKarat,
@@ -8524,8 +8575,8 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
             purity: v2Piece?.weights?.purityRatio ?? item.purity ?? null,
             grossWeight: v2Piece?.grossWeight ?? item.weightPerUnit,
             netWeight: v2Piece?.weights?.netGoldWeight ?? v2Piece?.grossWeight ?? item.netWeight,
-            goldWeight: looseDiamondPiece ? null : (v2Piece?.weights?.netGoldWeight ?? v2Piece?.grossWeight ?? item.goldWeight ?? item.netWeight),
-            price: v2Piece?.salePrice ?? item.price,
+            goldWeight: v2Piece?.profile === "LOOSE_DIAMOND" ? null : (v2Piece?.weights?.netGoldWeight ?? v2Piece?.grossWeight ?? item.goldWeight ?? item.netWeight),
+            price: inventoryV2PriceMappingService.resolveAssetSellingPrice({ piece: v2Piece, item }),
             // Phase 15G — capitalised book cost (legacy unless non-recoverable VAT).
             cost: effectiveCost,
             branch: branch.name,

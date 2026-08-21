@@ -354,7 +354,7 @@ async function persistReceiptEvidence({ models, transaction, asset, poItem, piec
     replacements: {
       id: revisionId, assetId: asset.id, companyId: context.companyId, branchId: context.branchId, currency: context.currency || null,
       purchaseGoldRate: piece.purchaseGoldRate ?? null, goldRateSource: piece.goldRateSource || null, goldValue: piece.loosePurchase?.purchaseBaseCost ?? piece.goldValue,
-      makingPerGram: piece.makingPerGram ?? null, makingTotal: piece.makingTotal ?? null, certificateCost: piece.certificateCost,
+      makingPerGram: piece.makingPerGram ?? null, makingTotal: piece.makingTotal ?? null, certificateCost: piece.certificateCost ?? null,
       componentCost: piece.loosePurchase?.additionalCost ?? piece.componentCost ?? null, vatEnabled: Number(piece.vat.vatRate) > 0, vatRate: piece.vat.vatRate,
       vatRateSource: piece.vat.vatRateSource, vatBase: piece.vat.vatBase, vatAmount: piece.vat.vatAmount,
       totalPurchaseCost: piece.purchaseCost, supplierId: context.supplierId, purchaseDate: context.purchaseDate, poItemId: poItem.id,
@@ -733,6 +733,9 @@ async function persistAssetComponents({ models, transaction, asset, components, 
       });
     } else if (componentKind === "GEMSTONE") {
       const g = component.gemstoneDetails || component;
+      const settings = Array.isArray(g.settings)
+        ? g.settings.map((value) => String(value).trim()).filter(Boolean)
+        : (g.setting ? [String(g.setting).trim()] : []);
       await models.sequelize.query(`INSERT INTO asset_gemstone_component_details
         (component_id, treatment, shape, color, tone, tone_level, saturation, optical_effect, origin, position, setting)
         VALUES (:id, :treatment, :shape, :color, :tone, :toneLevel, :saturation, :opticalEffect, :origin, :position, :setting)`, {
@@ -747,10 +750,26 @@ async function persistAssetComponents({ models, transaction, asset, components, 
           opticalEffect: g.opticalEffect ?? g.optical_effect ?? g.stoneOpticalEffect ?? null,
           origin: g.origin ?? g.stoneOrigin ?? null,
           position: g.position ?? g.stonePosition ?? null,
-          setting: g.setting ?? g.stoneSetting ?? null,
+          setting: settings.length === 1 ? settings[0] : null,
         },
         transaction,
       });
+      if (settings.length) {
+        for (let settingIndex = 0; settingIndex < settings.length; settingIndex += 1) {
+          const [master] = await models.sequelize.query(`SELECT id,canonical_value,display_label FROM profile_master_data
+            WHERE company_id=:companyId AND category_key='GEMSTONE_SETTING' AND is_active=true
+              AND (display_label=:label OR canonical_value=:value) LIMIT 1`, {
+            replacements: { companyId, label: settings[settingIndex], value: settings[settingIndex].toLocaleLowerCase("en-US") },
+            transaction, type: models.sequelize.QueryTypes.SELECT,
+          });
+          if (!master) throw new ValidationError("PROFILE_MASTER_DATA_ACTIVE_VALUE_REQUIRED");
+          await models.sequelize.query(`INSERT INTO asset_gemstone_component_settings
+            (id,component_id,company_id,master_data_id,sequence,value_snapshot,label_snapshot,created_at,updated_at)
+            VALUES (:id,:componentId,:companyId,:masterDataId,:sequence,:valueSnapshot,:labelSnapshot,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, {
+            replacements: { id: newId("IMGSET"), componentId, companyId, masterDataId: master.id, sequence: settingIndex, valueSnapshot: master.canonical_value, labelSnapshot: master.display_label }, transaction,
+          });
+        }
+      }
     } else if (componentKind === "PEARL") {
       const p = component.pearlDetails || component;
       await models.sequelize.query(`INSERT INTO asset_pearl_component_details

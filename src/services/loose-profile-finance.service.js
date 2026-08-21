@@ -25,7 +25,7 @@ function calculatePurchase({ profile, input = {}, configuredVatRate = null }) {
   if (!isLooseProfile(profile)) return null;
   const explicitPurchase = input.purchasePricePreTax ?? input.purchasePrice ?? input.purchaseCost ?? input.baseCost;
   const legacyStoneCost = input.stoneCostCanonical ?? input.stoneCost;
-  if (profile === "LOOSE_DIAMOND" && legacyStoneCost !== undefined && legacyStoneCost !== null && legacyStoneCost !== "" && explicitPurchase !== undefined && explicitPurchase !== null && explicitPurchase !== "" && new Decimal(String(legacyStoneCost)).neq(new Decimal(String(explicitPurchase)))) {
+  if (profile === "LOOSE_DIAMOND" && legacyStoneCost !== undefined && legacyStoneCost !== null && legacyStoneCost !== "" && explicitPurchase !== undefined && explicitPurchase !== null && explicitPurchase !== "" && !new Decimal(String(legacyStoneCost)).eq(new Decimal(String(explicitPurchase)))) {
     throw new Error("LOOSE_DIAMOND_PURCHASE_PRICE_STONE_COST_MISMATCH");
   }
   const base = decimal(explicitPurchase ?? legacyStoneCost, "PURCHASE_COST", { required: true });

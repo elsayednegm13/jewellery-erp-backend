@@ -64,6 +64,7 @@ test("allowlisted metadata supports no-op and optimistic concurrency without pro
 
 test("POS and inventory surfaces enforce the safe contracts", () => {
   assert.match(routeSource, /POS_SELLING_PRICE_REQUIRED/);
+  assert.match(routeSource, /isGoldSaleProfile\(profile\)/);
   assert.match(routeSource, /inventory-v2\/assets\/:id\/metadata/);
   assert.match(routeSource, /requireBusinessPermission\("inventory\.adjust"/);
   assert.match(posSource, /currentSellingPriceForAsset/);
@@ -71,6 +72,28 @@ test("POS and inventory surfaces enforce the safe contracts", () => {
   assert.match(detailSource, /Editable Operational Metadata/);
   assert.match(detailSource, /expectedUpdatedAt/);
   assert.doesNotMatch(detailSource, /price.*input-base/);
+});
+
+test("loose Asset POS pricing uses the audited Asset selling-price authority when no markup is configured", async () => {
+  const models = {
+    sequelize: {
+      QueryTypes: { SELECT: "SELECT" },
+      query: async (sql) => {
+        if (sql.includes("asset_current_valuations")) return [{ total_value: "7068.0000" }];
+        if (sql.includes("asset_pricing_policies")) return [{ minimum_selling_price: "8000.0000", markup_percent: null }];
+        return [];
+      },
+    },
+  };
+  const result = await pricing.calculateGoldSalePriceForAsset({
+    asset: { id: "asset-loose-diamond", inventoryProfile: "LOOSE_DIAMOND", price: "8000.0000" },
+    models,
+    companyId: "clone-company",
+    itemInput: {},
+    configuredVatRate: null,
+  });
+  assert.equal(result.invoicePrice, "8000.0000");
+  assert.equal(result.finalSalePrice, "8000.00000000");
 });
 
 console.log("CGP_CLONE_DYNAMIC_PRICING: PASS");

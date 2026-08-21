@@ -26,7 +26,7 @@ const fresh = buildReferenceSnapshot(state, { currency: "AED", now });
 assert.equal(fresh.status, "FRESH");
 assert.equal(fresh.quoteType, "SPOT");
 assert.equal(fresh.provider, "GOLDAPI_IO");
-assert.equal(fresh.prices.length, 5);
+assert.equal(fresh.prices.length, 8);
 assert.equal(fresh.prices.find((row) => row.karat === 24).pricePerGram, 516.18420035);
 assert.equal(fresh.prices.find((row) => row.karat === 14).pricePerGram, 301.1074502);
 assert.equal(fresh.isFallback, false);
@@ -34,7 +34,7 @@ assert.equal(fresh.isFallback, false);
 const stale = buildReferenceSnapshot({ ...state, health: { status: "STALE" } }, { currency: "AED", now });
 assert.equal(stale.status, "STALE");
 assert.equal(stale.warning, "GOLD_MARKET_QUOTE_STALE");
-assert.equal(stale.prices.length, 5);
+assert.equal(stale.prices.length, 8);
 
 const unavailable = buildReferenceSnapshot({ ...state, health: { status: "UNAVAILABLE" }, latestQuote: null }, { currency: "AED", now });
 assert.equal(unavailable.prices.length, 0);

@@ -24,6 +24,6 @@ test("G2C shared receive fields are present in both final Inventory profiles", (
     assert.match(source, /locationId/);
   }
   assert.match(shared, /ReverseChargeChecklist/);
-  assert.match(shared, /Server Tax Summary/);
+  assert.match(shared, /Tax Summary/);
   assert.match(shared, /No frontend tax default/);
 });

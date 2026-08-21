@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const loose = require("../src/services/loose-diamond-profile.service");
+const looseFinance = require("../src/services/loose-profile-finance.service");
 const runtime = require("../src/services/inventory-v2-runtime.service");
 const acquisitionPreview = require("../src/services/supplier-acquisition-preview.service");
 const policy = require("../src/services/inventory-master-policy.service");
@@ -54,6 +55,44 @@ test("Loose Diamond rejects unsupported treatment, duplicate colors, and Stone C
   assert.throws(() => loose.calculatePreview({ input: { ...input, looseDetails: { ...input.looseDetails, stoneCost: "999" } }, taxPolicy, masters: masterRows }), /PURCHASE_PRICE_STONE_COST_MISMATCH/);
 });
 
+test("Loose Diamond finance accepts equal canonical purchase aliases through the runtime path", () => {
+  assert.doesNotThrow(() => looseFinance.calculatePurchase({
+    profile: "LOOSE_DIAMOND",
+    input: { purchasePricePreTax: "5000", stoneCostCanonical: "5000" },
+    configuredVatRate: "14",
+  }));
+
+  const normalized = runtime.normalizeReceiptPiece({
+    profile: "LOOSE_DIAMOND", description: "Loose Diamond", purchasePricePreTax: "5000", stoneCostCanonical: "5000", purchaseCost: "5000", sellingPrice: "8000",
+    looseDetails: { stoneName: "Diamond", diamondType: "Natural Diamond", color: ["F", "G"], clarity: "VS1", shape: "Round", cut: "Excellent", origin: "Australia", carat: "1.250" },
+    pricing: { sellingPrice: "8000" },
+  }, { companyId: "company", branchId: "branch", supplierId: "supplier", locationId: "location", purchaseDate: "2026-08-21", vatRateDefault: 14 });
+  assert.equal(normalized.purchaseCost, 5000);
+  assert.equal(normalized.loosePurchase.purchasePricePreTax, "5000.00000000");
+  assert.equal(normalized.loosePurchase.stoneCostCanonical, "5000.00000000");
+});
+
+test("Loose Diamond finance rejects different canonical purchase aliases without a runtime exception", () => {
+  assert.throws(() => looseFinance.calculatePurchase({
+    profile: "LOOSE_DIAMOND",
+    input: { purchasePricePreTax: "5000", stoneCostCanonical: "5001" },
+    configuredVatRate: "14",
+  }), /LOOSE_DIAMOND_PURCHASE_PRICE_STONE_COST_MISMATCH/);
+});
+
+test("Loose Diamond finance preserves Decimal equality at canonical precision", () => {
+  assert.doesNotThrow(() => looseFinance.calculatePurchase({
+    profile: "LOOSE_DIAMOND",
+    input: { purchasePricePreTax: "5000.00", stoneCostCanonical: "5000" },
+    configuredVatRate: "14",
+  }));
+  assert.throws(() => looseFinance.calculatePurchase({
+    profile: "LOOSE_DIAMOND",
+    input: { purchasePricePreTax: "5000.00000000", stoneCostCanonical: "5000.00000001" },
+    configuredVatRate: "14",
+  }), /LOOSE_DIAMOND_PURCHASE_PRICE_STONE_COST_MISMATCH/);
+});
+
 test("Supplier V2 normalization is Asset-based, component-free, and pre-tax", () => {
   const normalized = runtime.normalizeReceiptPiece({
     profile: "LOOSE_DIAMOND", description: "Loose Diamond", purchaseCost: "1000", sellingPrice: "1500",
@@ -85,4 +124,106 @@ test("Loose Diamond barcode authority is DD / LOS / 00", () => {
   const source = fs.readFileSync(path.join(__dirname, "../src/services/barcode-identity.service.js"), "utf8");
   assert.match(source, /isLooseDiamond/);
   assert.match(source, /requestedInventory !== "DD"/);
+});
+
+test("Loose Diamond exact failing receive master-data payload accepts multi-color references", async () => {
+  const rows = [
+    ["N1", "DIAMOND_NAME", "diamond", "Diamond"],
+    ["T1", "DIAMOND_TYPE", "natural diamond", "Natural Diamond"],
+    ["C1", "DIAMOND_COLOR", "f", "F"],
+    ["C2", "DIAMOND_COLOR", "g", "G"],
+    ["CL1", "DIAMOND_CLARITY", "vs1", "VS1"],
+    ["CUT1", "DIAMOND_CUT", "excellent", "Excellent"],
+  ].map(([id, category_key, canonical_value, display_label]) => ({ id, category_key, canonical_value, display_label, is_active: true, sort_order: 1 }));
+  const models = {
+    sequelize: {
+      QueryTypes: { SELECT: "SELECT" },
+      query: async (sql, { replacements }) => {
+        if (sql.includes("WHERE id=:id")) return rows.filter((row) => row.id === String(replacements.id) && row.category_key === replacements.categoryKey);
+        if (sql.includes("canonical_value=:value")) return rows.filter((row) => row.category_key === replacements.category && row.canonical_value === replacements.value);
+        throw new Error(`UNEXPECTED_QUERY:${sql}`);
+      },
+    },
+  };
+  const details = {
+    stoneName: "Diamond", diamondType: "Natural Diamond", color: "F, G", clarity: "VS1", cut: "Excellent",
+    masterData: { diamondColor: ["C1", "C2"] },
+  };
+  const resolved = await profileMasterData.resolveLooseReferences({ models, companyId: "COMPANY", profile: "LOOSE_DIAMOND", looseDetails: details });
+  assert.deepEqual(resolved.references.filter((ref) => ref.category === "DIAMOND_COLOR").map((ref) => ref.master.id), ["C1", "C2"]);
+  assert.equal(resolved.details.color, "F, G");
+});
+
+test("Loose Diamond invalid multi-color master reference still fails closed", async () => {
+  const models = {
+    sequelize: {
+      QueryTypes: { SELECT: "SELECT" },
+      query: async () => [],
+    },
+  };
+  await assert.rejects(
+    profileMasterData.resolveLooseReferences({
+      models, companyId: "COMPANY", profile: "LOOSE_DIAMOND",
+      looseDetails: { masterData: { diamondColor: ["VALID", "MISSING"] } },
+    }),
+    /PROFILE_MASTER_DATA_ACTIVE_VALUE_REQUIRED/
+  );
+});
+
+test("Loose Diamond receipt evidence maps omitted optional certificate cost to SQL NULL", async () => {
+  const queries = [];
+  const models = {
+    sequelize: {
+      QueryTypes: { SELECT: "SELECT" },
+      query: async (sql, options = {}) => {
+        queries.push({ sql: String(sql), replacements: options.replacements || {} });
+        return [];
+      },
+    },
+    AssetCertificate: { create: async () => ({}) },
+  };
+
+  await assert.doesNotReject(() => runtime.persistReceiptEvidence({
+    models,
+    transaction: { id: "rollback-test" },
+    asset: { id: "AST-FORENSIC-OPTIONAL-CERT", inventoryProfile: "LOOSE_DIAMOND" },
+    poItem: { id: "POI-FORENSIC-OPTIONAL-CERT" },
+    piece: {
+      pieceIndex: 0,
+      profile: "LOOSE_DIAMOND",
+      looseDetails: null,
+      components: [],
+      purchaseCost: 5000,
+      goldValue: 0,
+      makingTotal: 0,
+      componentCost: 5000,
+      vat: { vatRate: 14, vatRateSource: "TAX_ENGINE", vatBase: 5000, vatAmount: 700 },
+      currentValuation: {
+        rateSource: "GOLD_CENTER_GLOBAL_SPOT",
+        goldRate: null,
+        goldValue: 0,
+        makingValue: 0,
+        certificateValue: 0,
+        componentValue: 6200,
+        vatRate: 14,
+        vatRateSource: "TAX_ENGINE",
+        vatBase: 6200,
+        vatAmount: 868,
+        totalValue: 7068,
+      },
+      pricing: {},
+    },
+    context: {
+      companyId: "COMPANY",
+      branchId: "BRANCH",
+      supplierId: "SUPPLIER",
+      purchaseDate: "2026-08-21",
+      currency: "AED",
+    },
+  }));
+
+  const revision = queries.find(({ sql }) => sql.includes("asset_purchase_cost_revisions"));
+  assert.ok(revision);
+  assert.equal(revision.replacements.certificateCost, null);
+  assert.equal(Object.values(revision.replacements).some((value) => value === undefined), false);
 });

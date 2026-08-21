@@ -6,7 +6,7 @@ const bootstrap = require("../src/services/inventory-master-data-bootstrap.servi
 const profileMasterData = require("../src/services/profile-master-data.service");
 const barcodeIdentity = require("../src/services/barcode-identity.service");
 
-test("R2 manifest contains the exact approved 157-row reference delta", () => {
+test("R2 manifest preserves the approved 157-row R1 delta and the current v3 extension", () => {
   assert.equal(manifest.R1_PROFILE_MASTER_DATA_ROWS.length, 157);
   assert.deepEqual(bootstrap.countByCategory(manifest.R1_PROFILE_MASTER_DATA_ROWS), {
     CERTIFICATE_AUTHORITY: 16,
@@ -19,8 +19,14 @@ test("R2 manifest contains the exact approved 157-row reference delta", () => {
     GEMSTONE_SETTING: 47,
   });
   assert.equal(new Set(manifest.R1_PROFILE_MASTER_DATA_ROWS.map((row) => `${row.category}|${row.canonicalValue}`)).size, 157);
+  assert.equal(manifest.R2_PROFILE_MASTER_DATA_ROWS.length, 1);
+  assert.deepEqual(manifest.R2_PROFILE_MASTER_DATA_ROWS.map((row) => ({ category: row.category, canonicalValue: row.canonicalValue, displayLabel: row.displayLabel, applicableProfiles: row.applicableProfiles })), [
+    { category: "DIAMOND_NAME", canonicalValue: "diamond", displayLabel: "Diamond", applicableProfiles: ["LOOSE_DIAMOND"] },
+  ]);
+  assert.equal(manifest.CURRENT_PROFILE_MASTER_DATA_ROWS.length, 158);
+  assert.equal(new Set(manifest.CURRENT_PROFILE_MASTER_DATA_ROWS.map((row) => `${row.category}|${row.canonicalValue}`)).size, 158);
   assert.equal(manifest.DATASET_MANIFEST.gemstoneTreatmentInitialValues.length, 0);
-  assert.equal(bootstrap.validateManifest().rowCount, 157);
+  assert.equal(bootstrap.validateManifest().rowCount, 158);
 });
 
 test("R2 barcode taxonomy contains only the five approved inventory codes and twenty items", () => {
