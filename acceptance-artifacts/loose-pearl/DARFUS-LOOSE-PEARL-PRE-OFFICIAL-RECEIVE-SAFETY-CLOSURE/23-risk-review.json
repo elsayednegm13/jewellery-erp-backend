@@ -1,0 +1,9 @@
+{
+  "p0": 0,
+  "p1": 0,
+  "p2": 1,
+  "risk": "fresh clone receive acceptance incomplete after one invalid V2 test request",
+  "officialReceiveAllowed": false,
+  "ownerReviewRequired": true,
+  "noHighRiskFixApplied": true
+}

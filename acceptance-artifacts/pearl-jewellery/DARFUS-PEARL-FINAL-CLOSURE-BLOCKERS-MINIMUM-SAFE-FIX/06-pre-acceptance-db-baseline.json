@@ -1,0 +1,22 @@
+{
+  "currentDatabase": "darfus_erp",
+  "counts": {
+    "purchase_orders": 13,
+    "purchase_order_items": 13,
+    "assets": 13,
+    "pearl_assets": 1,
+    "asset_components": 10,
+    "asset_pearl_component_details": 1,
+    "asset_barcode_history": 13,
+    "asset_origins": 13,
+    "asset_purchase_cost_revisions": 13,
+    "asset_current_valuations": 13,
+    "inventory_asset_movements": 13,
+    "journal_entries": 16,
+    "journal_lines": 45,
+    "idempotency_requests": 17,
+    "cash_transactions": 3
+  },
+  "frozenTransaction": {"po":"PO-1787391626460","asset":"AST-PUR-1787391626468-1-1-wf0w","barcode":"PLRNG18000001","journal":"JE-1787391626555"},
+  "idempotencyKeyValue": "REDACTED"
+}

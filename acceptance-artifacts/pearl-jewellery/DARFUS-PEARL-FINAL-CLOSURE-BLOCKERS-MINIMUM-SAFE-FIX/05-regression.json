@@ -1,0 +1,11 @@
+{
+  "executed": 56,
+  "passed": 54,
+  "failed": 2,
+  "status": "FAIL_PREEXISTING_STALE_TEST_CONTRACT",
+  "failures": [
+    "tests/unified-inventory-intake-ux-02-r3.test.cjs: expects Pearl chooser disabled",
+    "tests/unified-inventory-ux-final-closure.test.cjs: expects Pearl chooser disabled"
+  ],
+  "sourceReality": "Pearl chooser is enabled in the pre-existing current source after Pearl closure work; this control did not touch chooser."
+}

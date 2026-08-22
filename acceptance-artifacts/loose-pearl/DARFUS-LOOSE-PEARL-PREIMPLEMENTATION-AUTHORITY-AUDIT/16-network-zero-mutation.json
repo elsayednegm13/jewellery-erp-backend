@@ -1,0 +1,13 @@
+{
+  "frontend": "http://localhost:3000",
+  "backend": "http://localhost:8000",
+  "allowedMethodsUsed": ["GET","browser navigation"],
+  "businessPostCount": 0,
+  "receivePost": "not sent",
+  "previewPost": "not sent",
+  "masterMutation": "not sent",
+  "checkout": "not sent",
+  "health": {"/api/v1/health":200,"/api/v1/health/db":200,"/api/v1/health/redis":200,"/api/v1/health/gold":200},
+  "authenticatedProfileGets": "401 in direct unauthenticated CLI; browser session was not used to submit business requests",
+  "productionContacted": false
+}

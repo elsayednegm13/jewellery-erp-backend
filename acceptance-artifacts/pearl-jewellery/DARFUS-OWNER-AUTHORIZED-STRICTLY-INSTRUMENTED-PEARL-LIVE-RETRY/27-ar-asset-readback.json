@@ -1,0 +1,20 @@
+{
+  "url": "http://localhost:3000/ar/inventory/AST-PUR-1787391626468-1-1-wf0w",
+  "status": "PASS",
+  "asset": "AST-PUR-1787391626468-1-1-wf0w",
+  "profile": "مجوهرات لؤلؤ / PEARL_JEWELLERY",
+  "barcode": "PLRNG18000001",
+  "statusValue": "AVAILABLE",
+  "branch": "Branch-1",
+  "location": "QA-G2C-RECEIVE-LOCATION-01",
+  "grossWeight": 12,
+  "pearlWeight": 1.2,
+  "netGoldWeight": 10.8,
+  "karat": 18,
+  "pearlSizeLabel": "8.5",
+  "historicalPurchaseCost": 3984,
+  "currentValuationTotal": 7211.98359009,
+  "sellingPrice": 5000,
+  "visibleInternalMasterIds": 0,
+  "consoleErrors": 0
+}

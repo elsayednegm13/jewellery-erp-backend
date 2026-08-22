@@ -33,6 +33,8 @@ const pearlSizeMasterDataService = require("../services/pearl-size-master-data.s
 const profileMasterDataService = require("../services/profile-master-data.service");
 const diamondJewelleryProfileService = require("../services/diamond-jewellery-profile.service");
 const gemStoneJewelleryProfileService = require("../services/gem-stone-jewellery-profile.service");
+const pearlJewelleryProfileService = require("../services/pearl-jewellery-profile.service");
+const loosePearlProfileService = require("../services/loose-pearl-profile.service");
 const inventoryMasterPolicy = require("../services/inventory-master-policy.service");
 const inventoryV2Runtime = require("../services/inventory-v2-runtime.service");
 const inventoryMasterDataBootstrapService = require("../services/inventory-master-data-bootstrap.service");
@@ -92,6 +94,20 @@ async function loadGemStoneMasterData(companyId, transaction = null) {
   const categories = profileMasterDataService.categoriesForProfile(gemStoneJewelleryProfileService.PROFILE);
   const masters = await profileMasterDataService.list({ models, companyId, categories, activeOnly: true, transaction });
   return gemStoneJewelleryProfileService.masterIndex(masters);
+}
+
+async function loadPearlJewelleryMasterData(companyId, transaction = null) {
+  const categories = profileMasterDataService.categoriesForProfile(pearlJewelleryProfileService.PROFILE);
+  const masters = await profileMasterDataService.list({ models, companyId, categories, activeOnly: true, transaction });
+  const pearlSizes = await pearlSizeMasterDataService.list({ models, companyId, activeOnly: true, transaction });
+  return { masters: pearlJewelleryProfileService.masterIndex(masters), pearlSizes };
+}
+
+async function loadLoosePearlMasterData(companyId, transaction = null) {
+  const categories = profileMasterDataService.categoriesForProfile(loosePearlProfileService.PROFILE);
+  const masters = await profileMasterDataService.list({ models, companyId, categories, activeOnly: true, transaction });
+  const pearlSizes = await pearlSizeMasterDataService.list({ models, companyId, activeOnly: true, transaction });
+  return { masters, pearlSizes };
 }
 
 const reservationPerms = {
@@ -5268,15 +5284,21 @@ router.post("/inventory-v2/receive-preview", authMiddleware, requireAnyBusinessP
       items: rawItems,
     });
     rawItems = canonicalLocations.items;
+    rawItems = rawItems.map((item) => ({ ...item, taxTreatment: item.taxTreatment || body.taxTreatment, taxContext: item.taxContext || body.taxContext }));
     const vatRateDefault = await goldValuationService.resolveConfiguredVatRate({ models, companyId: req.companyId });
     const diamondMasterData = await loadDiamondMasterData(req.companyId);
     const gemMasterData = await loadGemStoneMasterData(req.companyId);
+    const pearlMasterData = await loadPearlJewelleryMasterData(req.companyId);
+    const loosePearlMasterData = await loadLoosePearlMasterData(req.companyId);
     const pieceSets = inventoryV2Runtime.requireV2ReceiptPieces(rawItems, { vatRateDefault, diamondMasterData });
     const settings = await settingsService.getCompanySettings(req.companyId);
     const companyTaxPolicy = await companyTaxPolicyService.getCompanyTaxPolicy(req.companyId);
-    const calculatedPieceSets = await Promise.all(pieceSets.map((pieces) => Promise.all(pieces.map(async (piece) => piece.profile === gemStoneJewelleryProfileService.PROFILE
-      ? gemStoneJewelleryProfileService.calculateReceiptPiece({ companyId: req.companyId, input: piece, settings, taxPolicy: companyTaxPolicy, masterData: gemMasterData, requireSalePrice: false })
-      : piece))));
+    const calculatedPieceSets = await Promise.all(pieceSets.map((pieces) => Promise.all(pieces.map(async (piece) => {
+      if (piece.profile === gemStoneJewelleryProfileService.PROFILE) return gemStoneJewelleryProfileService.calculateReceiptPiece({ companyId: req.companyId, input: piece, settings, taxPolicy: companyTaxPolicy, masterData: gemMasterData, requireSalePrice: false });
+      if (piece.profile === pearlJewelleryProfileService.PROFILE) return pearlJewelleryProfileService.calculateReceiptPiece({ companyId: req.companyId, input: piece, taxPolicy: companyTaxPolicy, masterData: pearlMasterData.masters, pearlSizes: pearlMasterData.pearlSizes, requireSalePrice: false });
+      if (piece.profile === loosePearlProfileService.PROFILE) return loosePearlProfileService.calculateReceiptPiece({ input: piece, taxPolicy: companyTaxPolicy, masters: loosePearlMasterData.masters, pearlSizes: loosePearlMasterData.pearlSizes, requireSalePrice: false });
+      return piece;
+    }))));
     const normalizedItems = rawItems.map((item, index) => supplierAcquisitionPreviewService.normalizeItem(item, calculatedPieceSets[index]));
     const preview = supplierAcquisitionPreviewService.previewFromPieces({ normalizedItems, body, settings, inventoryV2Target: true });
     return res.status(200).json({ success: true, data: preview, readOnly: true });
@@ -7725,6 +7747,15 @@ router.get("/pos/search", authMiddleware, requireAnyBusinessPermission(["pos.vie
     const pricingCache = { rates: new Map(), snapshots: new Map() };
     const resolveSearchAssetPrice = async (asset) => {
       const profile = asset.inventoryProfile || asset.profile;
+      // Pearl Jewellery accepts the persisted explicit Asset.price as its
+      // selling-price authority. An invalid optional policy must not turn a
+      // valid positive Asset.price into an unavailable POS result.
+      if (profile === "PEARL_JEWELLERY") {
+        const explicitAssetPrice = Number(asset.price);
+        if (Number.isFinite(explicitAssetPrice) && explicitAssetPrice > 0) {
+          return { value: explicitAssetPrice, unavailable: false };
+        }
+      }
       if (!goldSalePricingService.isSalePricingProfile(profile)) {
         return { value: Number(asset.price || 0), unavailable: false };
       }
@@ -7974,6 +8005,7 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
       transaction: t,
     });
     items = canonicalLocations.items;
+    items = items.map((item) => ({ ...item, taxTreatment: item.taxTreatment || receiveContract.taxTreatment, taxContext: item.taxContext || body.taxContext }));
 
     // Claim only after supplier, branch, and active database Location checks
     // have passed. Invalid requests therefore cannot reserve/poison a key.
@@ -8193,6 +8225,8 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
         const diamondMasterData = await loadDiamondMasterData(req.companyId, t);
         rawPieceSets = inventoryV2Runtime.requireV2ReceiptPieces(normalizedItems, { vatRateDefault, diamondMasterData });
         const gemMasterData = await loadGemStoneMasterData(req.companyId, t);
+        const pearlMasterData = await loadPearlJewelleryMasterData(req.companyId, t);
+        const loosePearlMasterData = await loadLoosePearlMasterData(req.companyId, t);
         rawPieceSets = await Promise.all(rawPieceSets.map(async (pieces) => Promise.all(pieces.map(async (diamondPiece) => {
           if (diamondPiece.profile !== diamondJewelleryProfileService.PROFILE) return diamondPiece;
           const diamondPreview = await diamondJewelleryProfileService.calculatePreview({
@@ -8237,6 +8271,14 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
         rawPieceSets = await Promise.all(rawPieceSets.map(async (pieces) => Promise.all(pieces.map(async (piece) => {
           if (piece.profile !== gemStoneJewelleryProfileService.PROFILE) return piece;
           return gemStoneJewelleryProfileService.calculateReceiptPiece({ companyId: req.companyId, input: piece, settings, taxPolicy: companyTaxPolicy, masterData: gemMasterData, requireSalePrice: true });
+        }))));
+        rawPieceSets = await Promise.all(rawPieceSets.map(async (pieces) => Promise.all(pieces.map(async (piece) => {
+          if (piece.profile !== pearlJewelleryProfileService.PROFILE) return piece;
+          return pearlJewelleryProfileService.calculateReceiptPiece({ companyId: req.companyId, input: piece, taxPolicy: companyTaxPolicy, masterData: pearlMasterData.masters, pearlSizes: pearlMasterData.pearlSizes, requireSalePrice: true });
+        }))));
+        rawPieceSets = await Promise.all(rawPieceSets.map(async (pieces) => Promise.all(pieces.map(async (piece) => {
+          if (piece.profile !== loosePearlProfileService.PROFILE) return piece;
+          return loosePearlProfileService.calculateReceiptPiece({ input: piece, taxPolicy: companyTaxPolicy, masters: loosePearlMasterData.masters, pearlSizes: loosePearlMasterData.pearlSizes, requireSalePrice: true });
         }))));
       } catch (error) {
         throw new ValidationError(error.message || "Inventory V2 receipt piece validation failed.");
@@ -8543,7 +8585,7 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
           // Recoverable V2 input VAT is a tax receivable, not Asset book cost.
           // The immutable purchase revision retains the gross source evidence;
           // the operational Asset/COGS cost remains the canonical net basis.
-          const preTaxV2Piece = ["LOOSE_DIAMOND", "LOOSE_GEMSTONE", "LOOSE_PEARL", "GEMSTONE_JEWELLERY"].includes(v2Piece?.profile);
+          const preTaxV2Piece = ["LOOSE_DIAMOND", "LOOSE_GEMSTONE", "LOOSE_PEARL", "GEMSTONE_JEWELLERY", "PEARL_JEWELLERY"].includes(v2Piece?.profile);
           const effectiveCost = v2Piece
             ? (preTaxV2Piece ? Number(v2Piece.purchaseCost) : (isRecoverableSnap && !isRcmSnap ? Number(v2Piece.purchaseCost) - Number(v2Piece.vat?.vatAmount || 0) : v2Piece.purchaseCost))
             : capUnitCost;
@@ -8575,7 +8617,7 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
             purity: v2Piece?.weights?.purityRatio ?? item.purity ?? null,
             grossWeight: v2Piece?.grossWeight ?? item.weightPerUnit,
             netWeight: v2Piece?.weights?.netGoldWeight ?? v2Piece?.grossWeight ?? item.netWeight,
-            goldWeight: v2Piece?.profile === "LOOSE_DIAMOND" ? null : (v2Piece?.weights?.netGoldWeight ?? v2Piece?.grossWeight ?? item.goldWeight ?? item.netWeight),
+            goldWeight: ["LOOSE_DIAMOND", "LOOSE_GEMSTONE", "LOOSE_PEARL"].includes(v2Piece?.profile) ? null : (v2Piece?.weights?.netGoldWeight ?? v2Piece?.grossWeight ?? item.goldWeight ?? item.netWeight),
             price: inventoryV2PriceMappingService.resolveAssetSellingPrice({ piece: v2Piece, item }),
             // Phase 15G — capitalised book cost (legacy unless non-recoverable VAT).
             cost: effectiveCost,

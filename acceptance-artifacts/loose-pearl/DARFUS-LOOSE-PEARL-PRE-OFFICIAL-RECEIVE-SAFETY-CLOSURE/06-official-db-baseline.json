@@ -1,0 +1,10 @@
+{
+  "currentDatabase": "darfus_erp",
+  "purchase_orders": 13,
+  "purchase_order_items": 13,
+  "assets": 13,
+  "journal_entries": 16,
+  "idempotency_requests": 17,
+  "cash_transactions": 3,
+  "readOnly": true
+}

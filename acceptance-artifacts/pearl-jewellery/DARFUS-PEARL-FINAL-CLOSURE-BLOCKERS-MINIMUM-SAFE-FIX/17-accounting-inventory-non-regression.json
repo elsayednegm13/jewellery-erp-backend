@@ -1,0 +1,14 @@
+{
+  "po": "PO-1787391626460",
+  "asset": "AST-PUR-1787391626468-1-1-wf0w",
+  "barcode": "PLRNG18000001",
+  "journal": "JE-1787391626555",
+  "journalBalanced": true,
+  "purchaseCostRevisionRows": 1,
+  "currentValuationRows": 1,
+  "originRows": 1,
+  "movementRows": 1,
+  "cashDelta": 0,
+  "newMovementFromReplay": 0,
+  "newJournalFromReplay": 0
+}

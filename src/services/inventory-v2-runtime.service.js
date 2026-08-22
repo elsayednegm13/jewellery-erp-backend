@@ -142,6 +142,7 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
   const contract = policy.requireProfile(profile);
   const isLooseDiamond = profile === "LOOSE_DIAMOND";
   const isLooseGemstone = profile === "LOOSE_GEMSTONE";
+  const isLoosePearl = profile === "LOOSE_PEARL";
   const condition = policy.validateCondition(profile, piece.condition);
   const description = String(piece.description || piece.name || "").trim();
   if (!description) throw new Error("INVENTORY_V2_DESCRIPTION_REQUIRED");
@@ -174,6 +175,8 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
     ? Number(diamondPiece.grossWeight)
     : (isLooseDiamond || isLooseGemstone)
       ? Number(new Decimal(String(looseDetails.carat)).times("0.20").toFixed(8))
+      : isLoosePearl
+        ? Number(looseDetails.totalPearlWeight)
       : finiteOrNull(piece.grossWeight, "GROSS_WEIGHT");
   if (profile === "GOLD_BY_PIECE" && !Object.prototype.hasOwnProperty.call(piece, "stoneWeight")) {
     throw new Error("GBP_STONE_WEIGHT_REQUIRED");
@@ -181,7 +184,7 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
   const stoneWeight = diamondPiece ? Number(diamondPiece.stoneWeight) : finiteOrNull(piece.stoneWeight ?? 0, "STONE_WEIGHT");
   const karat = diamondPiece ? Number(diamondPiece.karat) : (isLooseDiamond ? null : finiteOrNull(piece.karat, "KARAT"));
   let weights = null;
-  if (!isLooseDiamond && !isLooseGemstone && (grossWeight === null || grossWeight <= 0)) throw new Error("INVENTORY_V2_GROSS_WEIGHT_REQUIRED");
+  if (!isLooseDiamond && !isLooseGemstone && !isLoosePearl && (grossWeight === null || grossWeight <= 0)) throw new Error("INVENTORY_V2_GROSS_WEIGHT_REQUIRED");
   if (goldProfiles.has(profile)) {
     if (grossWeight === null || karat === null) throw new Error("INVENTORY_V2_GOLD_WEIGHT_FACTS_REQUIRED");
     weights = policy.calculateGoldWeights({ grossWeight, stoneWeight, karat });
@@ -245,6 +248,12 @@ function normalizeReceiptPiece(piece = {}, context = {}) {
 
   return Object.freeze({
     ...piece,
+    // Shared receive carries tax authority at the document envelope.  Keep it
+    // on the normalized physical piece for profile calculators without
+    // creating a second tax engine or allowing a client rate to override the
+    // company policy.
+    taxTreatment: piece.taxTreatment ?? context.item?.taxTreatment,
+    taxContext: piece.taxContext ?? context.item?.taxContext,
     ...context,
     profile,
     description,
@@ -287,7 +296,7 @@ function looseDetailsAsPrimarySubject(looseDetails) {
     name: looseDetails.stoneName || (looseDetails.kind === "PEARL" ? "لؤلؤ" : "حجر"),
     componentType: looseDetails.diamondType || looseDetails.pearlType || null,
     componentCarat: looseDetails.carat, componentWeight: looseDetails.totalPearlWeight || null,
-    measurementUnit: looseDetails.carat !== null && looseDetails.carat !== undefined ? "CT" : "GRAM", notes: looseDetails.notes,
+    measurementUnit: looseDetails.kind === "PEARL" || (looseDetails.carat !== null && looseDetails.carat !== undefined) ? "CT" : "GRAM", notes: looseDetails.notes,
   };
   if (looseDetails.kind === "DIAMOND") return { ...base, diamondDetails: looseDetails };
   if (looseDetails.kind === "GEMSTONE") return { ...base, gemstoneDetails: looseDetails };

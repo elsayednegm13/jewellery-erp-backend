@@ -449,7 +449,7 @@ function isGoldSaleProfile(profile) {
     profile === "CGP_CUSTOMER_GOLD_PURCHASE"
   );
 }
-function isSalePricingProfile(profile) { return isGoldSaleProfile(profile) || profile === "GEMSTONE_JEWELLERY" || profile === "LOOSE_DIAMOND" || profile === "LOOSE_GEMSTONE" || profile === "LOOSE_PEARL"; }
+function isSalePricingProfile(profile) { return isGoldSaleProfile(profile) || profile === "GEMSTONE_JEWELLERY" || profile === "PEARL_JEWELLERY" || profile === "LOOSE_DIAMOND" || profile === "LOOSE_GEMSTONE" || profile === "LOOSE_PEARL"; }
 
 /**
  * Calculate sale pricing for an Asset instance by reading its persistent
@@ -475,7 +475,7 @@ async function calculateGoldSalePriceForAsset({
   const profile = asset.inventoryProfile || asset.profile;
   if (!isSalePricingProfile(profile)) return null;
 
-  if (profile === "GEMSTONE_JEWELLERY" || profile === "LOOSE_DIAMOND" || profile === "LOOSE_GEMSTONE" || profile === "LOOSE_PEARL") {
+  if (profile === "GEMSTONE_JEWELLERY" || profile === "PEARL_JEWELLERY" || profile === "LOOSE_DIAMOND" || profile === "LOOSE_GEMSTONE" || profile === "LOOSE_PEARL") {
     const valuationRows = await models.sequelize.query("SELECT total_value FROM asset_current_valuations WHERE asset_id=:assetId", { replacements: { assetId: asset.id }, transaction, type: models.sequelize.QueryTypes.SELECT });
     const pricingRows = await models.sequelize.query("SELECT * FROM asset_pricing_policies WHERE asset_id=:assetId", { replacements: { assetId: asset.id }, transaction, type: models.sequelize.QueryTypes.SELECT });
     const valuation = valuationRows[0]; const pricing = pricingRows[0] || {};

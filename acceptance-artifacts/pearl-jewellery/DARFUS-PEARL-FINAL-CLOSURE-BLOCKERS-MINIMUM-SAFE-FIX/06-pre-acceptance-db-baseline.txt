@@ -1,0 +1,20 @@
+darfus_erp
+purchase_orders|13
+purchase_order_items|13
+assets|13
+pearl_assets|1
+asset_components|10
+asset_pearl_component_details|1
+asset_barcode_history|13
+asset_origins|13
+asset_purchase_cost_revisions|13
+asset_current_valuations|13
+inventory_asset_movements|13
+journal_entries|16
+journal_lines|45
+idempotency_requests|17
+cash_transactions|3
+purchase_order|PO-1787391626460|COMP-48ab554f-427e-4642-9419-bc8616c2dc36|SUP-001|received|4541.76000000|3984.00000000|557.76000000|STANDARD_VAT|6adef4c9-a78a-4cdc-a5e5-c3aea56a3441
+asset|AST-PUR-1787391626468-1-1-wf0w|PEARL_JEWELLERY|5000.00000000|3984.00000000|AVAILABLE|PLRNG18000001|BR-3241ced9-01ad-4bbf-9de8-7cd26e26767c|LOC-9a10f58e-4207-4512-8824-7a7b06159151
+journal|JE-1787391626555|4541.76000000|4541.76000000|purchase_order|PO-1787391626460|posted
+idempotency|purchase.receive|succeeded|201|315147360599ce7c359c22074dc33dc4f423ea48f7ad70df4e9a7c66a0b03453|2026-08-22 09:40:26.394+00|2026-08-22 09:40:26.599+00

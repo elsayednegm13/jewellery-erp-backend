@@ -1,0 +1,7 @@
+{
+  "captured": true,
+  "canonicalization": "existing idempotency service and route/body contract",
+  "hashValuePrinted": false,
+  "samePayloadSameKey": "same canonical transaction",
+  "changedPayloadSameKey": "STATE_CONFLICT / 409"
+}

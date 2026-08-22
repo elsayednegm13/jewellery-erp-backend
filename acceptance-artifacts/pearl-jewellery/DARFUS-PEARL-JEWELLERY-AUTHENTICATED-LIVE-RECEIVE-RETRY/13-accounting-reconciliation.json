@@ -1,0 +1,5 @@
+{
+  "status": "NOT_APPLICABLE",
+  "reason": "No receive response and no new PO/Asset/Journal were observed.",
+  "official_db_business_writes": 0
+}

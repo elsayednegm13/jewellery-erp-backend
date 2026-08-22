@@ -1,0 +1,14 @@
+{
+  "database": "darfus_erp",
+  "asset": "AST-PUR-1787391626468-1-1-wf0w",
+  "inventoryProfile": "PEARL_JEWELLERY",
+  "assetPrice": 5000,
+  "cost": 3984,
+  "operationalStatus": "AVAILABLE",
+  "barcode": "PLRNG18000001",
+  "branchId": "BR-3241ced9-01ad-4bbf-9de8-7cd26e26767c",
+  "locationId": "LOC-9a10f58e-4207-4512-8824-7a7b06159151",
+  "activeBarcode": true,
+  "pricingPolicy": {"markupPercent": -20.964878,"minimumSellingPrice": 5000,"manualPriceAllowed": false},
+  "currentValuationTotal": 7211.98359009
+}

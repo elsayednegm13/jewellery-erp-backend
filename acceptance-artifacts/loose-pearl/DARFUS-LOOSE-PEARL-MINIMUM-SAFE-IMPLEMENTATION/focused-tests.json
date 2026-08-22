@@ -1,0 +1,6 @@
+{
+  "command": "node --test tests/loose-pearl-minimum-safe-implementation.test.cjs",
+  "tests": 5,
+  "passed": 5,
+  "failed": 0
+}

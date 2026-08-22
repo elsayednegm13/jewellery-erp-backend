@@ -1,0 +1,9 @@
+{
+  "database": "darfus_erp",
+  "backup": "backend/backups/darfus_erp_PRE_LOOSE_GEM_STONE_AUTH_RETRY_20260822_001700.dump",
+  "bytes": 707303,
+  "sha256": "4F9AAE496C9B63166BC61818B2DC28B413587F1C5CDB8A6DC076201A1033ACB8",
+  "pgRestoreList": "PASS",
+  "createdBeforeOfficialConfirm": true,
+  "businessMutationBeforeBackup": false
+}

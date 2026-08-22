@@ -1,0 +1,6 @@
+{
+  "typecheck": "PASS",
+  "build": "PASS",
+  "buildCommand": "npm run build",
+  "nextEnv": "generated owner-accepted drift converged to approved final state; no manual edit"
+}

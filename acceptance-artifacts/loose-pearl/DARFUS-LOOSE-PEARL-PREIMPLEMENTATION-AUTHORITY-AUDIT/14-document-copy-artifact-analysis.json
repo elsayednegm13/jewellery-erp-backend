@@ -1,0 +1,8 @@
+{
+  "artifacts": [
+    {"textClass":"Delete Diamond / Add Diamond wording in Loose Pearl audit/shared text","classification":"DOCUMENTATION_COPY_ARTIFACT","action":"Do not implement as Loose Pearl behavior"},
+    {"textClass":"Section 9 references inside an eight-section Loose Pearl contract","classification":"DOCUMENTATION_COPY_ARTIFACT or TRUE_AMBIGUITY depending exact subsection","action":"Do not create a ninth UI section without Owner clarification"},
+    {"textClass":"Pearl Jewellery wording outside Loose Pearl section","classification":"NOT_APPLICABLE","action":"Do not import Pearl Jewellery gold/making rules"}
+  ],
+  "count": 3
+}

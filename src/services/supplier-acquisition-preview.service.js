@@ -71,7 +71,7 @@ function calculateTotals({ normalizedItems = [], body = {}, settings = {}, inven
     // canonical pre-tax acquisition base. The explicit piece VAT is then
     // added once to the document total; it must never be treated as already
     // included in purchaseCost.
-    const hasPreTaxLoose = normalizedItems.some((item) => (item.v2Pieces || []).some((piece) => ["GEMSTONE_JEWELLERY", "LOOSE_DIAMOND", "LOOSE_GEMSTONE", "LOOSE_PEARL"].includes(piece.profile)));
+    const hasPreTaxLoose = normalizedItems.some((item) => (item.v2Pieces || []).some((piece) => ["GEMSTONE_JEWELLERY", "PEARL_JEWELLERY", "LOOSE_DIAMOND", "LOOSE_GEMSTONE", "LOOSE_PEARL"].includes(piece.profile)));
     if (hasPreTaxLoose) goodsTotal = scale8(new Decimal(goodsTotal).plus(inputVatAmount));
     taxBase = finalProfile ? scale8(new Decimal(goodsTotal).minus(inputVatAmount)) : round2(new Decimal(goodsTotal).minus(inputVatAmount));
     total = goodsTotal;

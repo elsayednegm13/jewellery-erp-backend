@@ -1,0 +1,14 @@
+{
+  "trackA": "PASS",
+  "trackB": "PASS",
+  "exactReplay": "PASS_EXISTING_RESULT",
+  "changedPayload409": "PASS",
+  "businessDelta": 0,
+  "focusedTests": "PASS",
+  "typecheck": "PASS",
+  "build": "PASS",
+  "broaderRegression": "FAIL_PREEXISTING_STALE_TEST_CONTRACT",
+  "gate": "OPEN_PREEXISTING_STALE_REGRESSION_TEST_CONTRACT",
+  "moduleStatus": "OPEN",
+  "nextBatchAllowed": "NO_AUTOMATIC_START"
+}

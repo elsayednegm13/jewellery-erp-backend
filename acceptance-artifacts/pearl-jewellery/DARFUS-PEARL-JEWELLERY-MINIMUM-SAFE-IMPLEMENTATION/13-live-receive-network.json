@@ -1,0 +1,10 @@
+{
+  "browser": "ar",
+  "canonicalPath": "/api/v1/purchase-orders/receive",
+  "confirmClicks": 1,
+  "businessResponse": "NOT_OBSERVED",
+  "uiResult": "SESSION_REFRESH_MESSAGE",
+  "officialDbBusinessDelta": 0,
+  "secondAttempt": "NOT_RUN",
+  "classification": "AUTH_SESSION_RUNTIME_BLOCKER"
+}

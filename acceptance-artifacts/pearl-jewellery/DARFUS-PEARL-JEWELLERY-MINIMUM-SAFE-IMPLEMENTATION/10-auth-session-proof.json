@@ -1,0 +1,10 @@
+{
+  "sameBrowserSession": true,
+  "protectedPearlContractGet": 200,
+  "exactRequestRecompared": true,
+  "canonicalBusinessHashRecomputed": "5ce52ab73fb1226804d629caaba25806de8d12483390ffe9771fc82f279088ed",
+  "authValidImmediatelyBeforeConfirm": true,
+  "confirmResult": "SESSION_REFRESH_MESSAGE_NO_BUSINESS_RESPONSE",
+  "officialBusinessDeltaAfterConfirm": 0,
+  "automaticRetry": false
+}

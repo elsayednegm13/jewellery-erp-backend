@@ -1,0 +1,18 @@
+{
+  "status": "PASS_EXISTING_RESULT",
+  "deltas": {
+    "purchase_orders": 0,
+    "purchase_order_items": 0,
+    "assets": 0,
+    "asset_components": 0,
+    "asset_barcode_history": 0,
+    "asset_origins": 0,
+    "asset_purchase_cost_revisions": 0,
+    "asset_current_valuations": 0,
+    "inventory_asset_movements": 0,
+    "journal_entries": 0,
+    "journal_lines": 0,
+    "cash_transactions": 0
+  },
+  "idempotencyRowChanged": false
+}

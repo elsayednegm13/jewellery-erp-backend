@@ -1,0 +1,7 @@
+{
+  "command": "node --test tests/loose-pearl-label-audit.test.cjs",
+  "tests": 3,
+  "passed": 3,
+  "failed": 0,
+  "payloadKeysPreserved": true
+}

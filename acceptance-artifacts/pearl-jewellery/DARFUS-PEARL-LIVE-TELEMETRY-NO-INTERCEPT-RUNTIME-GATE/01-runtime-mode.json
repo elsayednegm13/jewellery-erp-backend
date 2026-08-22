@@ -1,0 +1,12 @@
+{
+  "control": "DARFUS-PEARL-LIVE-TELEMETRY-NO-INTERCEPT-RUNTIME-GATE",
+  "frontend": "http://localhost:3000",
+  "backend": "http://localhost:8000",
+  "frontendProcess": "next start",
+  "pid": 19572,
+  "nodeEnv": "production",
+  "runtimeMode": "NEXT_PRODUCTION_START_LOCALHOST",
+  "hostname": "localhost",
+  "nextDevStarted": false,
+  "secretsRecorded": false
+}

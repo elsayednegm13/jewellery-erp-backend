@@ -1,0 +1,16 @@
+{
+  "targetStaleTests": "PASS",
+  "regression": "PASS",
+  "typecheck": "PASS",
+  "build": "PASS",
+  "businessWrites": 0,
+  "newReceive": false,
+  "replayThisControl": false,
+  "posCheckout": false,
+  "p0": 0,
+  "p1": 0,
+  "p2StaleTestContract": "CLOSED",
+  "gate": "PASS_PEARL_JEWELLERY_FINAL_CLOSURE_AFTER_IDEMPOTENCY_POS_AND_TEST_CONTRACT_ALIGNMENT",
+  "moduleStatus": "CLOSED",
+  "nextBatchAllowed": "NO_AUTOMATIC_START"
+}

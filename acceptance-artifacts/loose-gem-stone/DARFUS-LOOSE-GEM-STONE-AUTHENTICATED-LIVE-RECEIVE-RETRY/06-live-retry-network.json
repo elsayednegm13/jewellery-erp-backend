@@ -1,0 +1,11 @@
+{
+  "method": "POST",
+  "path": "/api/v1/purchase-orders/receive",
+  "status": 201,
+  "attempt": "one_additional_confirm",
+  "successfulReceivesCreatedByThisControl": 1,
+  "browserPath": "Inventory -> Add / Receive Inventory -> Loose Gem Stone -> Confirm Receive",
+  "productionContacted": false,
+  "secretsRecorded": false,
+  "backendEvidence": "POST /api/v1/purchase-orders/receive 201; journal posted with balanced debit/credit"
+}

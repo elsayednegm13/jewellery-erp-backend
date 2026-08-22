@@ -1,0 +1,5 @@
+{
+  "status": "NOT_RUN",
+  "reason": "Same-key changed-payload proof is not run after an ambiguous live result.",
+  "additional_receive_posts": 0
+}

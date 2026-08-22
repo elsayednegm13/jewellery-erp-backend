@@ -1,0 +1,9 @@
+{
+  "originalHttpStatus": 201,
+  "sameKeySameBodyAttempted": false,
+  "status": "BLOCKED",
+  "reason": "The available browser evaluation surface does not expose an authenticated request channel; its fetch capability is unavailable. No replay POST was sent and no alternate credential or token path was used.",
+  "officialIdempotencyRow": {"scope": "purchase.receive", "key": "6adef4c9-a78a-4cdc-a5e5-c3aea56a3441", "requestHash": "315147360599ce7c359c22074dc33dc4f423ea48f7ad70df4e9a7c66a0b03453", "status": "succeeded", "statusCode": 201},
+  "newBusinessDeltaAfterAttempt": 0,
+  "noSecondReceive": true
+}

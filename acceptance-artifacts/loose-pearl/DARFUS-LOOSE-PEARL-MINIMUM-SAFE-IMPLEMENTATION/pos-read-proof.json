@@ -1,0 +1,12 @@
+{
+  "endpoint": "GET /api/v1/pos/search?query=PLLOS00000001&limit=20&type=all",
+  "status": 200,
+  "resultCount": 1,
+  "isProduct": false,
+  "profile": "LOOSE_PEARL",
+  "available": 1,
+  "branchScoped": true,
+  "price": 200,
+  "priceUnavailable": false,
+  "checkout": "not run"
+}

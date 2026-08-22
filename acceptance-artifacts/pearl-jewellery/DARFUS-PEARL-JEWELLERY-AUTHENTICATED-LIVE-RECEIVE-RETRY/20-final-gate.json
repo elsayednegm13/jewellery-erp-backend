@@ -1,0 +1,8 @@
+{
+  "gate": "STOPPED_AMBIGUOUS_LIVE_RESULT",
+  "pearl_jewellery_final_user_workflow_closed": "NO",
+  "new_receive_executed": "NOT_PROVEN",
+  "official_db_business_writes": 0,
+  "next_batch_allowed": "NO_AUTOMATIC_START",
+  "next_step": "OWNER_REVIEW_REQUIRED"
+}

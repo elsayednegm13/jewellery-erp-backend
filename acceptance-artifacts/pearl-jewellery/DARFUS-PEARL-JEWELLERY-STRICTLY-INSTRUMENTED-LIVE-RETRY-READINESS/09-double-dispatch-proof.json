@@ -1,0 +1,5 @@
+{
+  "ar": {"click": 1, "handler": 1, "api_client": 1, "fetch_attempt": 1},
+  "en": {"click": 1, "handler": 1, "api_client": 1, "fetch_attempt": 1},
+  "double_dispatch": "NO"
+}

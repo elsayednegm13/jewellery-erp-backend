@@ -1,0 +1,15 @@
+{
+  "control": "DARFUS-PEARL-FINAL-CLOSURE-BLOCKERS-MINIMUM-SAFE-FIX",
+  "intentionalSourceFiles": [
+    "backend/src/routes/erp.routes.js",
+    "lib/api/client.ts",
+    "lib/debug/pearl-replay-helper.ts",
+    "app/[locale]/(dashboard)/inventory/pearl/page.tsx",
+    "tests/pearl-final-closure-minimum-safe-fix.test.cjs"
+  ],
+  "forbiddenScopesTouched": [],
+  "migrations": 0,
+  "seeds": 0,
+  "officialBusinessDataChanges": 0,
+  "gitStatus": "UNAVAILABLE_DUE_TO_DUBIOUS_OWNERSHIP_GUARD"
+}

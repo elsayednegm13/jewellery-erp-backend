@@ -1,0 +1,16 @@
+{
+  "rollback_scope": "disposable clone only",
+  "rollback_method": "drop clone, restore a fresh disposable clone from the pre-live custom dump, verify current_database and baseline counts, then drop recheck clone",
+  "official_database_touched": false,
+  "manual_business_sql_rollback": false,
+  "recheck_database": "darfus_erp_pearl_retry_rollback_recheck_final_20260822_074500",
+  "recheck_counts": {
+    "purchase_orders": 12,
+    "assets": 12,
+    "pearl_jewellery_assets": 0,
+    "journal_entries": 15,
+    "idempotency_requests": 16
+  },
+  "rollback_persistent_business_delta": 0,
+  "recheck_clone_dropped": true
+}

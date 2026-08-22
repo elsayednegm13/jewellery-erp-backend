@@ -1,0 +1,12 @@
+{
+  "control": "DARFUS-PEARL-JEWELLERY-AUTHENTICATED-LIVE-RECEIVE-RETRY",
+  "official_database": "darfus_erp",
+  "confirm_clicks_executed": 1,
+  "additional_confirm_clicks": 0,
+  "receive_post_observed_in_backend_logs": 0,
+  "receive_response_status": "NOT_OBSERVED",
+  "outcome": "AMBIGUOUS_STOP",
+  "stop_reason": "The browser result was not observable after the single click and no receive POST was recorded; no retry is permitted.",
+  "production_contacted": false,
+  "secrets_recorded": false
+}

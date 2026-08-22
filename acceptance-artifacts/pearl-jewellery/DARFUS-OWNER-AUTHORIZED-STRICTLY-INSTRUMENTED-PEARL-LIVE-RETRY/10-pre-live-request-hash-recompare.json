@@ -1,0 +1,10 @@
+{
+  "scope": "purchase.receive",
+  "params": {},
+  "idempotencyKeyExcluded": true,
+  "businessFieldMismatchCount": 0,
+  "originalBusinessHash": "315147360599ce7c359c22074dc33dc4f423ea48f7ad70df4e9a7c66a0b03453",
+  "currentCandidateHash": "315147360599ce7c359c22074dc33dc4f423ea48f7ad70df4e9a7c66a0b03453",
+  "hashParity": "PASS",
+  "rawHashInputsRecorded": false
+}

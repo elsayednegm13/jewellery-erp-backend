@@ -1,0 +1,11 @@
+{
+  "receiveStatus": 201,
+  "receiveCount": 1,
+  "po": "PO-1787419714011",
+  "asset": "AST-PUR-1787419714017-1-1-78kh",
+  "barcode": "PLLOS00000001",
+  "movement": "one PURCHASE_RECEIVE",
+  "journalBalanced": true,
+  "cashDelta": 0,
+  "noOfficialReceive": true
+}
