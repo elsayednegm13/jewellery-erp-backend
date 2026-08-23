@@ -1,0 +1,8 @@
+{
+  "control": "DARFUS-LOOSE-PEARL-CLONE-AUTH-CONTEXT-RECOVERY-AND-RUNTIME-PROOF",
+  "officialDatabase": "darfus_erp",
+  "cloneMutationAuthorized": true,
+  "officialRetryAuthorized": false,
+  "sourceChangeThisControl": false,
+  "secretsIncluded": false
+}

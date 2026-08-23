@@ -1,0 +1,52 @@
+{
+  "clone": "darfus_erp_loose_pearl_retry_20260822_01",
+  "baselineBeforeReceive": {
+    "purchase_orders": 13,
+    "purchase_order_items": 13,
+    "assets": 13,
+    "asset_components": 10,
+    "asset_pearl_component_details": 1,
+    "asset_origins": 13,
+    "asset_purchase_cost_revisions": 13,
+    "asset_current_valuations": 13,
+    "inventory_asset_movements": 13,
+    "asset_barcode_history": 13,
+    "journal_entries": 16,
+    "journal_lines": 45,
+    "idempotency_requests": 17,
+    "cash_transactions": 3
+  },
+  "finalAfterReplayAndConflict": {
+    "purchase_orders": 14,
+    "purchase_order_items": 14,
+    "assets": 14,
+    "asset_components": 11,
+    "asset_pearl_component_details": 2,
+    "asset_origins": 14,
+    "asset_purchase_cost_revisions": 14,
+    "asset_current_valuations": 14,
+    "inventory_asset_movements": 14,
+    "asset_barcode_history": 14,
+    "journal_entries": 17,
+    "journal_lines": 48,
+    "idempotency_requests": 18,
+    "cash_transactions": 3
+  },
+  "delta": {
+    "purchase_orders": 1,
+    "purchase_order_items": 1,
+    "assets": 1,
+    "asset_components": 1,
+    "asset_pearl_component_details": 1,
+    "asset_origins": 1,
+    "asset_purchase_cost_revisions": 1,
+    "asset_current_valuations": 1,
+    "inventory_asset_movements": 1,
+    "asset_barcode_history": 1,
+    "journal_entries": 1,
+    "journal_lines": 3,
+    "idempotency_requests": 1,
+    "cash_transactions": 0
+  },
+  "replayAndConflictBusinessDelta": 0
+}

@@ -1,0 +1,10 @@
+{
+  "p0": 0,
+  "p1": 0,
+  "p2": 1,
+  "sourceChangesThisControl": 0,
+  "officialDatabaseWrites": 0,
+  "partialPersistenceObserved": false,
+  "sameCauseRepeat": 0,
+  "riskAssessment": "Core controlled receive proof passed with one P2 readback gap: requested pearlColor was not persisted in asset_pearl_component_details and read back as null. No P0/P1 issue observed."
+}

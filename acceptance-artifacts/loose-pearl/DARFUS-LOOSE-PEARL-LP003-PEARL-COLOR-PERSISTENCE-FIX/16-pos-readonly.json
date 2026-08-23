@@ -1,0 +1,11 @@
+{
+  "status": 200,
+  "items": 1,
+  "isProduct": false,
+  "profile": "LOOSE_PEARL",
+  "barcode": "PLLOS00000001",
+  "available": 1,
+  "branchId": "BR-3241ced9-01ad-4bbf-9de8-7cd26e26767c",
+  "price": 200,
+  "checkoutExecuted": false
+}

@@ -1,0 +1,14 @@
+{
+  "id": "JE-1787090870905",
+  "status": "posted",
+  "sourceType": "purchase_order",
+  "sourceId": "PO-1787090870807",
+  "companyId": "COMP-48ab554f-427e-4642-9419-bc8616c2dc36",
+  "branchId": "BR-3241ced9-01ad-4bbf-9de8-7cd26e26767c",
+  "date": "2026-08-18",
+  "amount": "2133.21000000",
+  "totalDebit": "2133.21000000",
+  "totalCredit": "2133.22000000",
+  "postedAt": "2026-08-18T22:07:50.919Z",
+  "reversalOf": null
+}

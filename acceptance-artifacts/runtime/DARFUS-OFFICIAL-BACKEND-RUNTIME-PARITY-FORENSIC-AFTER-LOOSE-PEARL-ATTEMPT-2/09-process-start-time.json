@@ -1,0 +1,10 @@
+{
+  "containerStartedUtc": "2026-08-22T17:21:09.922073003Z",
+  "healthObservedUtc": "2026-08-22T20:47:25.817Z",
+  "sourceFixMtimeUtc": "2026-08-22T19:47:43.9151394Z",
+  "routeFixMtimeUtc": "2026-08-22T19:47:43.9256564Z",
+  "processStartedBeforeFix": true,
+  "uptimeHealthSecondsAtObservation": 12375.457663257,
+  "watcher": false,
+  "supportingConclusion": "a plain node process started before the fix cannot be treated as reloaded merely because the bind-mounted file now hashes correctly"
+}

@@ -1,0 +1,10 @@
+{
+  "locale": "ar",
+  "route": "/ar/inventory/loose-pearl?acceptanceDiagnostics=1",
+  "profilePreview": "READY",
+  "sharedPreview": "READY",
+  "formReady": true,
+  "permission": "available",
+  "syntheticDataOnly": true,
+  "confirmationOpened": true
+}

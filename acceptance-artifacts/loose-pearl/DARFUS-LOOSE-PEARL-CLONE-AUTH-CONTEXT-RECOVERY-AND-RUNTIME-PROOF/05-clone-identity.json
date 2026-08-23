@@ -1,0 +1,7 @@
+{
+  "cloneName": "darfus_erp_loose_pearl_auth_runtime_20260822_02",
+  "currentDatabase": "darfus_erp_loose_pearl_auth_runtime_20260822_02",
+  "restoredFrom": "current read-only pg_dump of darfus_erp",
+  "baselineCountsMatch": true,
+  "loosePearlAssetsBefore": 0
+}

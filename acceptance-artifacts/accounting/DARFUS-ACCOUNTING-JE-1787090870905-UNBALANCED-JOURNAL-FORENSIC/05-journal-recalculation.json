@@ -1,0 +1,9 @@
+{
+  "sumDebit": "2133.21000000",
+  "sumCredit": "2133.22000000",
+  "difference": "0.01000000",
+  "firstUnbalancedLineOrComponent": "Independent cent rounding of Inventory + VAT debit versus rounded AP credit; no single line contains the residual.",
+  "debitComponents": {"inventory":"1871.24000000","vat":"261.97000000","sum":"2133.21000000"},
+  "creditComponents": {"accountsPayable":"2133.22000000"},
+  "summaryMatchesLines": true
+}

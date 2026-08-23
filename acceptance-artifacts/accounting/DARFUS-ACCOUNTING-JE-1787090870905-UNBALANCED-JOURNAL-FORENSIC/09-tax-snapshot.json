@@ -1,0 +1,13 @@
+{
+  "requestedTaxTreatment":"STANDARD_VAT",
+  "resolvedTaxTreatment":"STANDARD_VAT",
+  "effectiveVatRate":"14",
+  "taxableBase":"1871.24177528",
+  "vatAmount":"261.97384854",
+  "roundingScale":8,
+  "taxCalculationVersion":"DARFUS-UAE-TAX-03B-G2A2-V1",
+  "taxLawRuleVersion":"UAE-VATP043-2025-02-26",
+  "taxIncluded":true,
+  "snapshotBasePlusVat":"2133.21562382",
+  "snapshotMatch":"PASS"
+}

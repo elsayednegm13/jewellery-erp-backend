@@ -184,6 +184,10 @@ function normalizeLooseDetails(profile, input = {}) {
     saturation: text(input.saturation || input.saturationLevels), clarity: text(input.clarity), cut: text(input.cut),
     shape: text(input.shape || input.stoneShape), opticalEffect: text(input.opticalEffect || input.stoneOpticalEffect),
     origin: text(input.origin || input.stoneOrigin), pearlType: text(input.pearlType), pearlSize: text(input.pearlSize || input.size), pearlSizeId: text(input.pearlSizeId),
+    // Loose Pearl has a distinct canonical business key.  Do not fold it into
+    // the shared multi-color field: the receive persistence mapper reads the
+    // normalized pearlColor value for the Pearl detail row.
+    pearlColor: canonical === "LOOSE_PEARL" ? text(input.pearlColor) : null,
     overtone: text(input.overtone || input.pearlOvertone), orient: text(input.orient || input.pearlOrient),
     luster: text(input.luster || input.pearlLuster), surfaceQuality: text(input.surfaceQuality || input.pearlSurfaceQuality), nacreQuality: text(input.nacreQuality),
     notes: text(input.notes || input.remarks),

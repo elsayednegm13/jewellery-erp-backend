@@ -1,0 +1,15 @@
+{
+  "profile": "LOOSE_PEARL",
+  "quantity": 1,
+  "perPieceLength": 1,
+  "pieceIndexPresent": false,
+  "itemIndexPresent": false,
+  "purchaseCost": "100.00000000",
+  "currentValue": "120.00000000",
+  "sellingPrice": "200.00000000",
+  "pearlColor": "Black",
+  "taxTreatment": "STANDARD_VAT",
+  "taxIncluded": false,
+  "applyVat": true,
+  "idempotencyKey": "d594d6e7-eb40-4767-931e-933c1e201b3d"
+}

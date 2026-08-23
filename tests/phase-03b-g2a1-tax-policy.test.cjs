@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const fs = require("node:fs");
+const path = require("node:path");
 
 const models = require("../src/models");
 const taxEngine = require("../src/services/uae-tax-engine.service");
@@ -99,7 +100,7 @@ test("company policy write persists only requested values and reads explicit nul
 });
 
 test("route has server-authoritative tax policy and no client company override", () => {
-  const route = fs.readFileSync("src/routes/erp.routes.js", "utf8");
+  const route = fs.readFileSync(path.join(__dirname, "..", "src", "routes", "erp.routes.js"), "utf8");
   assert.match(route, /hasFrozenTaxPolicyAuthority/);
   assert.match(route, /companyTaxPolicyService\.getCompanyTaxPolicy\(req\.companyId\)/);
   assert.match(route, /companyTaxPolicyService\.updateCompanyTaxPolicy/);
@@ -109,7 +110,7 @@ test("route has server-authoritative tax policy and no client company override",
 });
 
 test("migration is additive, nullable, has no default/backfill, and is the next timestamp", () => {
-  const migration = fs.readFileSync("migrations/20260818020000-add-company-vat-registered.js", "utf8");
+  const migration = fs.readFileSync(path.join(__dirname, "..", "migrations", "20260818020000-add-company-vat-registered.js"), "utf8");
   assert.match(migration, /addColumn\("companies", "vat_registered"/);
   assert.match(migration, /allowNull: true/);
   assert.doesNotMatch(migration, /defaultValue/);

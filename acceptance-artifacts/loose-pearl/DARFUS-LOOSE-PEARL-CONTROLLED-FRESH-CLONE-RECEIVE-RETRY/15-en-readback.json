@@ -1,0 +1,14 @@
+{
+  "locale": "en",
+  "method": "GET",
+  "route": "/api/v1/inventory-v2/assets/AST-PUR-1787422781365-1-1-w2zl",
+  "status": 200,
+  "success": true,
+  "profile": "LOOSE_PEARL",
+  "barcode": "PLLOS00000001",
+  "operationalStatus": "AVAILABLE",
+  "netWeight": 1.25,
+  "pearlType": "Abalone",
+  "pearlSize": "1.0",
+  "locationId": "LOC-9a10f58e-4207-4512-8824-7a7b06159151"
+}

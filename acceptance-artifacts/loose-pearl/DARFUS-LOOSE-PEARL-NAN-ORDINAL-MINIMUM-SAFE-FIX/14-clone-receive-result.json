@@ -1,0 +1,10 @@
+{
+  "http": 422,
+  "code": "SUPER_ADMIN_COMPANY_CONTEXT_REQUIRED",
+  "requestId": "0616640e-268d-47db-ada8-0e1245989476",
+  "distinctCloneReceiveAttempts": 1,
+  "transactionStarted": false,
+  "poId": null,
+  "assetId": null,
+  "journalId": null
+}

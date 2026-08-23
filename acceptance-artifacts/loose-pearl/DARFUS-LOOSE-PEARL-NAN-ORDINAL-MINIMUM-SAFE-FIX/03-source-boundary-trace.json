@@ -1,0 +1,8 @@
+{
+  "uiBuilder": "perPiece:[piece], quantity:1",
+  "requestMapper": "client request omits pieceIndex/itemIndex",
+  "runtimeNormalizer": "requireV2ReceiptPieces can derive array indexes",
+  "firstProvenBrokenBoundary": "persistReceiptEvidence ordinal arithmetic before SQL",
+  "sqlExpressionBeforeFix": "piece.pieceIndex + 1",
+  "sqlFailure": "column \"nan\" does not exist"
+}

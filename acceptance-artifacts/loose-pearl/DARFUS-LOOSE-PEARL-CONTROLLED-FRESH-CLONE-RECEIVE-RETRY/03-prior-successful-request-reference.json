@@ -1,0 +1,7 @@
+{
+  "referenceArtifact": "backend/acceptance-artifacts/loose-pearl/DARFUS-LOOSE-PEARL-MINIMUM-SAFE-IMPLEMENTATION/exact-request.json",
+  "priorReceive": 201,
+  "priorExactReplay": 201,
+  "priorChangedPayloadConflict": 409,
+  "businessContract": {"profile":"LOOSE_PEARL","documentQuantity":1,"perPieceLength":1,"unitCostMeaning":"pre-tax historical purchase cost","unitCost":100,"taxIncluded":false,"taxTreatment":"STANDARD_VAT"}
+}

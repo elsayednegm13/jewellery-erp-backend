@@ -1,0 +1,9 @@
+{
+  "backendContainer": "darfus-loose-pearl-lp003-backend",
+  "clone": "darfus_erp_loose_pearl_lp003_20260822_01",
+  "backendStoppedAndRemoved": true,
+  "cloneDropped": true,
+  "cloneStillPresent": false,
+  "classification": "ENVIRONMENT_CLEANUP_ONLY",
+  "businessRollback": false
+}

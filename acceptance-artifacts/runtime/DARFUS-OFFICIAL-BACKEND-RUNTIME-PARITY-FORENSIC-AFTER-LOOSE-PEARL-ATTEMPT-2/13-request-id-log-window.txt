@@ -1,0 +1,14 @@
+2026-08-22 20:29:16 info: POST /api/v1/inventory-v2/loose-pearl/preview 200
+2026-08-22 20:29:16 info: POST /api/v1/inventory-v2/receive-preview 200
+2026-08-22 20:29:59 error: [Request Error] code=INTERNAL_SERVER_ERROR message=An unexpected server error occurred.
+fields={}
+Error
+    at Query.run (/app/node_modules/sequelize/lib/dialects/postgres/query.js:50:25)
+    at /app/node_modules/sequelize/lib/sequelize.js:315:28
+    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at async Object.persistReceiptEvidence (/app/src/services/inventory-v2-runtime.service.js:353:3)
+    at async /app/src/routes/erp.routes.js:8736:13
+2026-08-22 20:29:59 info: POST /api/v1/purchase-orders/receive 500 130.521ms outcome=completed
+request_id=f757c8d1-1553-42e9-87e2-01f653f37611
+
+No retry and no third receive request occurred.

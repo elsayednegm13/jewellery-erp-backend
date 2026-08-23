@@ -25,6 +25,7 @@ const notificationService = require("../services/notification.service");
 const idempotencyService = require("../services/idempotency.service");
 const customerCreditService = require("../services/customer-credit.service");
 const customerPosSummaryService = require("../services/customer-pos-summary.service");
+const { normalizePhone } = require("../services/customer-phone.service");
 const { buildCustomerContactSnapshot, copyInvoiceContactSnapshot } = require("../services/invoice-contact-snapshot.service");
 const installmentOverpaymentReclassificationService = require("../services/installment-overpayment-reclassification.service");
 const installmentPrecisionRemediationService = require("../services/installment-precision-remediation.service");
@@ -37,6 +38,7 @@ const pearlJewelleryProfileService = require("../services/pearl-jewellery-profil
 const loosePearlProfileService = require("../services/loose-pearl-profile.service");
 const inventoryMasterPolicy = require("../services/inventory-master-policy.service");
 const inventoryV2Runtime = require("../services/inventory-v2-runtime.service");
+const workshopPolicy = require("../services/workshop-policy.service");
 const inventoryMasterDataBootstrapService = require("../services/inventory-master-data-bootstrap.service");
 const cgpLegacyIsolation = require("../services/cgp-legacy-isolation.service");
 const goldValuationService = require("../services/gold-valuation.service");
@@ -50,6 +52,7 @@ const assetSellingPriceService = require("../services/asset-selling-price.servic
 const inventoryV2PriceMappingService = require("../services/inventory-v2-price-mapping.service");
 const { calculateMakingChargeTotal, calculateGoldByWeightMakingTotal } = goldSalePricingService;
 const inventoryAuditCanonicalService = require("../services/inventory-audit-canonical.service");
+const inventoryCountPolicy = require("../services/inventory-count-policy.service");
 const reservationService = require("../services/reservation.service");
 const reservationDepositReceiptService = require("../services/reservation-deposit-receipt.service");
 const reservationDepositSettingsService = require("../services/reservation-deposit-settings.service");
@@ -465,6 +468,30 @@ const LIFECYCLE_GENERIC_MUTATION_BLOCKS = {
   "cash-transactions": {
     code: "GENERIC_TREASURY_MUTATION_FORBIDDEN",
     message: "Treasury movements must use the dedicated treasury endpoints."
+  },
+  companies: {
+    code: "GENERIC_COMPANY_MUTATION_FORBIDDEN",
+    message: "Company mutations must use the approved onboarding and settings endpoints."
+  },
+  "manufacturing-orders": {
+    code: "GENERIC_MANUFACTURING_MUTATION_FORBIDDEN",
+    message: "Manufacturing mutations must use the dedicated Inventory V2 transformation endpoint."
+  },
+  "customer-gold-pools": {
+    code: "GENERIC_CGP_MUTATION_FORBIDDEN",
+    message: "Customer Gold Purchase mutations must use the canonical Gold Purchase workflow."
+  },
+  "inventory-gold-pools": {
+    code: "GENERIC_IGP_MUTATION_FORBIDDEN",
+    message: "Investment Gold Purchase mutations must use the canonical Gold Purchase workflow."
+  },
+  "approval-requests": {
+    code: "GENERIC_APPROVAL_MUTATION_FORBIDDEN",
+    message: "Approval mutations must be created and transitioned by the owning financial workflow."
+  },
+  "journal-entries": {
+    code: "GENERIC_JOURNAL_MUTATION_FORBIDDEN",
+    message: "Journal mutations must use the dedicated draft, post, reverse, or cancel endpoints."
   }
 };
 
@@ -630,6 +657,17 @@ function setupCrud(resourceName, model, searchFields = ["name"]) {
     router.delete(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "delete"), blockInvoiceMutation);
     return controller;
   }
+  if (LIFECYCLE_GENERIC_MUTATION_BLOCKS[resourceName]) {
+    const { code, message } = LIFECYCLE_GENERIC_MUTATION_BLOCKS[resourceName];
+    const blockGenericMutation = (req, res) => stableForbidden(res, code, message);
+    router.post(`/${resourceName}`, authMiddleware, guardFor(resourceName, "create"), blockGenericMutation);
+    router.put(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "update"), blockGenericMutation);
+    router.patch(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "update"), blockGenericMutation);
+    router.post(`/${resourceName}/:id/deactivate`, authMiddleware, guardFor(resourceName, "update"), blockGenericMutation);
+    router.post(`/${resourceName}/:id/reactivate`, authMiddleware, guardFor(resourceName, "update"), blockGenericMutation);
+    router.delete(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "delete"), blockGenericMutation);
+    return controller;
+  }
   if (resourceName === "customer-gold-pools") {
     // Historical pool reads remain available.  Generic writes, however, can
     // fabricate a customer-gold balance without the later canonical CGP
@@ -648,17 +686,6 @@ function setupCrud(resourceName, model, searchFields = ["name"]) {
     router.post(`/${resourceName}/:id/deactivate`, authMiddleware, guardFor(resourceName, "update"), requireLegacyCgpAcquisitionPath, controller.deactivate);
     router.post(`/${resourceName}/:id/reactivate`, authMiddleware, guardFor(resourceName, "update"), requireLegacyCgpAcquisitionPath, controller.reactivate);
     router.delete(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "delete"), requireLegacyCgpAcquisitionPath, controller.delete);
-    return controller;
-  }
-  if (LIFECYCLE_GENERIC_MUTATION_BLOCKS[resourceName]) {
-    const { code, message } = LIFECYCLE_GENERIC_MUTATION_BLOCKS[resourceName];
-    const blockGenericMutation = (req, res) => stableForbidden(res, code, message);
-    router.post(`/${resourceName}`, authMiddleware, guardFor(resourceName, "create"), blockGenericMutation);
-    router.put(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "update"), blockGenericMutation);
-    router.patch(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "update"), blockGenericMutation);
-    router.post(`/${resourceName}/:id/deactivate`, authMiddleware, guardFor(resourceName, "update"), blockGenericMutation);
-    router.post(`/${resourceName}/:id/reactivate`, authMiddleware, guardFor(resourceName, "update"), blockGenericMutation);
-    router.delete(`/${resourceName}/:id`, authMiddleware, guardFor(resourceName, "delete"), blockGenericMutation);
     return controller;
   }
   if (resourceName === "accounts") {
@@ -869,6 +896,11 @@ async function executeCanonicalSale(req, res, next, { operation = "pos.checkout"
         if (goldSalePricingService.isSalePricingProfile(profile)) {
           hasGoldPricing = true;
           const pricingItem = { ...item };
+          // Client-side price fields are display hints only.  Sale pricing must
+          // resolve from the server-side Asset/profile authority.
+          delete pricingItem.price;
+          delete pricingItem.sellingPrice;
+          delete pricingItem.salePrice;
           if (["CGP_CUSTOMER_GOLD_PURCHASE", "GOLD_BY_WEIGHT_JEWELLERY", "GOLD_BAR_24K"].includes(profile)) {
             pricingItem.sellingGoldRate = await goldSalePricingService.resolveCanonicalSellingGoldRate({
               models, companyId: req.companyId, currency: settings.currency || "AED", karat: asset.karat,
@@ -950,7 +982,8 @@ async function executeCanonicalSale(req, res, next, { operation = "pos.checkout"
           totalMakingCharge += Number(goldPricing.makingTotal || 0);
           makingChargeIncludedInSubtotal += Number(goldPricing.makingTotal || 0);
        } else {
-          const effectiveAssetPrice = Number(item.price) || Number(asset.price) || 0;
+          // Never accept item.price as a physical Asset sale authority.
+          const effectiveAssetPrice = Number(asset.price) || 0;
           assertPositiveSaleAmount(effectiveAssetPrice, asset.id);
          validatedItems.push({
             isProduct: false,
@@ -3541,10 +3574,10 @@ router.post("/manufacturing-orders/process", authMiddleware, requirePermission("
 // ─── Custom Stock Audit Endpoints ───────────────────────────────────────────
 
 // 1. List stock audits
-router.get("/stock-audits", authMiddleware, requireBusinessPermission("inventory.view"), async (req, res, next) => {
+router.get("/stock-audits", authMiddleware, requireBusinessPermission(inventoryCountPolicy.COUNT_PERMISSIONS.read), async (req, res, next) => {
   try {
-    const where = { companyId: req.companyId };
-    if (req.query.branchId) where.branchId = req.query.branchId;
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const where = { companyId: req.companyId, branchId };
     if (req.query.status) where.status = req.query.status;
 
     const rows = await models.StockAudit.findAll({
@@ -3558,8 +3591,10 @@ router.get("/stock-audits", authMiddleware, requireBusinessPermission("inventory
   }
 });
 
-// 2. Create stock audit session
-router.post("/stock-audits", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+// 2. Legacy mutation is blocked; the Inventory V2 route above is the only
+// authoritative creation path.
+router.post("/stock-audits", authMiddleware, async (_req, res) => res.status(410).json({ success: false, code: "LEGACY_INVENTORY_COUNT_DISABLED", message: "Use the canonical Inventory Count workflow." }));
+router.post("/stock-audits-legacy-disabled", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
   // Compatibility adapter: durable lifecycle belongs only to the canonical
   // Inventory V2 audit service. The historical implementation below is
   // intentionally unreachable and retained temporarily for source review.
@@ -3666,10 +3701,11 @@ router.post("/stock-audits", authMiddleware, requireBusinessPermission("inventor
 });
 
 // 3. Get stock audit session details
-router.get("/stock-audits/:id", authMiddleware, requireBusinessPermission("inventory.view"), async (req, res, next) => {
+router.get("/stock-audits/:id", authMiddleware, requireBusinessPermission(inventoryCountPolicy.COUNT_PERMISSIONS.read), async (req, res, next) => {
   try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
     const audit = await models.StockAudit.findOne({
-      where: { id: req.params.id, companyId: req.companyId },
+      where: { id: req.params.id, companyId: req.companyId, branchId },
       include: [
         {
           model: models.StockAuditItem,
@@ -3687,8 +3723,9 @@ router.get("/stock-audits/:id", authMiddleware, requireBusinessPermission("inven
   }
 });
 
-// 4. Store scanned items in the session (update statuses)
-router.post("/stock-audits/:id/items", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+// 4. Store scanned items in the session (legacy mutation disabled)
+router.post("/stock-audits/:id/items", authMiddleware, async (_req, res) => res.status(410).json({ success: false, code: "LEGACY_INVENTORY_COUNT_DISABLED", message: "Use the canonical Inventory Count workflow." }));
+router.post("/stock-audits-legacy-disabled/:id/items", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
   // Compatibility adapter. Observation is persisted only by the canonical
   // audit service; this route keeps the legacy request and response envelope.
   const adapterTransaction = await models.sequelize.transaction();
@@ -3796,8 +3833,9 @@ router.post("/stock-audits/:id/items", authMiddleware, requireBusinessPermission
   }
 });
 
-// 5. Complete stock audit session (apply inventory adjustments)
-router.post("/stock-audits/:id/complete", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+// 5. Complete stock audit session (legacy mutation disabled)
+router.post("/stock-audits/:id/complete", authMiddleware, async (_req, res) => res.status(410).json({ success: false, code: "LEGACY_INVENTORY_COUNT_DISABLED", message: "Use the canonical Inventory Count workflow." }));
+router.post("/stock-audits-legacy-disabled/:id/complete", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
   // Compatibility adapter. Complete and close are one atomic legacy operation
   // so a legacy caller never observes a partially terminal canonical audit.
   const adapterTransaction = await models.sequelize.transaction();
@@ -4388,8 +4426,12 @@ router.delete("/assets/:id/attachments/:attachmentId", authMiddleware, requireAn
   }
 });
 
-// ─── Custom Transfers Logic ──────────────────────────────────────────────────
-router.post("/transfers", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+// Legacy transfer implementation is unreachable; canonical routes are mounted
+// before this router from transfer.routes.js. Keep the historical block only as
+// evidence until the next approved cleanup batch removes it.
+router.use("/transfers-legacy-disabled", authMiddleware, (_req, res) => stableForbidden(res, "LEGACY_TRANSFER_ROUTE_DISABLED", "Inventory transfers must use the canonical transfer endpoints."));
+// ─── Legacy Transfers Logic (disabled) ───────────────────────────────────────
+router.post("/transfers-legacy-disabled", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const { assetIds = [], fromBranchId, toBranchId, notes = "" } = req.body || {};
@@ -4486,7 +4528,7 @@ router.post("/transfers", authMiddleware, requireBusinessPermission("inventory.a
   }
 });
 
-router.patch("/transfers/:id", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+router.patch("/transfers-legacy-disabled/:id", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const { id } = req.params;
@@ -5152,6 +5194,46 @@ router.post("/employees/:id/reactivate", authMiddleware, requireAnyPermission(em
 });
 
 // 1. Initialize Standard CRUD Endpoints
+// Read-only POS customer lookup.  It is intentionally separate from the
+// customer CRUD route: POS may find an existing company customer by phone,
+// but it never creates or mutates a customer at transaction time.
+router.get("/pos/customer-lookup", authMiddleware, requireAnyBusinessPermission(["pos.view", "pos.sell"]), async (req, res, next) => {
+  try {
+    const normalizedPhone = normalizePhone(req.query.phone);
+    if (!normalizedPhone) {
+      throw new AppError("Customer phone is required.", 422, "CUSTOMER_PHONE_REQUIRED");
+    }
+
+    const rows = await models.sequelize.query(`
+      SELECT id, name, phone, email, tier, status
+      FROM customers
+      WHERE company_id = :companyId
+        AND status = 'active'
+        AND deleted_at IS NULL
+        AND ltrim(regexp_replace(phone, '[^0-9]', '', 'g'), '0') = :normalizedPhone
+      ORDER BY created_at ASC, id ASC
+      LIMIT 2
+    `, {
+      replacements: { companyId: req.companyId, normalizedPhone },
+      type: require("sequelize").QueryTypes.SELECT,
+    });
+
+    if (rows.length > 1) {
+      throw new AppError("More than one active customer matches this phone number.", 409, "CUSTOMER_PHONE_AMBIGUOUS");
+    }
+
+    const customer = rows[0] || null;
+    return res.status(200).json({
+      success: true,
+      data: {
+        found: Boolean(customer),
+        customer,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
 setupCrud("customers", models.Customer, ["name", "phone", "email"]);
 
 // One selected-Customer projection only. Do not enrich every /customers list
@@ -5194,6 +5276,13 @@ function requireInventoryV2IdempotencyKey(req) {
   const key = String(req.headers["idempotency-key"] || "").trim();
   if (!key) throw new ValidationError("Idempotency-Key is required for Inventory V2 mutations.");
   return key;
+}
+
+async function resolveInventoryCountIdempotency({ req, scope, normalizedBody, params, transaction }) {
+  const key = requireInventoryV2IdempotencyKey(req);
+  const requestHash = idempotencyService.hashRequest(scope, normalizedBody, params);
+  const claim = await idempotencyService.claim({ models, companyId: req.companyId, scope, key, requestHash, transaction });
+  return { key, requestHash, claim };
 }
 
 async function findScopedInventoryV2Asset(req, assetId, branchId, transaction, { lock = false } = {}) {
@@ -5850,21 +5939,55 @@ router.post("/inventory-v2/assets/:id/barcode/replace", authMiddleware, requireB
   }
 });
 
-router.post("/inventory-v2/workshop-orders", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+router.get("/inventory-v2/workshop-orders", authMiddleware, requireBusinessPermission(workshopPolicy.WORKSHOP_PERMISSIONS.read), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.query.branchId || req.headers["x-branch-id"], { required: true });
+    const rows = await models.sequelize.query(`
+      SELECT wo.id, wo.order_number AS "orderNumber", wo.branch_id AS "branchId",
+        wo.workshop_location_id AS "workshopLocationId", wl.name AS "workshopLocationName",
+        wo.return_location_id AS "returnLocationId", rl.name AS "returnLocationName",
+        wo.provider_name AS "providerName", wo.status, wo.expected_return_at AS "expectedReturnAt",
+        wo.created_at AS "createdAt", COUNT(wi.id)::int AS "assetCount",
+        COALESCE(json_agg(json_build_object('assetId', wi.asset_id, 'barcode', a.barcode, 'status', wi.status))
+          FILTER (WHERE wi.id IS NOT NULL), '[]'::json) AS assets
+      FROM inventory_workshop_orders wo
+      LEFT JOIN inventory_locations wl ON wl.id=wo.workshop_location_id
+      LEFT JOIN inventory_locations rl ON rl.id=wo.return_location_id
+      LEFT JOIN inventory_workshop_items wi ON wi.workshop_order_id=wo.id
+      LEFT JOIN assets a ON a.id=wi.asset_id
+      WHERE wo.company_id=:companyId AND wo.branch_id=:branchId
+      GROUP BY wo.id, wl.name, rl.name
+      ORDER BY wo.created_at DESC
+      LIMIT 100
+    `, { replacements: { companyId: req.companyId, branchId }, type: require("sequelize").QueryTypes.SELECT });
+    return res.status(200).json({ success: true, data: { items: rows } });
+  } catch (error) { return next(error); }
+});
+
+router.post("/inventory-v2/workshop-orders", authMiddleware, requireBusinessPermission(workshopPolicy.WORKSHOP_PERMISSIONS.send, { touch: true }), async (req, res, next) => {
   const transaction = await models.sequelize.transaction();
   try {
-    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const body = workshopPolicy.normalizeSendBody(req.body || {});
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true, transaction });
+    const workshopLocation = await models.InventoryLocation.findOne({ where: { id: body.workshopLocationId, companyId: req.companyId }, transaction, lock: transaction.LOCK.UPDATE });
+    workshopPolicy.assertScopedActiveLocation(workshopLocation, { companyId: req.companyId, branchId });
     const idempotencyKey = requireInventoryV2IdempotencyKey(req);
-    const assetIds = [...new Set(Array.isArray(req.body?.assetIds) ? req.body.assetIds.map(String) : [])];
-    if (!assetIds.length) throw new ValidationError("Workshop requires one or more exact Asset IDs.");
-    const existing = await models.sequelize.query("SELECT source_id FROM asset_events WHERE company_id=:companyId AND idempotency_key=:idempotencyKey LIMIT 1", { replacements: { companyId: req.companyId, idempotencyKey: `${idempotencyKey}:0` }, transaction, type: require("sequelize").QueryTypes.SELECT });
-    if (existing.length) { await transaction.commit(); return res.status(200).json({ success: true, replayed: true, data: { workshopOrderId: existing[0].source_id } }); }
+    const scope = "workshop.send";
+    const requestHash = idempotencyService.hashRequest(scope, body, { branchId });
+    const claim = await idempotencyService.claim({ models, companyId: req.companyId, scope, key: idempotencyKey, requestHash, transaction });
+    if (!claim.claimed) {
+      await transaction.rollback();
+      const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope, key: idempotencyKey, requestHash });
+      if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+      return res.status(prior.statusCode || 409).json({ success: false, message: prior.message, code: "IDEMPOTENCY_CONFLICT" });
+    }
+    const assetIds = body.assetIds;
     const orderId = inventoryV2Runtime.newId("IMWORK");
     const context = inventoryV2Context(req, branchId);
     await models.sequelize.query(`INSERT INTO inventory_workshop_orders
-      (id,company_id,branch_id,order_number,provider_name,status,expected_return_at,created_by)
-      VALUES (:id,:companyId,:branchId,:orderNumber,:providerName,'SENT',:expectedReturnAt,:createdBy)`, {
-      replacements: { id: orderId, companyId: req.companyId, branchId, orderNumber: req.body?.orderNumber || orderId, providerName: req.body?.providerName || null, expectedReturnAt: req.body?.expectedReturnAt || null, createdBy: context.actorId || null }, transaction,
+      (id,company_id,branch_id,order_number,provider_name,status,expected_return_at,workshop_location_id,created_by)
+      VALUES (:id,:companyId,:branchId,:orderNumber,:providerName,'SENT',:expectedReturnAt,:workshopLocationId,:createdBy)`, {
+      replacements: { id: orderId, companyId: req.companyId, branchId, orderNumber: orderId, providerName: body.providerName, expectedReturnAt: body.expectedReturnAt, workshopLocationId: workshopLocation.id, createdBy: context.actorId || null }, transaction,
     });
     const assets = [];
     for (let ordinal = 0; ordinal < assetIds.length; ordinal += 1) {
@@ -5875,23 +5998,37 @@ router.post("/inventory-v2/workshop-orders", authMiddleware, requireBusinessPerm
         VALUES (:id,:orderId,:assetId,:companyId,:fromLocationId,'AVAILABLE','SENT',:sentAt,:sentBy)`, {
         replacements: { id: inventoryV2Runtime.newId("IMWORKITEM"), orderId, assetId: asset.id, companyId: req.companyId, fromLocationId: asset.locationId || null, sentAt: context.occurredAt, sentBy: context.actorId || null }, transaction,
       });
-      await inventoryV2Runtime.transitionAsset({ models, transaction, asset, context: { ...context, branchName: asset.branch }, toStatus: "WORKSHOP", eventType: "WORKSHOP_SENT", movementType: "WORKSHOP_OUT", sourceType: "WORKSHOP_ORDER", sourceId: orderId, note: req.body?.notes || "Asset sent to workshop", idempotencyKey: `${idempotencyKey}:${ordinal}` });
+      await inventoryV2Runtime.transitionAsset({ models, transaction, asset, context: { ...context, branchName: asset.branch }, toStatus: "WORKSHOP", eventType: "WORKSHOP_SENT", movementType: "WORKSHOP_OUT", sourceType: "WORKSHOP_ORDER", sourceId: orderId, note: body.notes || "Asset sent to workshop", idempotencyKey: `${idempotencyKey}:${ordinal}`, toBranchId: branchId, toLocationId: workshopLocation.id });
       assets.push(asset.id);
     }
     await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory_v2.workshop_sent", description: `Workshop order ${orderId} sent with ${assets.length} Asset(s).`, sourceDocument: orderId, metadata: { assets } }), { transaction });
+    const responseBody = { success: true, replayed: false, data: { workshopOrderId: orderId, assetIds: assets, workshopLocationId: workshopLocation.id } };
+    await idempotencyService.succeed({ request: claim.request, statusCode: 201, responseBody, transaction });
     await transaction.commit();
-    return res.status(201).json({ success: true, data: { workshopOrderId: orderId, assetIds: assets } });
-  } catch (error) { await transaction.rollback(); return next(error); }
+    return res.status(201).json(responseBody);
+  } catch (error) { if (!transaction.finished) await transaction.rollback(); return next(error); }
 });
 
-router.post("/inventory-v2/workshop-orders/:id/return", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
+router.post("/inventory-v2/workshop-orders/:id/return", authMiddleware, requireBusinessPermission(workshopPolicy.WORKSHOP_PERMISSIONS.complete, { touch: true }), async (req, res, next) => {
   const transaction = await models.sequelize.transaction();
   try {
-    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const body = workshopPolicy.normalizeCompleteBody(req.body || {});
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true, transaction });
     const idempotencyKey = requireInventoryV2IdempotencyKey(req);
+    const scope = "workshop.complete";
+    const requestHash = idempotencyService.hashRequest(scope, body, { branchId, workshopOrderId: req.params.id });
+    const claim = await idempotencyService.claim({ models, companyId: req.companyId, scope, key: idempotencyKey, requestHash, transaction });
+    if (!claim.claimed) {
+      await transaction.rollback();
+      const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope, key: idempotencyKey, requestHash });
+      if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+      return res.status(prior.statusCode || 409).json({ success: false, message: prior.message, code: "IDEMPOTENCY_CONFLICT" });
+    }
     const [order] = await models.sequelize.query("SELECT * FROM inventory_workshop_orders WHERE id=:id AND company_id=:companyId AND branch_id=:branchId FOR UPDATE", { replacements: { id: req.params.id, companyId: req.companyId, branchId }, transaction, type: require("sequelize").QueryTypes.SELECT });
     if (!order) throw new NotFoundError("Inventory V2 workshop order not found.");
-    if (order.status === "RETURNED") { await transaction.commit(); return res.status(200).json({ success: true, replayed: true, data: { workshopOrderId: order.id } }); }
+    workshopPolicy.assertOrderCanComplete(order);
+    const returnLocation = await models.InventoryLocation.findOne({ where: { id: body.returnLocationId, companyId: req.companyId }, transaction, lock: transaction.LOCK.UPDATE });
+    workshopPolicy.assertScopedActiveLocation(returnLocation, { companyId: req.companyId, branchId }, "WORKSHOP_RETURN_LOCATION");
     const items = await models.sequelize.query("SELECT * FROM inventory_workshop_items WHERE workshop_order_id=:orderId AND status='SENT' ORDER BY created_at", { replacements: { orderId: order.id }, transaction, type: require("sequelize").QueryTypes.SELECT });
     if (!items.length) throw new ConflictError("Workshop order has no sent Asset items to return.");
     const context = inventoryV2Context(req, branchId);
@@ -5899,14 +6036,16 @@ router.post("/inventory-v2/workshop-orders/:id/return", authMiddleware, requireB
       const item = items[ordinal];
       const asset = await findScopedInventoryV2Asset(req, item.asset_id, branchId, transaction, { lock: true });
       if (asset.operationalStatus !== "WORKSHOP") throw new ConflictError(`Asset ${asset.id} is not in workshop.`);
-      await inventoryV2Runtime.transitionAsset({ models, transaction, asset, context: { ...context, branchName: asset.branch }, toStatus: "AVAILABLE", eventType: "WORKSHOP_RETURNED", movementType: "WORKSHOP_IN", sourceType: "WORKSHOP_ORDER", sourceId: order.id, note: req.body?.notes || "Asset returned from workshop", idempotencyKey: `${idempotencyKey}:${ordinal}` });
+      await inventoryV2Runtime.transitionAsset({ models, transaction, asset, context: { ...context, branchName: asset.branch }, toStatus: "AVAILABLE", eventType: "WORKSHOP_RETURNED", movementType: "WORKSHOP_IN", sourceType: "WORKSHOP_ORDER", sourceId: order.id, note: body.notes || "Asset returned from workshop", idempotencyKey: `${idempotencyKey}:${ordinal}`, toBranchId: branchId, toLocationId: returnLocation.id });
       await models.sequelize.query("UPDATE inventory_workshop_items SET status='RETURNED',returned_at=:returnedAt,returned_by=:returnedBy,updated_at=CURRENT_TIMESTAMP WHERE id=:id", { replacements: { id: item.id, returnedAt: context.occurredAt, returnedBy: context.actorId || null }, transaction });
     }
-    await models.sequelize.query("UPDATE inventory_workshop_orders SET status='RETURNED',updated_at=CURRENT_TIMESTAMP WHERE id=:id", { replacements: { id: order.id }, transaction });
+    await models.sequelize.query("UPDATE inventory_workshop_orders SET status='RETURNED',return_location_id=:returnLocationId,updated_at=CURRENT_TIMESTAMP WHERE id=:id", { replacements: { id: order.id, returnLocationId: returnLocation.id }, transaction });
     await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory_v2.workshop_returned", description: `Workshop order ${order.id} returned.`, sourceDocument: order.id }), { transaction });
+    const responseBody = { success: true, replayed: false, data: { workshopOrderId: order.id, returnedAssets: items.map((item) => item.asset_id), returnLocationId: returnLocation.id } };
+    await idempotencyService.succeed({ request: claim.request, statusCode: 200, responseBody, transaction });
     await transaction.commit();
-    return res.status(200).json({ success: true, data: { workshopOrderId: order.id, returnedAssets: items.map((item) => item.asset_id) } });
-  } catch (error) { await transaction.rollback(); return next(error); }
+    return res.status(200).json(responseBody);
+  } catch (error) { if (!transaction.finished) await transaction.rollback(); return next(error); }
 });
 
 router.post("/inventory-v2/assets/:id/missing", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
@@ -5932,6 +6071,150 @@ router.post("/inventory-v2/assets/:id/missing", authMiddleware, requireBusinessP
     return res.status(201).json({ success: true, data: { missingCaseId, assetId: asset.id } });
   } catch (error) { await transaction.rollback(); return next(error); }
 });
+
+// Canonical B3 Inventory Count routes. The historical definitions below are
+// intentionally unreachable compatibility source and are kept only for
+// forensic traceability during this minimum-safe batch.
+async function claimInventoryCountAction(req, scope, body, params, transaction) {
+  const key = requireInventoryV2IdempotencyKey(req);
+  const requestHash = idempotencyService.hashRequest(scope, body, params);
+  const claim = await idempotencyService.claim({ models, companyId: req.companyId, scope, key, requestHash, transaction });
+  return { key, requestHash, claim };
+}
+
+async function returnInventoryCountIdempotency(res, req, scope, idem, transaction) {
+  await transaction.rollback();
+  const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope, key: idem.key, requestHash: idem.requestHash });
+  if (prior.state === "replay") return res.status(prior.statusCode || 200).json(prior.responseBody);
+  return res.status(409).json({ success: false, code: "IDEMPOTENCY_CONFLICT", message: prior.message });
+}
+
+function inventoryCountReadModel(audit) {
+  const data = audit.toJSON();
+  const items = data.items || [];
+  return {
+    ...data,
+    expectedCount: items.length,
+    countedCount: items.filter((item) => item.result === "MATCHED").length,
+    missingCount: items.filter((item) => item.result === "MISSING").length,
+    unexpectedCount: items.filter((item) => item.result === "EXTRA").length,
+  };
+}
+
+router.get("/inventory-v2/audits", authMiddleware, requireBusinessPermission(inventoryCountPolicy.COUNT_PERMISSIONS.read), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const requestedStatus = String(req.query.status || "").trim();
+    const allowedStatuses = new Set(["draft", "in-progress", "completed", "closed"]);
+    const where = { companyId: req.companyId, branchId };
+    if (requestedStatus && allowedStatuses.has(requestedStatus)) where.status = requestedStatus;
+    const audits = await models.StockAudit.findAll({
+      where,
+      include: [{ model: models.StockAuditItem, as: "items", include: [{ model: models.Asset, as: "asset" }] }],
+      order: [["createdAt", "DESC"]],
+      limit: 100,
+    });
+    return res.status(200).json({ success: true, data: { items: audits.map(inventoryCountReadModel) } });
+  } catch (error) { return next(error); }
+});
+
+router.get("/inventory-v2/audits/:id", authMiddleware, requireBusinessPermission(inventoryCountPolicy.COUNT_PERMISSIONS.read), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true });
+    const audit = await models.StockAudit.findOne({ where: { id: req.params.id, companyId: req.companyId, branchId }, include: [{ model: models.StockAuditItem, as: "items", include: [{ model: models.Asset, as: "asset" }] }] });
+    if (!audit) throw new NotFoundError("Inventory Count not found in the authorized Branch.");
+    return res.status(200).json({ success: true, data: inventoryCountReadModel(audit) });
+  } catch (error) { return next(error); }
+});
+
+router.post("/inventory-v2/audits", authMiddleware, requireBusinessPermission(inventoryCountPolicy.COUNT_PERMISSIONS.create, { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true, transaction });
+    const body = inventoryCountPolicy.normalizeCreateBody(req.body || {});
+    const location = await models.InventoryLocation.findOne({ where: { id: body.locationId, companyId: req.companyId }, transaction, lock: transaction.LOCK.UPDATE });
+    inventoryCountPolicy.assertScopedActiveLocation(location, { companyId: req.companyId, branchId });
+    const scope = "inventory-count.create";
+    const idem = await claimInventoryCountAction(req, scope, body, { branchId }, transaction);
+    if (!idem.claim.claimed) return returnInventoryCountIdempotency(res, req, scope, idem, transaction);
+    const context = inventoryV2Context(req, branchId);
+    const result = await inventoryAuditCanonicalService.createAudit({ models, companyId: req.companyId, branchId, auditNumber: body.auditNumber, auditMethod: body.auditMethod, locationId: body.locationId, notes: body.notes, actor: { id: context.actorId, name: context.actorName }, transaction, recordAudit: (audit, auditMethod) => auditService.record(req.companyId, commandActorContext.attachAuditActor(req, { action: "inventory_v2.audit_created", description: `Inventory Count ${audit.auditNumber} created.`, sourceDocument: audit.id, metadata: { auditMethod, branchId, locationId: body.locationId } }), { transaction }) });
+    const responseBody = { success: true, replayed: false, data: result.audit.toJSON() };
+    await idempotencyService.succeed({ request: idem.claim.request, statusCode: 201, responseBody, transaction });
+    await transaction.commit();
+    return res.status(201).json(responseBody);
+  } catch (error) { if (!transaction.finished) await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/audits/:id/start", authMiddleware, requireBusinessPermission(inventoryCountPolicy.COUNT_PERMISSIONS.create, { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    inventoryCountPolicy.assertNoBody(req.body || {});
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true, transaction });
+    const scope = "inventory-count.start";
+    const idem = await claimInventoryCountAction(req, scope, {}, { branchId, auditId: req.params.id }, transaction);
+    if (!idem.claim.claimed) return returnInventoryCountIdempotency(res, req, scope, idem, transaction);
+    const result = await inventoryAuditCanonicalService.startAudit({ models, companyId: req.companyId, branchId, auditId: req.params.id, transaction });
+    const responseBody = { success: true, replayed: result.replayed, data: { ...result.audit.toJSON(), expectedCount: result.expectedCount } };
+    await idempotencyService.succeed({ request: idem.claim.request, statusCode: 200, responseBody, transaction });
+    await transaction.commit();
+    return res.status(200).json(responseBody);
+  } catch (error) { if (!transaction.finished) await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/audits/:id/observe", authMiddleware, requireBusinessPermission(inventoryCountPolicy.COUNT_PERMISSIONS.scan, { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true, transaction });
+    const body = inventoryCountPolicy.normalizeScanBody(req.body || {});
+    const audit = await models.StockAudit.findOne({ where: { id: req.params.id, companyId: req.companyId, branchId }, transaction, lock: true });
+    if (!audit) throw new NotFoundError("Inventory Count not found in the authorized Branch.");
+    const normalizedBody = { ...body, method: body.method || audit.auditMethod };
+    const scope = "inventory-count.scan";
+    const idem = await claimInventoryCountAction(req, scope, normalizedBody, { branchId, auditId: req.params.id }, transaction);
+    if (!idem.claim.claimed) return returnInventoryCountIdempotency(res, req, scope, idem, transaction);
+    const result = await inventoryAuditCanonicalService.observeAudit({ models, companyId: req.companyId, branchId, auditId: req.params.id, assetIds: body.assetIds, barcodes: body.barcodes, rfidNumbers: body.rfidNumbers, method: normalizedBody.method, transaction });
+    const responseBody = { success: true, replayed: false, data: { auditId: result.audit.id, observed: result.observed } };
+    await idempotencyService.succeed({ request: idem.claim.request, statusCode: 200, responseBody, transaction });
+    await transaction.commit();
+    return res.status(200).json(responseBody);
+  } catch (error) { if (!transaction.finished) await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/audits/:id/complete", authMiddleware, requireBusinessPermission(inventoryCountPolicy.COUNT_PERMISSIONS.complete, { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    inventoryCountPolicy.assertNoBody(req.body || {});
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true, transaction });
+    const scope = "inventory-count.complete";
+    const idem = await claimInventoryCountAction(req, scope, {}, { branchId, auditId: req.params.id }, transaction);
+    if (!idem.claim.claimed) return returnInventoryCountIdempotency(res, req, scope, idem, transaction);
+    const result = await inventoryAuditCanonicalService.completeAudit({ models, companyId: req.companyId, branchId, auditId: req.params.id, transaction });
+    const responseBody = { success: true, replayed: result.replayed, data: result.audit.toJSON(), note: "Count completion does not mutate Asset state or apply adjustments." };
+    await idempotencyService.succeed({ request: idem.claim.request, statusCode: 200, responseBody, transaction });
+    await transaction.commit();
+    return res.status(200).json(responseBody);
+  } catch (error) { if (!transaction.finished) await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/audits/:id/close", authMiddleware, requireBusinessPermission(inventoryCountPolicy.COUNT_PERMISSIONS.complete, { touch: true }), async (req, res, next) => {
+  const transaction = await models.sequelize.transaction();
+  try {
+    inventoryCountPolicy.assertNoBody(req.body || {});
+    const branchId = await resolveAuthorizedBranchId(req, req.headers["x-branch-id"], { required: true, transaction });
+    const scope = "inventory-count.close";
+    const idem = await claimInventoryCountAction(req, scope, {}, { branchId, auditId: req.params.id }, transaction);
+    if (!idem.claim.claimed) return returnInventoryCountIdempotency(res, req, scope, idem, transaction);
+    const context = inventoryV2Context(req, branchId);
+    const result = await inventoryAuditCanonicalService.closeAudit({ models, companyId: req.companyId, branchId, auditId: req.params.id, actor: { id: context.actorId, name: context.actorName }, transaction });
+    const responseBody = { success: true, replayed: result.replayed, data: result.audit.toJSON() };
+    await idempotencyService.succeed({ request: idem.claim.request, statusCode: 200, responseBody, transaction });
+    await transaction.commit();
+    return res.status(200).json(responseBody);
+  } catch (error) { if (!transaction.finished) await transaction.rollback(); return next(error); }
+});
+
+router.post("/inventory-v2/audits-legacy-disabled", authMiddleware, async (_req, res) => res.status(410).json({ success: false, code: "LEGACY_INVENTORY_COUNT_DISABLED", message: "Use the canonical Inventory Count workflow." }));
 
 router.post("/inventory-v2/audits", authMiddleware, requireBusinessPermission("inventory.adjust", { touch: true }), async (req, res, next) => {
   const adapterTransaction = await models.sequelize.transaction();
@@ -8733,7 +9016,7 @@ router.post(["/purchase-orders/receive", "/supplier-purchases/receive"], authMid
           }, { transaction: t });
           if (v2Piece) {
             const evidenceContext = { companyId: req.companyId, branchId: branch.id, branchName: branch.name, supplierId: supplier.id, purchaseDate: dateStr, currency: settings.currency, vatRateDefault: settings.purchaseVatRate ?? settings.vatRate ?? null, actorId: req.user?.id || null, actorName: actor, occurredAt: now };
-            await inventoryV2Runtime.persistReceiptEvidence({ models, transaction: t, asset: asset.toJSON(), poItem: poItem.toJSON(), piece: v2Piece, context: evidenceContext });
+            await inventoryV2Runtime.persistReceiptEvidence({ models, transaction: t, asset: asset.toJSON(), poItem: poItem.toJSON(), piece: v2Piece, pieceIndex: qtyIndex, context: evidenceContext });
             await inventoryV2Runtime.recordMovement({ models, transaction: t, asset: asset.toJSON(), context: evidenceContext, movementType: "PURCHASE_RECEIVE", sourceType: "PURCHASE_ORDER", sourceId: purchaseOrderId, eventId: receiptEvent.id, toBranchId: branch.id, toLocationId: asset.locationId || null });
           }
           createdItems.push(poItem.toJSON());
@@ -14151,13 +14434,14 @@ router.get("/assets/:id/timeline", authMiddleware, async (req, res, next) => {
 router.post("/pricing/calculate", authMiddleware, async (req, res, next) => {
   try {
     const { assetIds = [], discount = 0, makingCharge = 0, makingChargePerGram = null, stoneValue = 0 } = req.body || {};
+    const branchId = await resolveAuthorizedBranchId(req, req.body?.branchId || req.headers["x-branch-id"] || req.branchId, { required: true });
 
     const products = await models.Product.findAll({
-      where: { id: assetIds, companyId: req.companyId }
+      where: { id: assetIds, companyId: req.companyId, branchId }
     });
 
     const assets = await models.Asset.findAll({
-      where: { id: assetIds, companyId: req.companyId }
+      where: { id: assetIds, companyId: req.companyId, branchId }
     });
 
     const settings = await settingsService.getCompanySettings(req.companyId);
@@ -14234,11 +14518,25 @@ router.post("/pricing/calculate", authMiddleware, async (req, res, next) => {
           vatRatePercent,
         }).tax;
     const total = Math.round((taxBase + tax) * 10000) / 10000;
-    const journalPreview = postingService.previewInvoiceLines({
+    const rawJournalPreview = postingService.previewInvoiceLines({
       total, tax, subtotal: taxBase, cost,
       paymentMethod: req.body.paymentMethod || "Cash",
-      status: req.body.status || "paid"
+      status: req.body.status || (["installment", "deposit"].includes(String(req.body.paymentMethod || "").toLowerCase()) ? "partial" : "paid")
     });
+    // The preview is read-only, but its account labels/codes must come from the
+    // same branch-scoped resolver used by posting.  The client never supplies
+    // account IDs, names, COGS, or inventory values as financial authority.
+    const journalPreview = {
+      ...rawJournalPreview,
+      lines: await Promise.all(rawJournalPreview.lines.map(async (line) => {
+        const account = await financialAccountResolver.resolvePostingAccount({
+          companyId: req.companyId,
+          branchId,
+          accountCode: line.account.code,
+        });
+        return { ...line, account: { code: account.code, name: account.nameAr || account.name } };
+      })),
+    };
 
     // Top-level fields for direct front-end binding + nested data envelope.
     const payload = {

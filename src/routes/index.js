@@ -14,6 +14,7 @@ const gemStoneJewelleryProfileRoutes = require("./gem-stone-jewellery-profile.ro
 const pearlJewelleryProfileRoutes = require("./pearl-jewellery-profile.routes");
 const loosePearlProfileRoutes = require("./loose-pearl-profile.routes");
 const inventoryLocationRoutes = require("./inventory-location.routes");
+const transferRoutes = require("./transfer.routes");
 const employeeAuthorizationRoutes = require("./employee-authorization.routes");
 const systemAccountRoutes = require("./system-account.routes");
 const setupRoutes = require("./setup.routes");
@@ -42,6 +43,7 @@ router.use("/inventory-v2/gem-stone", gemStoneJewelleryProfileRoutes);
 router.use("/inventory-v2/pearl-jewellery", pearlJewelleryProfileRoutes);
 router.use("/inventory-v2/loose-pearl", loosePearlProfileRoutes);
 router.use("/inventory/locations", inventoryLocationRoutes);
+router.use("/transfers", transferRoutes);
 router.use("/system-accounts", systemAccountRoutes);
 router.use("/setup", setupRoutes);
 router.use("/", employeeAuthorizationRoutes);

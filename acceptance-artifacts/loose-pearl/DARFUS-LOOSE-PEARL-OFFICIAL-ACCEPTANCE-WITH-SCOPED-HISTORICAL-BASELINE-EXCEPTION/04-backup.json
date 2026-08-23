@@ -1,0 +1,9 @@
+{
+  "path": "backend/acceptance-artifacts/loose-pearl/DARFUS-LOOSE-PEARL-OFFICIAL-ACCEPTANCE-WITH-SCOPED-HISTORICAL-BASELINE-EXCEPTION/darfus_erp_official_scoped_exception_20260822_222942.dump",
+  "database": "darfus_erp",
+  "sizeBytes": 713789,
+  "sha256": "579A5DE670A51A59AB8AA64BEF8B64783A96F5E35A68C88E236DD6C16E37ECBF",
+  "pgRestoreListExit": 0,
+  "format": "CUSTOM",
+  "createdUtc": "2026-08-22T19:29:42Z"
+}

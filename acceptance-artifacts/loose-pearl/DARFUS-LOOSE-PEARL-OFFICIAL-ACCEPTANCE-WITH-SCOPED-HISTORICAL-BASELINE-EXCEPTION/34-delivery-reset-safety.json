@@ -1,0 +1,6 @@
+{
+  "localMainDbWillBeResetBeforeDelivery": true,
+  "finalServerDb": "SEPARATE_FRESH_DATABASE",
+  "historicalExceptionMustNotCarryForward": true,
+  "noCleanupPerformed": true
+}

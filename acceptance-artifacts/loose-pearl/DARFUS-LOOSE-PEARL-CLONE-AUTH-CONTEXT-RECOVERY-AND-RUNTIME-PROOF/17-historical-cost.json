@@ -1,0 +1,8 @@
+{
+  "purchaseBase": "100.00000000",
+  "purchaseCostRevisionField": "total_purchase_cost",
+  "storedValue": "100.00000000",
+  "vatBase": "100.00000000",
+  "vatAmount": "14.00000000",
+  "historicalCurrentSeparated": true
+}

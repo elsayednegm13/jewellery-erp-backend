@@ -1,0 +1,14 @@
+{
+  "purchaseBase": 100,
+  "purchaseVat": 14,
+  "purchaseTotal": 114,
+  "currentValue": 120,
+  "currentVat": 16.8,
+  "currentTotal": 136.8,
+  "vatApplicationCount": 1,
+  "journalDebit": 114,
+  "journalCredit": 114,
+  "cashDelta": 0,
+  "historicalCurrentSeparation": "PASS",
+  "accounting": "PASS"
+}

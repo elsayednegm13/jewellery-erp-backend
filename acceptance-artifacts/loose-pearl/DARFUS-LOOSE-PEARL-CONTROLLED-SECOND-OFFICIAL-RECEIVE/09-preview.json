@@ -1,0 +1,13 @@
+{
+  "profilePreview": "READY",
+  "sharedReceivePreview": "READY",
+  "purchaseBasePreTax": "100.00000000",
+  "purchaseVAT": "14.00000000",
+  "purchaseTotalTaxInclusive": "114.00000000",
+  "currentBasePreTax": "120.00000000",
+  "currentVAT": "16.80000000",
+  "currentTotalTaxInclusive": "136.80000000",
+  "configuredVatRate": 14,
+  "source": "browser visible UI",
+  "browserRecovery": "fresh tab; no prior POST"
+}

@@ -1,0 +1,10 @@
+{
+  "gate": "BLOCKED_OFFICIAL_LOCAL_BACKEND_RUNTIME_REFRESH_OR_PARITY",
+  "reason": "new Node PID equals old Node PID despite a changed process/container start time",
+  "officialReceiveAllowed": false,
+  "sourceChangeAllowed": false,
+  "officialDbBusinessDelta": 0,
+  "receiveExecuted": false,
+  "nextBatchAllowed": "NO_AUTOMATIC_START",
+  "recommendedNextStep": "owner review of PID-namespace limitation and separately authorized backend-only runtime identity proof"
+}

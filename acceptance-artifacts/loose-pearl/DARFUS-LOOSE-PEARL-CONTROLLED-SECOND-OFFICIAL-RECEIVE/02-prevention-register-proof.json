@@ -1,0 +1,10 @@
+{
+  "ordinalPositive": "REQUIRED",
+  "storedLineBalance": "PASS",
+  "ordinalFinite": "REQUIRED",
+  "ordinalInteger": "REQUIRED",
+  "focusedTests": "PASS",
+  "legacy001ToleranceActive": "NO",
+  "nanRejectedBeforeSql": "REQUIRED",
+  "lp003": "CLOSED"
+}

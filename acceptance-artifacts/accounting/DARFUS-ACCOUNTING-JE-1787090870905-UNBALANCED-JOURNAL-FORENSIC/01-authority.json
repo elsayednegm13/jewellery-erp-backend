@@ -1,0 +1,9 @@
+{
+  "controlId": "DARFUS-ACCOUNTING-JE-1787090870905-UNBALANCED-JOURNAL-FORENSIC",
+  "mode": "READ_ONLY_FORENSIC",
+  "targetDatabase": "darfus_erp",
+  "dbWrites": 0,
+  "journalEdit": false,
+  "loosePearlReceive": false,
+  "productionContacted": false
+}

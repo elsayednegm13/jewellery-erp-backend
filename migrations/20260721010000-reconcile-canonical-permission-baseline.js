@@ -6,8 +6,7 @@
 // expanded by this migration.
 const {
   PERMISSIONS,
-  ROLE_DEFS,
-  SALES_ADJUSTMENT_PERMISSIONS
+  ROLE_DEFS
 } = require("../src/bootstrap/permission-baseline-v1");
 
 function permissionRow(name, now) {
@@ -30,7 +29,7 @@ module.exports = {
       const now = new Date();
       await queryInterface.bulkInsert(
         "permissions",
-        SALES_ADJUSTMENT_PERMISSIONS.map((name) => permissionRow(name, now)),
+        PERMISSIONS.map((name) => permissionRow(name, now)),
         { ignoreDuplicates: true, transaction }
       );
 

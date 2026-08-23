@@ -1,0 +1,8 @@
+{
+  "superAdminCompanyContextMethod": "X-Company-ID",
+  "branchContextMethod": "X-Branch-ID",
+  "authRoute": "/auth/login",
+  "operationalRoutesRequireExplicitCompany": true,
+  "authMiddlewareChanged": false,
+  "securityBypass": false
+}

@@ -11,12 +11,21 @@ const SALES_ADJUSTMENT_PERMISSIONS = [
   "sales.returns.execute", "sales.exchanges.execute", "sales.installments.collect"
 ];
 
+const WORKSHOP_PERMISSIONS = [
+  "inventory.workshop.read", "inventory.workshop.send", "inventory.workshop.complete", "inventory.workshop.cancel"
+];
+
+const INVENTORY_COUNT_PERMISSIONS = [
+  "inventory.count.read", "inventory.count.create", "inventory.count.scan", "inventory.count.complete"
+];
+
 const PERMISSIONS = [
   "dashboard.view",
   "customers.view", "customers.create", "customers.update", "customers.delete", "customers.export",
   "sales.view", "sales.create", "sales.approve", "sales.export", "sales.print", ...SALES_ADJUSTMENT_PERMISSIONS,
   "pos.view", "pos.sell", "pos.discount.approve",
   "inventory.view", "inventory.create", "inventory.update", "inventory.delete", "inventory.adjust", "inventory.export", "inventory.print",
+  "inventory.transfer.read", "inventory.transfer.create", "inventory.transfer.approve", "inventory.transfer.dispatch", "inventory.transfer.receive", "inventory.transfer.cancel", ...WORKSHOP_PERMISSIONS, ...INVENTORY_COUNT_PERMISSIONS,
   "suppliers.view", "suppliers.create", "suppliers.update", "suppliers.delete", "suppliers.export",
   "accounting.view", "accounting.post", "accounting.export", "accounting.lock.manage", "accounting.reconciliation.view",
   "treasury.view", "treasury.update", "treasury.register.view", "treasury.register.open", "treasury.register.close",
@@ -74,6 +83,8 @@ module.exports = {
   PERMISSION_BASELINE_VERSION: "v1.0.0",
   LIFECYCLE_PERMISSIONS,
   SALES_ADJUSTMENT_PERMISSIONS,
+  WORKSHOP_PERMISSIONS,
+  INVENTORY_COUNT_PERMISSIONS,
   PERMISSIONS,
   ROLE_DEFS
 };

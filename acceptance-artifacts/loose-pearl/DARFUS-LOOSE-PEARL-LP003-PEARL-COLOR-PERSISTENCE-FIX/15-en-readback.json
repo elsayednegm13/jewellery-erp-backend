@@ -1,0 +1,13 @@
+{
+  "locale": "en",
+  "status": 200,
+  "profile": "LOOSE_PEARL",
+  "barcode": "PLLOS00000001",
+  "operationalStatus": "AVAILABLE",
+  "netWeight": 1.25,
+  "pearlType": "Abalone",
+  "pearlColor": "Black",
+  "pearlSize": "1.0",
+  "internalMasterIdVisible": false,
+  "undefinedLabelVisible": false
+}

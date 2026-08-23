@@ -1,0 +1,10 @@
+{
+  "officialNode": "v20.20.2",
+  "officialNpm": "10.8.2",
+  "hostPackageDependencies": {"decimal.js":"^10.6.0","express":"^4.19.2","pg":"^8.11.5","sequelize":"^6.37.3"},
+  "officialPackageJsonHash": "231A19D0A81C2579F4D1B8E4D676A7085BA6811516630B811627B58A5CB3A86B",
+  "officialPackageLockHash": "A2E65BF8D4EBBFF9CE559532130DC896433A931C5B6515102FC48149FE602551",
+  "cloneNodeVersion": "NOT_RETAINED_IN_PRIOR_ARTIFACT",
+  "clonePackageParity": "NOT_FULLY_PROVEN",
+  "officialRuntimeDependencyIdentity": "matches current mounted package files by hash; installed module version parity with clone not independently retained"
+}

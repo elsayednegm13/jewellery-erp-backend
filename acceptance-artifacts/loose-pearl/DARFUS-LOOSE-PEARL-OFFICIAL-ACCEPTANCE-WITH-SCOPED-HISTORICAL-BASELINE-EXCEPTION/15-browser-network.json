@@ -1,0 +1,8 @@
+{
+  "previewRequests": "200",
+  "sharedReceivePreview": "200",
+  "finalReceiveRequests": 1,
+  "finalReceiveStatus": 500,
+  "requestInterception": "OFF",
+  "noRetry": true
+}

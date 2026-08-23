@@ -345,9 +345,25 @@ async function recordMovement({ models, transaction, asset, context, movementTyp
   });
 }
 
-async function persistReceiptEvidence({ models, transaction, asset, poItem, piece, context }) {
+function resolveReceiptEvidenceOrdinal({ piece = {}, pieceIndex } = {}) {
+  const candidates = [piece.pieceIndex, pieceIndex];
+  const zeroBased = candidates.find((value) => {
+    if (typeof value === "number") return Number.isSafeInteger(value) && value >= 0;
+    if (typeof value === "string" && /^\d+$/.test(value.trim())) return Number.isSafeInteger(Number(value));
+    return false;
+  });
+  if (zeroBased === undefined) throw new ValidationError("INVENTORY_V2_RECEIPT_EVIDENCE_ORDINAL_INVALID");
+  const ordinal = Number(zeroBased) + 1;
+  if (!Number.isFinite(ordinal) || !Number.isSafeInteger(ordinal) || ordinal < 1) {
+    throw new ValidationError("INVENTORY_V2_RECEIPT_EVIDENCE_ORDINAL_INVALID");
+  }
+  return ordinal;
+}
+
+async function persistReceiptEvidence({ models, transaction, asset, poItem, piece, pieceIndex, context }) {
   const receivedAt = context.occurredAt || new Date();
   const revisionId = newId("IMCOST");
+  const ordinal = resolveReceiptEvidenceOrdinal({ piece, pieceIndex });
   await models.sequelize.query(`INSERT INTO asset_origins
     (id,asset_id,company_id,branch_id,origin_type,purchase_order_item_id,received_at,received_by,mapping_classification)
     VALUES (:id,:assetId,:companyId,:branchId,'PURCHASE_ORDER',:poItemId,:receivedAt,:receivedBy,'V2_RUNTIME_RECEIPT')`, {
@@ -356,7 +372,7 @@ async function persistReceiptEvidence({ models, transaction, asset, poItem, piec
   await models.sequelize.query(`INSERT INTO purchase_order_item_asset_links
     (id,purchase_order_item_id,asset_id,company_id,ordinal,received_at,received_by,mapping_classification)
     VALUES (:id,:poItemId,:assetId,:companyId,:ordinal,:receivedAt,:receivedBy,'V2_RUNTIME_RECEIPT')`, {
-    replacements: { id: newId("IMPO"), poItemId: poItem.id, assetId: asset.id, companyId: context.companyId, ordinal: piece.pieceIndex + 1, receivedAt, receivedBy: context.actorId || null }, transaction,
+    replacements: { id: newId("IMPO"), poItemId: poItem.id, assetId: asset.id, companyId: context.companyId, ordinal, receivedAt, receivedBy: context.actorId || null }, transaction,
   });
   await models.sequelize.query(`INSERT INTO asset_purchase_cost_revisions
     (id,asset_id,company_id,branch_id,revision_no,currency,purchase_gold_rate,gold_rate_source,gold_value,making_per_gram,making_total,certificate_cost,component_cost,vat_enabled,vat_rate,vat_rate_source,vat_base,vat_amount,total_purchase_cost,supplier_id,purchase_date,purchase_order_item_id,is_current,created_by,provenance,mapping_classification)
@@ -905,4 +921,4 @@ async function updateAssetComponents({ models, transaction, asset, context, comp
   return fetchAssetComponents({ models, transaction, assetId: asset.id });
 }
 
-module.exports = { OPERATIONAL_STATUS, CONDITION, TAG_STATE, EVENT_ONLY_TERMS, LEGACY_STATUS, TRANSITIONS, legacySubtypeForProfile, operationalStatusOf, createCgpAvailabilityTransitionContext, createCgpReversalHoldTransitionContext, createCgpReversalFinalizeTransitionContext, requireV2ReceiptPieces, normalizeReceiptPiece, looseDetailsAsPrimarySubject, newId, recordAssetEvent, recordMovement, persistReceiptEvidence, persistManufacturingEvidence, linkInvoiceAsset, transitionAsset, assignRfid, unassignRfid, recordRfidScan, recordTagPrint, normalizeComponentsForProfile, persistAssetComponents, fetchAssetComponents, updateAssetComponents };
+module.exports = { OPERATIONAL_STATUS, CONDITION, TAG_STATE, EVENT_ONLY_TERMS, LEGACY_STATUS, TRANSITIONS, legacySubtypeForProfile, operationalStatusOf, createCgpAvailabilityTransitionContext, createCgpReversalHoldTransitionContext, createCgpReversalFinalizeTransitionContext, requireV2ReceiptPieces, normalizeReceiptPiece, resolveReceiptEvidenceOrdinal, looseDetailsAsPrimarySubject, newId, recordAssetEvent, recordMovement, persistReceiptEvidence, persistManufacturingEvidence, linkInvoiceAsset, transitionAsset, assignRfid, unassignRfid, recordRfidScan, recordTagPrint, normalizeComponentsForProfile, persistAssetComponents, fetchAssetComponents, updateAssetComponents };

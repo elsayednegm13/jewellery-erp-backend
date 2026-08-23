@@ -1,0 +1,24 @@
+{
+  "temporaryBackend": "http://localhost:18002",
+  "databaseTarget": "darfus_erp_loose_pearl_retry_20260822_01",
+  "retryRequest": {
+    "method": "POST",
+    "route": "/api/v1/purchase-orders/receive",
+    "status": 201,
+    "requestId": "c4ba20ff-c079-418a-a18a-4766cca745a7"
+  },
+  "exactReplay": {
+    "method": "POST",
+    "route": "/api/v1/purchase-orders/receive",
+    "status": 201,
+    "requestId": "7444a37f-fb14-48e1-9a59-05affd74c796",
+    "sameBusinessIds": true
+  },
+  "changedPayloadConflict": {
+    "method": "POST",
+    "route": "/api/v1/purchase-orders/receive",
+    "status": 409,
+    "requestId": "40936ed3-820a-4855-8a8b-176cfd75830e"
+  },
+  "secretsPrinted": false
+}

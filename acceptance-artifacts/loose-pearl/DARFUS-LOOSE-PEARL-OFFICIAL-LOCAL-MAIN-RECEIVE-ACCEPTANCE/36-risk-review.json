@@ -1,0 +1,9 @@
+{
+  "p0": 0,
+  "p1": 1,
+  "p2": 0,
+  "blockingIssue": "posted journal JE-1787090870905 is unbalanced by 0.01",
+  "officialReceiveExecuted": false,
+  "officialDatabaseBusinessDelta": 0,
+  "requiredSeparateAction": "OWNER_AUTHORIZED_FORENSIC_ACCOUNTING_REMEDIATION_OR_EXPLICIT_BASELINE_EXCEPTION"
+}

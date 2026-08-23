@@ -1,0 +1,8 @@
+{
+  "cleanup": "completed",
+  "backendContainerRemoved": true,
+  "databaseDropped": true,
+  "cloneStillPresent": false,
+  "businessRollbackPerformed": false,
+  "note": "Disposable clone cleanup is environment cleanup only; no business rollback or mutation was performed."
+}

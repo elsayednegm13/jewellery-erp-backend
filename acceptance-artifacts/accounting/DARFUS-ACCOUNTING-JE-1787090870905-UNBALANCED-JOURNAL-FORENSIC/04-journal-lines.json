@@ -1,0 +1,9 @@
+{
+  "journalId": "JE-1787090870905",
+  "lines": [
+    {"id":"JE-1787090870905-L1","accountCode":"SYS-INVENTORY","accountRole":"Inventory/Asset","debit":"1871.24000000","credit":"0.00000000"},
+    {"id":"JE-1787090870905-L2","accountCode":"1400","accountRole":"Recoverable Input VAT","debit":"261.97000000","credit":"0.00000000"},
+    {"id":"JE-1787090870905-L3","accountCode":"SYS-AP","accountRole":"Supplier Payable","debit":"0.00000000","credit":"2133.22000000"}
+  ],
+  "lineCount": 3
+}

@@ -1,0 +1,14 @@
+{
+  "oldNodePid": 40,
+  "newNodePid": 40,
+  "pidChanged": false,
+  "oldContainerStartedUtc": "2026-08-22T17:21:09.922073003Z",
+  "newContainerStartedUtc": "2026-08-22T21:12:47.891857024Z",
+  "acceptedFixMtimeUtc": "2026-08-22T19:47:43.9151394Z",
+  "newProcessStartAfterAcceptedFix": true,
+  "processIdentityByStartTimeChanged": true,
+  "executingProcessRefreshedByStartTime": true,
+  "strictPidRequirement": "FAIL",
+  "runtimeRefreshFailedStrictGate": true,
+  "stopReason": "Control requires new Node PID != old Node PID or equivalent identity change; PID is reused inside the restarted container namespace"
+}

@@ -1,0 +1,9 @@
+{
+  "status": 409,
+  "sameKey": true,
+  "changedField": "items[0].sellingPrice",
+  "newBusinessRows": 0,
+  "additionalAssets": 0,
+  "additionalBarcodes": 0,
+  "additionalJournals": 0
+}
