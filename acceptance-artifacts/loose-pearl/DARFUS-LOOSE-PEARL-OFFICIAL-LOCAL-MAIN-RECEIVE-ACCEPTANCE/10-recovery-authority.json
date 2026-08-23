@@ -1,6 +1,0 @@
-{
-  "businessRollbackRoute": "NOT_SUPPORTED",
-  "supportedRecovery": ["transaction atomicity","idempotency","evidence-first stop","no blind retry","no destructive cleanup"],
-  "recoveryArtifactCaptured": true,
-  "businessRollbackExecuted": false
-}

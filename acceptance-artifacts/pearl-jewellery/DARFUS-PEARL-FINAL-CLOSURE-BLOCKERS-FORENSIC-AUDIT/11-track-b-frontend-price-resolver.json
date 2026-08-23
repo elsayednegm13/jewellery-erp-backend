@@ -1,8 +1,0 @@
-{
-  "apiMode": true,
-  "priceSourcePriority": ["backend top-level item.price", "no Asset.price fallback in API search path"],
-  "localMockOnlyResolver": "currentSellingPriceForAsset returns Asset.price for non-dynamic profiles, but is not used for API search results",
-  "zeroFallback": "backend top-level 0 is accepted and rendered",
-  "pearlProfilePriceMappingPresent": "PARTIAL; receive mapper preserves sellingPrice/Asset.price, POS resolver routes Pearl through pricing service instead of safe direct Asset.price authority",
-  "status": "PROVEN_GAP"
-}

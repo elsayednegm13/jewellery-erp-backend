@@ -1,6 +1,0 @@
-{
-  "exactReplay": "NOT_RUN; no successful transaction and LL-018 stopped after rejection",
-  "changedPayloadConflict": "NOT_RUN",
-  "newDurableIdempotencyDelta": 0,
-  "idempotencyProtectionSourceAudited": true
-}

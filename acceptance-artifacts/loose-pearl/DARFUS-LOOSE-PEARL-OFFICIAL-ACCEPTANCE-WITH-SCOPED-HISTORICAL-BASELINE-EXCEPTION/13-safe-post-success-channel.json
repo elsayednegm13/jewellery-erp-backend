@@ -1,6 +1,0 @@
-{
-  "status": "AVAILABLE_BEFORE_POST",
-  "sameSessionReplayPath": "UI production builder retained request/key",
-  "replayExecuted": false,
-  "reason": "success prerequisite (201) was not met"
-}

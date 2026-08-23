@@ -1,8 +1,0 @@
-{
-  "database": "darfus_erp",
-  "currentDatabase": "darfus_erp",
-  "before": {"purchase_orders": 13, "assets": 13, "journal_entries": 16, "idempotency_requests": 17},
-  "after": {"purchase_orders": 13, "assets": 13, "journal_entries": 16, "idempotency_requests": 17},
-  "businessDelta": 0,
-  "officialReceiveExecuted": false
-}

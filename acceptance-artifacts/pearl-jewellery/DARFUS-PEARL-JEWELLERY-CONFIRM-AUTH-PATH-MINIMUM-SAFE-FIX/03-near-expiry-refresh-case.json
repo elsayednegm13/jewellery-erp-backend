@@ -1,7 +1,0 @@
-{
-  "case": "near-expiry access token",
-  "result": "REFRESHED",
-  "refresh_attempted": true,
-  "post_refresh_revalidation": true,
-  "raw_token_recorded": false
-}

@@ -1,9 +1,0 @@
-{
-  "control": "DARFUS-LOOSE-PEARL-OFFICIAL-LOCAL-MAIN-RECEIVE-ACCEPTANCE",
-  "officialDatabase": "darfus_erp",
-  "ownerAuthorization": "ONE_OFFICIAL_LOOSE_PEARL_RECEIVE",
-  "preconditionResult": "BLOCKED_BASELINE_INTEGRITY",
-  "officialReceiveExecuted": false,
-  "automaticRetry": false,
-  "secretsIncluded": false
-}

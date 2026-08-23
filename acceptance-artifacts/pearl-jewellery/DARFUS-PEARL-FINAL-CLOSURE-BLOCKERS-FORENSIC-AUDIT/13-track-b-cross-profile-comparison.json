@@ -1,8 +1,0 @@
-{
-  "comparison": [
-    {"profile":"PEARL_JEWELLERY","backendPath":"isSalePricingProfile -> calculateLooseProfileSalePrice","directAssetPriceFallback":"not used after pricing error","observed":"0/unavailable"},
-    {"profile":"GEMSTONE_JEWELLERY","backendPath":"same loose-profile branch","directAssetPriceFallback":"same structural risk","observed":"not executed in this audit"},
-    {"profile":"GOLD_BY_WEIGHT_JEWELLERY","backendPath":"gold-specific canonical rate calculation","directAssetPriceFallback":"different pricing branch","observed":"not executed in this audit"}
-  ],
-  "conclusion": "The Pearl issue is a profile-aware backend pricing branch/data-policy interaction, not a Product quantity authority issue. No other profile was mutated or sold."
-}

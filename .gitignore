@@ -1,8 +1,0 @@
-node_modules/
-.env
-.env.local
-.env.*.local
-backups/
-*.dump
-logs/
-*.log

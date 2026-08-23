@@ -1,8 +1,0 @@
-{
-  "clone": "darfus_erp_loose_pearl_20260822_01",
-  "currentDatabaseProven": true,
-  "source": "read-only dump of darfus_erp",
-  "preReceive": {"purchase_orders": 13, "assets": 13, "journal_entries": 16, "idempotency_requests": 17},
-  "officialDbTouched": false,
-  "temporaryBackendPort": 18000
-}

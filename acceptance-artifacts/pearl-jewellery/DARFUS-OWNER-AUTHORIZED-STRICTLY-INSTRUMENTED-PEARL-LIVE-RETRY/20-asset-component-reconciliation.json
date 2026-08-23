@@ -1,9 +1,0 @@
-{
-  "asset": "AST-PUR-1787391626468-1-1-wf0w",
-  "profile": "PEARL_JEWELLERY",
-  "componentCount": 1,
-  "pearlDetailCount": 1,
-  "component": {"kind": "PEARL", "type": "Akoya", "quantity": 1, "weight": 1.2, "unit": "GRAM", "purchaseCost": 1500, "currentValue": 1600},
-  "pearlDetail": {"size": "8.5", "type": "Akoya", "color": "White", "shape": "Round", "luster": "High", "origin": "Japan", "masterDataIdPresent": true},
-  "doubleMultiplicationByQuantity": "NO"
-}

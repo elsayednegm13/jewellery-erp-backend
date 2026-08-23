@@ -1,8 +1,0 @@
-{
-  "channels": [
-    {"name":"Pearl page apiClient","supportedAuthSource":true,"sameCompanyContext":true,"sameBranchContext":true,"idempotencyHeader":true,"exactBody":true,"rawTokenRequired":false,"passwordReentry":false,"secretExport":false,"safeForExactReplay":"YES_IF_INVOKED_INSIDE_PAGE_SESSION","evidence":"lib/api/client.ts apiClient; Pearl submit path"},
-    {"name":"Browser Playwright evaluation","supportedAuthSource":false,"sameCompanyContext":false,"sameBranchContext":false,"idempotencyHeader":false,"exactBody":false,"rawTokenRequired":true,"passwordReentry":true,"secretExport":true,"safeForExactReplay":"NO","evidence":"read-only evaluation returned window.fetch=undefined and window.apiClient=undefined"},
-    {"name":"Existing Node acceptance harness request helper","supportedAuthSource":"UNPROVEN_FOR_THIS_SAME_SESSION","sameCompanyContext":"CAN_BE_EXPLICIT","sameBranchContext":"CAN_BE_EXPLICIT","idempotencyHeader":true,"exactBody":true,"rawTokenRequired":true,"passwordReentry":"HARNESS_DEPENDENT","secretExport":false,"safeForExactReplay":"UNPROVEN_FOR_OFFICIAL_SESSION","evidence":"scripts use in-memory auth token and explicit company/branch headers"},
-    {"name":"Direct curl/manual Authorization","supportedAuthSource":false,"sameCompanyContext":false,"sameBranchContext":false,"idempotencyHeader":true,"exactBody":true,"rawTokenRequired":true,"passwordReentry":false,"secretExport":true,"safeForExactReplay":"NO","evidence":"forbidden by control security contract"}
-  ]
-}

@@ -1,8 +1,0 @@
-{
-  "httpStatus": 422,
-  "businessTransactionCreated": false,
-  "successfulReceive": false,
-  "automaticRetry": false,
-  "secondConfirm": false,
-  "errorCode": "FINAL_CLIENT_PROFILE_V2_REQUIRED"
-}

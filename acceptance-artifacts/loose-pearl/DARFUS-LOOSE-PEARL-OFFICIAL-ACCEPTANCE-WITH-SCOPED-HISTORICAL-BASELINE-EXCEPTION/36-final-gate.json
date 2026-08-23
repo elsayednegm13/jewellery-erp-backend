@@ -1,7 +1,0 @@
-{
-  "gate": "BLOCKED_LOOSE_PEARL_OFFICIAL_ACCEPTANCE",
-  "moduleStatus": "NOT_CLOSED",
-  "stageAStatus": "NOT_CLOSED",
-  "reason": "Official Receive did not return 201; no Replay/409 proof allowed",
-  "nextBatchAllowed": "NO_AUTOMATIC_START"
-}

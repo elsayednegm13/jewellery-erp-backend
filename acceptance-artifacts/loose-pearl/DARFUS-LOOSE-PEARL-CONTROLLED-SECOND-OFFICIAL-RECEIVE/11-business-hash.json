@@ -1,6 +1,0 @@
-{
-  "scope": "purchase.receive",
-  "algorithm": "real idempotency.service.hashRequest",
-  "requestHash": "b94b47c5f1dfdb5a1dabaa722992c32fd3c41fb3e5098db75854359d8fc5a481",
-  "keyExcluded": true
-}

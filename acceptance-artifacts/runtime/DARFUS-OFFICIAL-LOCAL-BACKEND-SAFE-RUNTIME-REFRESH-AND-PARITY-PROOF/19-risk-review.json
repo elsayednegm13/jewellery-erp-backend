@@ -1,9 +1,0 @@
-{
-  "p0": 0,
-  "p1": 1,
-  "p2": 0,
-  "risk": "official runtime freshness gate not closed under the exact PID criterion",
-  "officialDbRisk": "no business delta observed",
-  "productRuleChange": false,
-  "nextAction": "owner review; do not repeat refresh automatically"
-}

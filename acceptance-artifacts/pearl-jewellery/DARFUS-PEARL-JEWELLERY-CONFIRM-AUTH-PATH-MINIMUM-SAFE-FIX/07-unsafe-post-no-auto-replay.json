@@ -1,5 +1,0 @@
-{
-  "existing_client_contract": "401 refresh on unsafe method throws AUTH_REFRESHED_RETRY_REQUIRED",
-  "automatic_unsafe_post_replay": "NO",
-  "source_guard_preserved": true
-}

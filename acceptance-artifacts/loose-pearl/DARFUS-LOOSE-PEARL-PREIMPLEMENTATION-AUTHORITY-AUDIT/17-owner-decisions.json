@@ -1,8 +1,0 @@
-{
-  "trueOwnerDecisionsRemaining": 2,
-  "decisions": [
-    {"id":"LP-OD-001","authorityA":"Pearl.docx: one Loose Pearl record may represent one pearl or a homogeneous group with quantity > 1","authorityB":"Frozen DARFUS: one physical piece = one Asset; quantity-based inventory forbidden","whyCannotCoexist":"Current Asset schema has no quantity authority and runtime rejects PRIMARY_SUBJECT componentCount > 1; partial group sale/consume/transfer/split semantics are undefined","optionA":"Normalize Loose Pearl to one physical pearl per Asset and treat client group wording as a future aggregation/reporting requirement","optionB":"Approve a group Asset/quantity/split authority with explicit identity, cost, weight, barcode, lineage, and partial-operation semantics","recommendation":"Owner must choose before implementation; do not infer","impact":"P1; blocks implementation contract freeze and runtime acceptance"},
-    {"id":"LP-OD-002","authorityA":"Pearl.docx: Supplier Name optional and may be manual/unknown","authorityB":"Canonical Supplier Receive V2: supplierId is required before PO/Asset/Payable posting","whyCannotCoexist":"The only current purchased-stock receive path rejects missing supplierId; creating an Unknown supplier is forbidden","optionA":"Require canonical Supplier for purchased stock and define optional Supplier only for a separately approved non-purchase intake","optionB":"Approve a new non-supplier acquisition path with its own accounting/source authority","recommendation":"Owner must choose before implementation; do not create fake supplier","impact":"P1; blocks receive contract readiness"}
-  ],
-  "gate": "BLOCKED_UNTIL_OWNER_RESOLUTION"
-}

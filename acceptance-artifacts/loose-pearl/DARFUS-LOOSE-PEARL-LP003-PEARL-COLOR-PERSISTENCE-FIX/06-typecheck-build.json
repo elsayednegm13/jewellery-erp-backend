@@ -1,7 +1,0 @@
-{
-  "typecheck": "PASS",
-  "build": "PASS",
-  "commands": ["npm run typecheck", "npm run build"],
-  "migrationCreated": false,
-  "migrationExecuted": false
-}

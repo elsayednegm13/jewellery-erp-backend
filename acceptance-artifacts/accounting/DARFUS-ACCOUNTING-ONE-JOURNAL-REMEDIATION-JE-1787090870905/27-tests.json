@@ -1,1 +1,0 @@
-{"testsChanged":false,"command":"node --test tests/financial-bootstrap-cont4-contract.test.cjs backend/tests/g3-po-tax-precision-schema.test.cjs","passed":17,"failed":0,"result":"PASS"}

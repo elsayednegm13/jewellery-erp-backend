@@ -1,6 +1,0 @@
-{
-  "case": "fresh access token",
-  "result": "FRESH",
-  "refresh_attempted": false,
-  "raw_token_recorded": false
-}

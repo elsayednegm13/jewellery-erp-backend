@@ -1,5 +1,0 @@
-{
-  "successfulCloneDelta": {"purchase_orders": 1, "purchase_order_items": 1, "assets": 1, "asset_components": 1, "asset_pearl_component_details": 1, "asset_origins": 1, "asset_purchase_cost_revisions": 1, "asset_current_valuations": 1, "inventory_asset_movements": 1, "asset_barcode_history": 1, "journal_entries": 1, "journal_lines": 3, "idempotency_requests": 1},
-  "officialDbDelta": 0,
-  "failedAttemptsRolledBack": true
-}

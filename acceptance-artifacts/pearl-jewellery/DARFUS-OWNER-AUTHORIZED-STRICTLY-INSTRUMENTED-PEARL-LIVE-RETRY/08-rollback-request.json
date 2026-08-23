@@ -1,8 +1,0 @@
-{
-  "rollbackTarget": "fresh_disposable_clone_created_for_this_control",
-  "method": "drop-and-recreate-disposable-clone-from-source-dump",
-  "officialDatabase": "darfus_erp",
-  "officialMutationAllowed": false,
-  "manualSqlCleanup": false,
-  "requestParity": "same_business_payload_and_canonical_hash"
-}

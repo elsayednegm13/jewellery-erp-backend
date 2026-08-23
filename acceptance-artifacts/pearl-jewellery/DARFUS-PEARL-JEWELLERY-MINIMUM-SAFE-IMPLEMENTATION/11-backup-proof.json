@@ -1,8 +1,0 @@
-{
-  "database": "darfus_erp",
-  "path": "official-pre-live-backup-20260822.dump",
-  "bytes": 709826,
-  "sha256": "07B9C37B3D93DBEDEBA28B1F6B9051FDD983E0C21A9A60D6179EA7B40BD5F55B",
-  "pgRestoreList": "PASS",
-  "verifiedBeforeOfficialConfirm": true
-}

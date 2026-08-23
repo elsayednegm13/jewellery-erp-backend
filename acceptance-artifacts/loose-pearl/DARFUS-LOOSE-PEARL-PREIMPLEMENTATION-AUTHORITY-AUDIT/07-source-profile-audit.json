@@ -1,9 +1,0 @@
-{
-  "currentRoute": "No app/[locale]/(dashboard)/inventory/loose-pearl/page.tsx",
-  "currentVisiblePearlRoute": "/[locale]/inventory/pearl -> Pearl Jewellery",
-  "chooser": {"PEARL":"enabled; href=/inventory/pearl", "LOOSE_PEARL":"absent"},
-  "backendProfileRegistry": "LOOSE_PEARL exists with assetType pearl, pricing LOOSE_ASSET_STRATEGY, required description/grossWeight/purchaseCost, required looseDetails.totalPearlWeight, componentsSupported=false, rfidAllowed=true.",
-  "specializedBackendRoute": "No /inventory-v2/loose-pearl route; existing specialized routes are gold, diamond, loose diamond, loose gemstone, gem stone, pearl jewellery.",
-  "genericBackendSupport": ["profile registry", "V2 normalizeReceiptPiece", "loose-profile-finance", "Asset component persistence", "size master resolution"],
-  "classification": "IMPLEMENTATION_GAP"
-}

@@ -1,7 +1,0 @@
-{
-  "method": "POST",
-  "path": "/api/v1/purchase-orders/receive",
-  "httpStatus": 500,
-  "requestId": "70e0c2c4-f4e1-48f8-94da-f5e5c5b5",
-  "rootCauseEvidence": "PostgreSQL ERROR: column \"nan\" does not exist in INSERT purchase_order_item_asset_links"
-}

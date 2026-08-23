@@ -1,7 +1,0 @@
-{
-  "rootCause": "PROVEN",
-  "failureLayer": "BACKEND_SEARCH + PRICE_RESOLVER",
-  "summary": "PEARL_JEWELLERY is routed to calculateLooseProfileSalePrice. The persisted policy has negative markup_percent=-20.964878. The service validates markup with minimum 0 and throws before using the explicit Asset.price=5000. /pos/search catches the exception and returns resolved price 0/unavailable. The frontend then disables the result by its price guard.",
-  "classification": "POS_PRODUCT_OR_RUNTIME_MAPPING_DEFECT",
-  "businessAuthorityPreserved": true
-}

@@ -1,1 +1,0 @@
-{"scope":"purchase.receive","hash":"83c1c295ffbcae4114fa4ecf15490e8bf7bce9defc018b4dd83b81cef48a1600","changedPayloadHash":"928cc7f74266c34c3d017b45e16bd334d716c845dd6dbd0d07491d12948d6baf","hashesDiffer":true,"algorithm":"idempotency.service.hashRequest; stableStringify({scope,params,body}) excluding idempotencyKey"}

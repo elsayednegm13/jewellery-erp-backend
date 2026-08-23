@@ -1,9 +1,0 @@
-{
-  "nanFixFilesystemPresent": true,
-  "resolver": "resolveReceiptEvidenceOrdinal",
-  "sourceLocation": "backend/src/services/inventory-v2-runtime.service.js:348-360",
-  "validation": ["finite","safe integer","non-negative zero-based input","positive one-based ordinal","fail-closed before SQL"],
-  "routeFallback": "pieceIndex: qtyIndex",
-  "routeSourceLocation": "backend/src/routes/erp.routes.js:8736",
-  "routeQtyIndexFilesystemPresent": true
-}

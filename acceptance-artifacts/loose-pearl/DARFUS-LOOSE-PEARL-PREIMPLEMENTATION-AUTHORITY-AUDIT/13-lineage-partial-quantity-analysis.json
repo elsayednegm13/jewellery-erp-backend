@@ -1,8 +1,0 @@
-{
-  "lineageTable": "asset_lineage_links",
-  "currentRows": 0,
-  "futureManufacturing": "Supported as a table/dependency, not proven for Loose Pearl.",
-  "partialGroupOperations": {"sale":"not proven","manufacturing":"not proven","transfer":"not proven","return":"not proven","costAllocation":"not proven","weightAllocation":"not proven","barcodeAfterSplit":"not defined"},
-  "classification": "FUTURE_LIFECYCLE_DEPENDENCY plus AUTHORITY_CONFLICT for grouped records",
-  "implementation": "none"
-}

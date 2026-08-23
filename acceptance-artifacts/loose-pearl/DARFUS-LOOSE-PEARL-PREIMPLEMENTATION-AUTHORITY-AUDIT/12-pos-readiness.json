@@ -1,9 +1,0 @@
-{
-  "searchRoute": "GET /api/v1/pos/search",
-  "assetSource": "Asset rows with AVAILABLE status and branch scope",
-  "productSource": "Route also queries Product quantity rows; no demonstrated final-profile exclusion for LOOSE_PEARL.",
-  "pearlSpecialFallback": "Explicit special price fallback is for PEARL_JEWELLERY; LOOSE_PEARL is not explicitly listed in that branch.",
-  "currentLoosePearlAsset": false,
-  "classification": "IMPLEMENTATION_GAP",
-  "status": "NOT_READY_FOR_ACCEPTANCE"
-}

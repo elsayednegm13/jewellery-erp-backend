@@ -1,9 +1,0 @@
-{
-  "sumItemBaseOrUnitTotals":"2133.21562382",
-  "poHeaderTotal":"2133.21562382",
-  "itemTotalVsHeader":"PASS",
-  "headerTaxComponentsPlusVat":"2133.21560000",
-  "headerTaxComponentsDifferenceToHeaderTotal":"-0.00002382",
-  "poHeaderVsItems":"FAIL_PRECISION_COMPONENT_RECONCILIATION",
-  "note":"The item/header total agrees exactly; the 4-decimal header tax components do not reproduce the 8-decimal transaction total. The immutable tax snapshot is exact and reconciles separately."
-}

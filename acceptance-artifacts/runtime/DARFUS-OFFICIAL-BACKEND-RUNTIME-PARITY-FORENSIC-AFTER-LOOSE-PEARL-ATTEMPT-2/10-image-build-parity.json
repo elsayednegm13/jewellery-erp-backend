@@ -1,9 +1,0 @@
-{
-  "image": "jewellery-erp-master-backend:latest",
-  "imageCreatedUtc": "2026-08-22T17:20:59.540371834Z",
-  "fixMtimeUtc": "2026-08-22T19:47:43.9151394Z",
-  "imageCreatedBeforeFix": true,
-  "imageBakedFix": "not proven and not authoritative because /app is bind-mounted",
-  "runtimeDelivery": "bind-mounted host source",
-  "parityConclusion": "image age supports stale-runtime risk; bind mount plus process start time proves the need for explicit reload before acceptance"
-}

@@ -1,7 +1,0 @@
-{
-  "ar": {"company_context_match": true, "branch_context_match": true, "hash_match": true},
-  "en": {"company_context_match": true, "branch_context_match": true, "hash_match": true},
-  "hash_value_recorded": false,
-  "context_secrets_recorded": false,
-  "mismatch_block_case": "PASS_IN_ISOLATED_TEST"
-}

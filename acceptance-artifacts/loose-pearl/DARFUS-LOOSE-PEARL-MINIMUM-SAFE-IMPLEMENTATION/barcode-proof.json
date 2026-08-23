@@ -1,9 +1,0 @@
-{
-  "inventoryCode": "PL",
-  "itemCode": "LOS",
-  "karatCode": "00",
-  "pattern": "PLLOS00XXXXXX",
-  "observedCloneBarcode": "PLLOS00000001",
-  "oneActiveBarcodePerAsset": true,
-  "rfid": "optional supplementary identity; no new RFID assignment"
-}

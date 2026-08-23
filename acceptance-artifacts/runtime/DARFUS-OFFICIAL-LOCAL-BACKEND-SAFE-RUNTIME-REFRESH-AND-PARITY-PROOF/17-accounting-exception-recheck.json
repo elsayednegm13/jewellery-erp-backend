@@ -1,9 +1,0 @@
-{
-  "totalUnbalancedPostedJournals": 1,
-  "unbalancedPostedJournalIds": ["JE-1787090870905"],
-  "allOtherUnbalancedPostedJournals": 0,
-  "debit": "2133.21000000",
-  "credit": "2133.22000000",
-  "difference": "-0.01000000",
-  "remediated": false
-}

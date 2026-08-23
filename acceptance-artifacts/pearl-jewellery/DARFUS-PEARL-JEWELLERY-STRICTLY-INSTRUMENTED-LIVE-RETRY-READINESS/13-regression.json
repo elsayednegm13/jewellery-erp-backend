@@ -1,8 +1,0 @@
-{
-  "focused_tests": "PASS",
-  "regression": "PASS_17_OF_17",
-  "typecheck": "PASS",
-  "build": "PASS",
-  "backend_change": false,
-  "migrations_executed": 0
-}

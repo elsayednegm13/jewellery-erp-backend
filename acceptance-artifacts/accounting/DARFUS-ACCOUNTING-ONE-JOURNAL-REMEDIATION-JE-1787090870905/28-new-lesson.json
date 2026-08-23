@@ -1,1 +1,0 @@
-{"lessonId":"ACCOUNTING-ROUNDING-001","status":"ALREADY_REGISTERED_IN_PRIOR_FORENSIC_CONTROL","rootCause":"Independent cent rounding combined with historical >0.01 balance tolerance","minimumFix":"Exact stored-line equality guard plus auditable historical remediation","duplicateLessonCreated":false}

@@ -1,9 +1,0 @@
-{
-  "diagnostic_active_during_proof": true,
-  "activation": "NEXT_PUBLIC_PEARL_CONFIRM_DIAGNOSTICS=true with localhost-only runtime guard",
-  "production_online_diagnostics": false,
-  "customer_ui_debug_text": false,
-  "persistent_secret_logging": false,
-  "local_receive_interception": true,
-  "post_proof_interception_disabled": true
-}

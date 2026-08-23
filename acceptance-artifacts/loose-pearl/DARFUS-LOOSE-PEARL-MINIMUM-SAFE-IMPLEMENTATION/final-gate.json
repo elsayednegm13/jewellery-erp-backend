@@ -1,7 +1,0 @@
-{
-  "gate": "PASS_LOOSE_PEARL_MINIMUM_SAFE_IMPLEMENTATION_AND_CLONE_ACCEPTANCE",
-  "officialLocalMainReceiveExecuted": false,
-  "officialDbBusinessDelta": 0,
-  "nextBatchAllowed": "NO_AUTOMATIC_START",
-  "ownerReviewRequired": true
-}

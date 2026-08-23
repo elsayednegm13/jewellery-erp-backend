@@ -1,1 +1,0 @@
-{"roundedDebit":"2133.21","roundedCredit":"2133.22","exactStoredLineBalanceInvariant":"FAIL_FOR_HISTORICAL_INPUT","currentWorkingTreePostingGuard":"REJECTS_BEFORE_PERSISTENCE","currentCodeReproducesDefect":"NO","currentPreventionGate":"PASS","source":"backend/src/services/posting.service.js postEntry existing dirty-worktree guard; not changed in this control"}

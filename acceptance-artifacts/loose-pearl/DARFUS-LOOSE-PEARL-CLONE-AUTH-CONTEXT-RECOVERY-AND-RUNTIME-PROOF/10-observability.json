@@ -1,8 +1,0 @@
-{
-  "diagnostics": "ON",
-  "requestInterception": "OFF",
-  "backendLogsRedacted": true,
-  "initialRequestId": "CLONE-RECEIVE-01",
-  "replayRequestId": "CLONE-REPLAY-01",
-  "conflictRequestId": "CLONE-CONFLICT-01"
-}

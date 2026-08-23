@@ -1,8 +1,0 @@
-{
-  "database": "darfus_erp",
-  "path": "backend/acceptance-artifacts/loose-pearl/DARFUS-LOOSE-PEARL-OFFICIAL-LOCAL-MAIN-RECEIVE-ACCEPTANCE/darfus_erp_official_local_main_receive_20260822_01.dump",
-  "sizeBytes": 713691,
-  "sha256": "73A20F994F19B8DEBD18CEAF4DC583922968E656F9E1D5A32DA924DC4423C998",
-  "pgRestoreList": "PASS",
-  "backupBeforeOfficialMutation": true
-}

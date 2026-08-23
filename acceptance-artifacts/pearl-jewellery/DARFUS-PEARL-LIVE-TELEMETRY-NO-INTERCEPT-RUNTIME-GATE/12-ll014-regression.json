@@ -1,8 +1,0 @@
-{
-  "test": "tests/pearl-live-telemetry-no-intercept.test.cjs",
-  "result": "PASS",
-  "diagnosticsOnInterceptionOff": "telemetry emits; intercept inactive",
-  "diagnosticsOnInterceptionOn": "isolated local intercept allowed",
-  "diagnosticsOffInterceptionOff": "silent normal runtime",
-  "interceptionWithoutGuard": "blocked"
-}
