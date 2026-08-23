@@ -1,6 +1,7 @@
 "use strict";
 
 const financialBootstrapService = require("./financial-bootstrap.service");
+const { CGP_REQUIRED_FINANCIAL_ROLE_CODES } = require("./financial-account-catalog.service");
 
 const STATES = Object.freeze({
   UNINITIALIZED: "UNINITIALIZED",
@@ -47,6 +48,7 @@ async function resolveSetupState(models, { transaction = null, lock = false } = 
     companyId: company.id,
     branchId: branch.id,
     transaction,
+    requiredRoleCodes: CGP_REQUIRED_FINANCIAL_ROLE_CODES,
   });
   if (readiness.status !== "READY") return { state: STATES.RECOVERY_REQUIRED, marker };
   if (marker?.state !== STATES.READY) return { state: STATES.RECOVERY_REQUIRED, marker };

@@ -224,10 +224,7 @@ function deriveApprovalActionability({ aggregateType, approvalStatus, linkedDocu
       return { actionable: false, actionBlockedCode: "LINKED_DOCUMENT_NOT_FOUND", linkedBusinessStatus: null };
     }
     const linkedBusinessStatus = String(linkedDocument.businessStatus || "").toUpperCase() || null;
-    if (["POSTED", "REVERSED"].includes(linkedBusinessStatus)) {
-      return { actionable: false, actionBlockedCode: "DOCUMENT_IMMUTABLE", linkedBusinessStatus };
-    }
-    return { actionable: pending, actionBlockedCode: pending ? null : "APPROVAL_NOT_PENDING", linkedBusinessStatus };
+    return { actionable: false, actionBlockedCode: "CGP_APPROVAL_DISABLED", linkedBusinessStatus };
   }
   return { actionable: pending, actionBlockedCode: pending ? null : "APPROVAL_NOT_PENDING", linkedBusinessStatus: null };
 }

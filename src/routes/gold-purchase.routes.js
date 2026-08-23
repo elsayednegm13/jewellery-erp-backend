@@ -20,6 +20,10 @@ const LEGACY = {
 
 const context = (req) => ({ companyId: req.companyId, branchId: req.branchId, user: req.user });
 
+function cgpApprovalDisabled(_req, _res, next) {
+  return next(new AppError("Customer Gold Purchase approval is disabled for new documents; historical approval records remain available for read-only review.", 410, "CGP_APPROVAL_DISABLED"));
+}
+
 function authorizeDraft(kind, action) {
   return async (req, _res, next) => {
     try {
@@ -230,13 +234,13 @@ function bind(kind) {
   router.post(`/${kind}/drafts/:id/void`, authMiddleware, authorizeDraft(kind, "void"), (req, res, next) =>
     idempotent(req, res, next, { scope: `gold-purchase.${kind}.void`, statusCode: 200, execute: (t) => draftService.voidDraft(kind, context(req), req.params.id, req.body || {}, t) }));
 
-  router.post(`/${kind}/drafts/:id/submit`, authMiddleware, (req, res, next) =>
+  router.post(`/${kind}/drafts/:id/submit`, authMiddleware, kind === "cgp" ? cgpApprovalDisabled : (req, _res, next) => next(), (req, res, next) =>
     idempotent(req, res, next, { scope: `gold-purchase.${kind}.submit`, statusCode: 200, execute: (t) => governanceService.submit(kind, context(req), req.params.id, req.body || {}, t) }));
 
-  router.post(`/${kind}/drafts/:id/approve`, authMiddleware, (req, res, next) =>
+  router.post(`/${kind}/drafts/:id/approve`, authMiddleware, kind === "cgp" ? cgpApprovalDisabled : (req, _res, next) => next(), (req, res, next) =>
     idempotent(req, res, next, { scope: `gold-purchase.${kind}.approve`, statusCode: 200, execute: (t) => governanceService.review(kind, context(req), req.params.id, req.body || {}, "approved", t) }));
 
-  router.post(`/${kind}/drafts/:id/reject`, authMiddleware, (req, res, next) =>
+  router.post(`/${kind}/drafts/:id/reject`, authMiddleware, kind === "cgp" ? cgpApprovalDisabled : (req, _res, next) => next(), (req, res, next) =>
     idempotent(req, res, next, { scope: `gold-purchase.${kind}.reject`, statusCode: 200, execute: (t) => governanceService.review(kind, context(req), req.params.id, req.body || {}, "rejected", t) }));
 
   router.post(`/${kind}/drafts/:id/revisions`, authMiddleware, (req, res, next) =>

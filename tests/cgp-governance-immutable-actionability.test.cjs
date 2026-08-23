@@ -12,16 +12,16 @@ const service = fs.readFileSync(path.join(root, "src/services/gold-purchase-gove
 
 assert.deepEqual(governance.deriveApprovalActionability({
   aggregateType: "cgp", approvalStatus: "pending", linkedDocument: { businessStatus: "POSTED" }
-}), { actionable: false, actionBlockedCode: "DOCUMENT_IMMUTABLE", linkedBusinessStatus: "POSTED" });
+}), { actionable: false, actionBlockedCode: "CGP_APPROVAL_DISABLED", linkedBusinessStatus: "POSTED" });
 assert.deepEqual(governance.deriveApprovalActionability({
   aggregateType: "cgp", approvalStatus: "pending", linkedDocument: { businessStatus: "REVERSED" }
-}), { actionable: false, actionBlockedCode: "DOCUMENT_IMMUTABLE", linkedBusinessStatus: "REVERSED" });
+}), { actionable: false, actionBlockedCode: "CGP_APPROVAL_DISABLED", linkedBusinessStatus: "REVERSED" });
 assert.deepEqual(governance.deriveApprovalActionability({
   aggregateType: "cgp", approvalStatus: "pending", linkedDocument: { businessStatus: "VALIDATED" }
-}), { actionable: true, actionBlockedCode: null, linkedBusinessStatus: "VALIDATED" });
+}), { actionable: false, actionBlockedCode: "CGP_APPROVAL_DISABLED", linkedBusinessStatus: "VALIDATED" });
 assert.deepEqual(governance.deriveApprovalActionability({
   aggregateType: "cgp", approvalStatus: "approved", linkedDocument: { businessStatus: "VALIDATED" }
-}), { actionable: false, actionBlockedCode: "APPROVAL_NOT_PENDING", linkedBusinessStatus: "VALIDATED" });
+}), { actionable: false, actionBlockedCode: "CGP_APPROVAL_DISABLED", linkedBusinessStatus: "VALIDATED" });
 
 assert.match(service, /assertCgpBusinessMutable/);
 assert.match(service, /DOCUMENT_IMMUTABLE/);

@@ -6,7 +6,7 @@ const { AppError, ValidationError } = require("../utils/errors");
 const { validatePasswordPolicy } = require("../utils/password-policy");
 const { ensureRolesForCompany, assignUserRole } = require("../bootstrap/accessControl");
 const financialBootstrapService = require("./financial-bootstrap.service");
-const { ACCOUNT_ROLE_CATALOG, BRANCH_MAPPING_CATALOG } = require("./financial-account-catalog.service");
+const { ACCOUNT_ROLE_CATALOG, BRANCH_MAPPING_CATALOG, CGP_REQUIRED_FINANCIAL_ROLE_CODES } = require("./financial-account-catalog.service");
 const auditService = require("./audit.service");
 const { STATES, GLOBAL_SETUP_ID, resolveSetupState } = require("./first-run-setup-state.service");
 
@@ -67,12 +67,14 @@ async function ensureFinancialReadiness(models, { company, branch, actorId, tran
     branchId: branch.id,
     actorId,
     transaction,
+    requiredRoleCodes: CGP_REQUIRED_FINANCIAL_ROLE_CODES,
   });
   const readiness = await financialBootstrapService.evaluateReadiness({
     models,
     companyId: company.id,
     branchId: branch.id,
     transaction,
+    requiredRoleCodes: CGP_REQUIRED_FINANCIAL_ROLE_CODES,
   });
   if (readiness.status !== "READY") throw fail("FIRST_RUN_FINANCIAL_MAPPING_INCOMPLETE", 422);
 }

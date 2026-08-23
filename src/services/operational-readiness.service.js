@@ -5,6 +5,7 @@ const models = require("../models");
 const settingsService = require("./settings.service");
 const companyTaxPolicyService = require("./company-tax-policy.service");
 const financialBootstrapService = require("./financial-bootstrap.service");
+const { CGP_REQUIRED_FINANCIAL_ROLE_CODES } = require("./financial-account-catalog.service");
 
 const REFERENCE_DATASET_ID = "INVENTORY_REFERENCE_MASTER_DATA";
 
@@ -128,7 +129,7 @@ async function getOperationalReadiness({ companyId, branchId, workflow = "SUPPLI
   const [activeLocationCount, activeSupplierCount, financialFoundation] = await Promise.all([
     branch?.id ? models.InventoryLocation.count({ where: { companyId, branchId: branch.id, isActive: true }, transaction }) : 0,
     models.Supplier.count({ where: { companyId, status: "active" }, transaction }),
-    branch?.id ? financialBootstrapService.evaluateReadiness({ models, companyId, branchId: branch.id, transaction }) : { status: "BLOCKED", blockers: [{ code: "FINANCIAL_CONTEXT_REQUIRED" }] },
+    branch?.id ? financialBootstrapService.evaluateReadiness({ models, companyId, branchId: branch.id, transaction, requiredRoleCodes: workflow === "CGP" ? CGP_REQUIRED_FINANCIAL_ROLE_CODES : null }) : { status: "BLOCKED", blockers: [{ code: "FINANCIAL_CONTEXT_REQUIRED" }] },
   ]);
   const snapshot = {
     company: company ? { id: company.id, exists: true, businessName: company.businessName, workspace: company.workspace, country: company.country, currency: company.currency, taxNumber: company.taxNumber } : { exists: false },

@@ -11,6 +11,8 @@ const goldPriceApprovalService = require("./gold-price-approval.service");
 const goldMarketSettingsService = require("./gold-market-settings.service");
 const goldMarketFeedService = require("./gold-market-feed.service");
 const goldPricingPolicyService = require("./gold-pricing-policy.service");
+const financialBootstrapService = require("./financial-bootstrap.service");
+const { CGP_REQUIRED_FINANCIAL_ROLE_CODES } = require("./financial-account-catalog.service");
 const { PRICING_MODES } = require("./gold-market-settings.service");
 const { QUOTE_STATUSES, NORMALIZED_QUOTE_UNIT } = require("./gold-market-provider.contract");
 const { AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError } = require("../utils/errors");
@@ -37,6 +39,25 @@ async function assertPostingPermission(context) {
   if (!(await permissionService.userHasPermission(context.user, POST_PERMISSION))) {
     throw new ForbiddenError(`${POST_PERMISSION} is required`);
   }
+}
+
+async function assertCgpFinancialReadiness({ context, transaction }) {
+  const readiness = await financialBootstrapService.evaluateReadiness({
+    models,
+    companyId: context.companyId,
+    branchId: context.branchId,
+    transaction,
+    requiredRoleCodes: CGP_REQUIRED_FINANCIAL_ROLE_CODES,
+  });
+  if (readiness.status !== "READY") {
+    throw new AppError(
+      "Customer Gold Purchase financial configuration is incomplete; posting is blocked until the required financial accounts are configured.",
+      422,
+      "CGP_FINANCIAL_READINESS_REQUIRED",
+      { readiness },
+    );
+  }
+  return readiness;
 }
 
 async function resolveApprovedKaratPrice({ document, item, transaction }) {
@@ -205,6 +226,9 @@ async function post({ context, id, expectedVersion, correlationId, transaction, 
   if (!transaction) throw new ValidationError("CGP Posting requires a caller transaction", { transaction: ["required"] });
   requireContext(context);
   await assertPostingPermission(context);
+  // Fail closed before pricing snapshots, POSTED state, audit, or outbox.
+  // The caller transaction also rolls back the idempotency claim on failure.
+  await assertCgpFinancialReadiness({ context, transaction });
   const version = draftService.parseVersion(expectedVersion);
   const document = await models.CustomerGoldPurchaseDocument.findOne({
     where: { id, companyId: context.companyId, voidedAt: null },
@@ -303,5 +327,6 @@ module.exports = {
   resolveLiveKaratPrice,
   resolveKaratPrice,
   buildPostedEvent,
+  assertCgpFinancialReadiness,
   post,
 };

@@ -69,6 +69,7 @@ const companyBootstrapService = require("../services/company-bootstrap.service")
 const operationalReadinessService = require("../services/operational-readiness.service");
 const ledgerReportingService = require("../services/ledger-reporting.service");
 const financialBootstrapService = require("../services/financial-bootstrap.service");
+const { CGP_REQUIRED_FINANCIAL_ROLE_CODES } = require("../services/financial-account-catalog.service");
 const financialAccountService = require("../services/financial-account.service");
 const financialAccountResolver = require("../services/financial-account-resolver.service");
 const financialReportingService = require("../services/financial-reporting.service");
@@ -153,7 +154,7 @@ router.get("/settings/operational-readiness", authMiddleware, requirePermission(
     const data = await operationalReadinessService.getOperationalReadiness({
       companyId: req.companyId,
       branchId,
-      workflow: String(req.query.workflow || "SUPPLIER_RECEIVE").toUpperCase() === "SUPPLIER_RECEIVE" ? "SUPPLIER_RECEIVE" : "SUPPLIER_RECEIVE",
+      workflow: ["SUPPLIER_RECEIVE", "CGP"].includes(String(req.query.workflow || "SUPPLIER_RECEIVE").toUpperCase()) ? String(req.query.workflow || "SUPPLIER_RECEIVE").toUpperCase() : "SUPPLIER_RECEIVE",
     });
     res.set("Cache-Control", "no-store");
     return res.status(200).json({ success: true, data });
@@ -6764,6 +6765,16 @@ router.post("/branches/:id/reactivate", authMiddleware, requirePermission("branc
   try {
     const branch = await models.Branch.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t });
     if (!branch) throw new NotFoundError("Branch record not found.");
+    const financialReadiness = await financialBootstrapService.evaluateReadiness({
+      models,
+      companyId: req.companyId,
+      branchId: branch.id,
+      transaction: t,
+      requiredRoleCodes: CGP_REQUIRED_FINANCIAL_ROLE_CODES,
+    });
+    if (financialReadiness.status !== "READY") {
+      throw new AppError("Branch cannot be reactivated until the required financial configuration is complete.", 422, "CGP_FINANCIAL_READINESS_REQUIRED", { readiness: financialReadiness });
+    }
     const before = branch.toJSON();
     await branch.update({ isActive: true }, { transaction: t });
     const actor = req.user ? `${req.user.firstName} ${req.user.lastName}` : "System";

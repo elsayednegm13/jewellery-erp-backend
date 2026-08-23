@@ -41,6 +41,13 @@ const OPTIONAL_SEMANTIC_ACCOUNT_ROLE_CATALOG = Object.freeze({
   CUSTOMER_CREDITOR: accountRole("2500", "Customer Creditors", "ذمم دائنة للعملاء", "liability", "credit", "liability"),
 });
 
+// CGP recognition requests this optional role explicitly. It stays out of
+// the global catalog so unrelated workflows keep their existing readiness.
+const CGP_REQUIRED_FINANCIAL_ROLE_CODES = Object.freeze([
+  "INVENTORY_ASSET",
+  "CUSTOMER_CREDITOR",
+]);
+
 function getSemanticAccountRoleDefinition(roleCode) {
   const normalized = String(roleCode || "").trim().toUpperCase();
   return ACCOUNT_ROLE_CATALOG[normalized] || OPTIONAL_SEMANTIC_ACCOUNT_ROLE_CATALOG[normalized] || null;
@@ -116,6 +123,7 @@ module.exports = {
   BOOTSTRAP_VERSION,
   ACCOUNT_ROLE_CATALOG,
   OPTIONAL_SEMANTIC_ACCOUNT_ROLE_CATALOG,
+  CGP_REQUIRED_FINANCIAL_ROLE_CODES,
   getSemanticAccountRoleDefinition,
   BRANCH_MAPPING_CATALOG,
   POSTING_CODE_ROLE,

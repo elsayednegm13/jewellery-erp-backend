@@ -5,6 +5,7 @@ const { AppError } = require("../utils/errors");
 const {
   BOOTSTRAP_VERSION,
   ACCOUNT_ROLE_CATALOG,
+  getSemanticAccountRoleDefinition,
   BRANCH_MAPPING_CATALOG,
   POSTING_ACCOUNT_CATALOG,
 } = require("./financial-account-catalog.service");
@@ -16,6 +17,17 @@ const {
 const id = (prefix) => `${prefix}-${crypto.randomUUID()}`;
 const readinessError = () =>
   new AppError("Required financial configuration is incomplete.", 422, "FINANCIAL_READINESS_REQUIRED");
+
+function resolveRequiredRoleDefinitions(requiredRoleCodes = null) {
+  const requested = requiredRoleCodes == null
+    ? Object.keys(ACCOUNT_ROLE_CATALOG)
+    : [...new Set([...Object.keys(ACCOUNT_ROLE_CATALOG), ...requiredRoleCodes.map((code) => String(code).trim().toUpperCase())])];
+  return requested.map((roleCode) => {
+    const definition = getSemanticAccountRoleDefinition(roleCode);
+    if (!definition) throw readinessError();
+    return [roleCode, definition];
+  });
+}
 
 // A branch mapping is historical when it is inactive.  Historical rows are
 // deliberately retained for audit, but must never compete with the one active
@@ -133,7 +145,7 @@ async function ensurePostingCatalog(models, companyId, transaction, report) {
   }
 }
 
-async function reconcile({ models, companyId, branchId, actorId = "financial-bootstrap", transaction: suppliedTransaction, dryRun = false }) {
+async function reconcile({ models, companyId, branchId, actorId = "financial-bootstrap", transaction: suppliedTransaction, dryRun = false, requiredRoleCodes = null }) {
   const run = async (transaction) => {
     if (!companyId || !branchId) throw readinessError();
     const [company, branch] = await Promise.all([
@@ -153,11 +165,11 @@ async function reconcile({ models, companyId, branchId, actorId = "financial-boo
       createdMappings: 0,
       preservedRoles: 0,
     };
-    if (dryRun) return { ...report, status: (await evaluateReadiness({ models, companyId, branchId, transaction })).status };
+    if (dryRun) return { ...report, status: (await evaluateReadiness({ models, companyId, branchId, transaction, requiredRoleCodes })).status };
 
     await ensurePostingCatalog(models, companyId, transaction, report);
     const accounts = {};
-    for (const [roleCode, definition] of Object.entries(ACCOUNT_ROLE_CATALOG)) {
+    for (const [roleCode, definition] of resolveRequiredRoleDefinitions(requiredRoleCodes)) {
       accounts[roleCode] = await accountForRole(models, companyId, branchId, roleCode, definition, actorId, transaction, report);
     }
     for (const [mappingType, definition] of Object.entries(BRANCH_MAPPING_CATALOG)) {
@@ -196,20 +208,20 @@ async function reconcile({ models, companyId, branchId, actorId = "financial-boo
         }
       }
     }
-    const readiness = await evaluateReadiness({ models, companyId, branchId, transaction });
+    const readiness = await evaluateReadiness({ models, companyId, branchId, transaction, requiredRoleCodes });
     if (readiness.status !== "READY") throw readinessError();
     return { ...report, status: readiness.status };
   };
   return suppliedTransaction ? run(suppliedTransaction) : models.sequelize.transaction(run);
 }
 
-async function evaluateReadiness({ models, companyId, branchId, transaction = null }) {
+async function evaluateReadiness({ models, companyId, branchId, transaction = null, requiredRoleCodes = null }) {
   if (!companyId || !branchId) return { status: "BLOCKED", blockers: [{ code: "FINANCIAL_CONTEXT_REQUIRED" }] };
   const roles = await models.SystemAccountRole.findAll({ where: { companyId, branchId }, transaction });
   const mappings = await models.BranchFinancialMapping.findAll({ where: { companyId, branchId, isActive: true }, transaction });
   const missingRoles = [];
   const invalidRoles = [];
-  for (const [roleCode, definition] of Object.entries(ACCOUNT_ROLE_CATALOG)) {
+  for (const [roleCode, definition] of resolveRequiredRoleDefinitions(requiredRoleCodes)) {
     const matches = roles.filter((row) => row.roleCode === roleCode);
     if (matches.length !== 1) {
       missingRoles.push(roleCode);
@@ -254,4 +266,4 @@ async function evaluateReadiness({ models, companyId, branchId, transaction = nu
   };
 }
 
-module.exports = { reconcile, evaluateReadiness, readinessError, currentMappingAuthority };
+module.exports = { reconcile, evaluateReadiness, readinessError, currentMappingAuthority, resolveRequiredRoleDefinitions };
