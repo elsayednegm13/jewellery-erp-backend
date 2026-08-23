@@ -1,0 +1,13 @@
+{
+  "exactRequestPresent": true,
+  "sameKeyReferencePresent": true,
+  "businessPayloadReconstruction": false,
+  "hashParity": true,
+  "canonicalHash": "315147360599ce7c359c22074dc33dc4f423ea48f7ad70df4e9a7c66a0b03453",
+  "unitCost": 3984,
+  "piecePurchaseCost": 3984,
+  "taxIncluded": false,
+  "applyVat": true,
+  "inventoryV2": true,
+  "keyValue": "REDACTED"
+}

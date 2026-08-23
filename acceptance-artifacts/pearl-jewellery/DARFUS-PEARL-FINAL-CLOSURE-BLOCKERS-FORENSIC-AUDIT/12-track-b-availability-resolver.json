@@ -1,0 +1,7 @@
+{
+  "backendAvailability": "AVAILABLE in DB; route includes available Asset and sets available=1 before price resolution",
+  "frontendDisabledCondition": "unavailable || (!item.isProduct && (!Number.isFinite(item.price) || item.price <= 0))",
+  "provenDisabledReason": "top-level item.price=0 after backend pricing-service failure; priceUnavailable=true",
+  "statusGuard": "not the first blocking cause for this result",
+  "checkout": "not executed"
+}

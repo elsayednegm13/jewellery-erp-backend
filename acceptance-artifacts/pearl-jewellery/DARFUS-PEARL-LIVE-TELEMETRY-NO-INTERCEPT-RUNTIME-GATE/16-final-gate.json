@@ -1,0 +1,19 @@
+{
+  "gate": "PASS_PEARL_LIVE_TELEMETRY_NO_INTERCEPT_RUNTIME_GATE",
+  "actualAcceptanceRuntime": "NEXT_PRODUCTION_START_LOCALHOST",
+  "diagnosticsEnabled": true,
+  "interceptionEnabled": false,
+  "sameFlagControlsBoth": false,
+  "diagnosticEventSinkActive": "PASS",
+  "browserNetworkCaptureActive": "PASS",
+  "backendCorrelationReady": "PASS",
+  "authPreflightTelemetryAvailable": "PASS",
+  "hashContextObservability": "PASS",
+  "ll014IndependenceTest": "PASS",
+  "officialReceivePostCount": 0,
+  "officialDbBusinessDelta": 0,
+  "strictlyInstrumentedLiveRetryAuthorizationReady": "YES",
+  "noAdditionalObservabilityMicroGateAllowed": "YES",
+  "pearlJewelleryModuleStatus": "OPEN",
+  "nextBatchAllowed": "NO_AUTOMATIC_START"
+}

@@ -1,0 +1,9 @@
+{
+  "route":"POST /purchase-orders/receive (also compatibility alias /supplier-purchases/receive)",
+  "routeFile":"backend/src/routes/erp.routes.js:7936",
+  "routeSteps":["supplierReceiveContractService.assertCanonicalReceiveInput","supplierAcquisitionPreviewService.calculateTotals","PurchaseOrder.create","asset/PO item persistence","postingService.postPurchaseEntry"],
+  "accountingBuilder":"backend/src/services/posting.service.js:postPurchaseEntry",
+  "lineConstruction":"postPurchaseEntry builds Inventory + recoverable VAT debits and AP credit",
+  "journalPersistence":"postEntry creates JournalEntry and JournalLine rows",
+  "historicalAcceptance":"postEntry old guard accepted absolute 0.01 difference"
+}

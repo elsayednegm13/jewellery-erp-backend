@@ -1,0 +1,6 @@
+{
+  "unitTests": "PASS",
+  "cloneRuntime": "NOT_REACHED_AUTH_GUARD",
+  "sqlNaN": "NOT_REACHED",
+  "persistedOrdinal": null
+}

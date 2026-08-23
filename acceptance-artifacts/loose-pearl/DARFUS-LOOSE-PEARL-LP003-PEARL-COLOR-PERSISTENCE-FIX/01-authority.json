@@ -1,0 +1,9 @@
+{
+  "control": "DARFUS-LOOSE-PEARL-LP003-PEARL-COLOR-PERSISTENCE-FIX",
+  "officialDatabase": "darfus_erp",
+  "priorGate": "PASS_LOOSE_PEARL_CONTROLLED_FRESH_CLONE_RECEIVE_RETRY",
+  "openDefect": "LP003",
+  "officialReceiveAuthorized": false,
+  "sourceChangeScope": "one canonical normalization key only",
+  "secretsIncluded": false
+}

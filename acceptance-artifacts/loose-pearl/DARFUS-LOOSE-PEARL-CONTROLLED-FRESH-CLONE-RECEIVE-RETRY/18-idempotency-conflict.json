@@ -1,0 +1,11 @@
+{
+  "sameKey": true,
+  "payloadChanged": true,
+  "changedField": "items[0].sellingPrice",
+  "status": 409,
+  "conflictProvenByBackendLog": true,
+  "businessDelta": 0,
+  "additionalPurchaseOrders": 0,
+  "additionalAssets": 0,
+  "additionalJournals": 0
+}

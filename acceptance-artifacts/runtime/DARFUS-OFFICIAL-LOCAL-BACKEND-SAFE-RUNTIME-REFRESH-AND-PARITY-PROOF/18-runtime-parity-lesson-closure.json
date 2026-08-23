@@ -1,0 +1,9 @@
+{
+  "lessonId": "RUNTIME-PARITY-001",
+  "status": "BLOCKED_STRICT_PID_REQUISITE",
+  "filesystemHashParity": "PASS",
+  "processStartAfterAcceptedSource": "PASS",
+  "executingModuleParity": "NOT_CLOSED",
+  "reason": "PID was reused; no second refresh is allowed by this Control",
+  "preventionRegisterMutation": false
+}

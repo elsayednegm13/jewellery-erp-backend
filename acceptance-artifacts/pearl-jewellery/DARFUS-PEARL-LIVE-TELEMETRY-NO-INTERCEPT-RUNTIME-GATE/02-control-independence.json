@@ -1,0 +1,11 @@
+{
+  "diagnosticsControl": "NEXT_PUBLIC_PEARL_CONFIRM_DIAGNOSTICS",
+  "interceptionControl": "NEXT_PUBLIC_PEARL_CONFIRM_INTERCEPT",
+  "sameFlagControlsBoth": false,
+  "truthTableTested": ["ON/OFF", "ON/ON", "OFF/OFF", "OFF/ON", "ONLINE_HOST"],
+  "onOff": {"diagnostics": true, "interception": false, "telemetryEmitted": true},
+  "onOn": {"diagnostics": true, "interception": true, "isolatedLocalInterceptAllowed": true},
+  "offOff": {"diagnostics": false, "interception": false, "telemetryEmitted": false},
+  "offOn": {"diagnostics": false, "interception": false, "blocked": true},
+  "onlineHost": {"diagnostics": false, "interception": false, "blocked": true}
+}

@@ -1,0 +1,8 @@
+{
+  "designStatus": "PASS_DESIGN_ONLY",
+  "preferredMechanism": "A local/test-only same-session helper that calls the existing apiClient from the page/module scope using the saved exact request and key; no token export and no password reentry.",
+  "exactRequestRule": "Use saved immutable body; do not reconstruct from form state.",
+  "security": ["existing auth freshness path", "existing company/branch headers", "existing Idempotency-Key header", "no raw token/cookie/password artifacts"],
+  "futureProof": ["same key/body existing result with zero delta", "same key/changed payload 409 with zero delta"],
+  "implementation": "NOT_PERFORMED_IN_THIS_AUDIT"
+}

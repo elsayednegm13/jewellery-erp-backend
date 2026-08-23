@@ -1,0 +1,15 @@
+{
+  "result": "FAIL",
+  "stage": "concurrency_ui_stale_submit",
+  "message": "locator.waitFor: Error: strict mode violation: getByText('تم تعديل بيانات العميل بواسطة مستخدم آخر. حدّث البيانات وراجع التغييرات قبل الحفظ.', { exact: true }) resolved to 2 elements:\n    1) <div class=\"\" data-title=\"\">تم تعديل بيانات العميل بواسطة مستخدم آخر. حدّث ال…</div> aka getByLabel('Notifications alt+T').getByText('تم تعديل بيانات العميل بواسطة مستخدم آخر. حدّث البيانات وراجع التغييرات قبل الحف')\n    2) <div role=\"alert\" class=\"rounded-2xl border border-rose-200 bg-rose-50 p-3 text-xs font-bold text-rose-700 sm:col-span-2 dark:border-rose-900/50 dark:bg-rose-500/10 dark:text-rose-300\">تم تعديل بيانات العميل بواسطة مستخدم آخر. حدّث ال…</div> aka getByTestId('customer-profile-edit-form').getByText('تم تعديل بيانات العميل بواسطة مستخدم آخر. حدّث البيانات وراجع التغييرات قبل الحف')\n\nCall log:\n\u001b[2m  - waiting for getByText('تم تعديل بيانات العميل بواسطة مستخدم آخر. حدّث البيانات وراجع التغييرات قبل الحفظ.', { exact: true }) to be visible\u001b[22m\n",
+  "stack": [
+    "locator.waitFor: Error: strict mode violation: getByText('تم تعديل بيانات العميل بواسطة مستخدم آخر. حدّث البيانات وراجع التغييرات قبل الحفظ.', { exact: true }) resolved to 2 elements:",
+    "    1) <div class=\"\" data-title=\"\">تم تعديل بيانات العميل بواسطة مستخدم آخر. حدّث ال…</div> aka getByLabel('Notifications alt+T').getByText('تم تعديل بيانات العميل بواسطة مستخدم آخر. حدّث البيانات وراجع التغييرات قبل الحف')",
+    "    2) <div role=\"alert\" class=\"rounded-2xl border border-rose-200 bg-rose-50 p-3 text-xs font-bold text-rose-700 sm:col-span-2 dark:border-rose-900/50 dark:bg-rose-500/10 dark:text-rose-300\">تم تعديل بيانات العميل بواسطة مستخدم آخر. حدّث ال…</div> aka getByTestId('customer-profile-edit-form').getByText('تم تعديل بيانات العميل بواسطة مستخدم آخر. حدّث البيانات وراجع التغييرات قبل الحف')",
+    "",
+    "Call log:",
+    "\u001b[2m  - waiting for getByText('تم تعديل بيانات العميل بواسطة مستخدم آخر. حدّث البيانات وراجع التغييرات قبل الحفظ.', { exact: true }) to be visible\u001b[22m",
+    "",
+    "    at main (H:\\WORK\\jewellery-erp-master\\backend\\tests\\customer-master-phase-02-browser-runtime.cjs:366:129)"
+  ]
+}

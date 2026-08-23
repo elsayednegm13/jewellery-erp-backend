@@ -1,0 +1,10 @@
+{
+  "clientSupplierRequired": false,
+  "currentReceiveSupplierRequired": true,
+  "currentEvidence": "erp.routes.js throws validation error when body.supplierId is absent; Supplier is resolved by company scope before idempotency claim.",
+  "supplierIdentity": "Current receive uses canonical Supplier.id, not manual free text.",
+  "classification": "AUTHORITY_CONFLICT",
+  "ownerDecisionRequired": true,
+  "options": ["Allow a separately defined non-supplier Loose Pearl intake path", "Make Supplier mandatory for purchased stock and treat client optionality as non-purchase intake only"],
+  "noUnknownSupplierCreated": true
+}

@@ -1,0 +1,8 @@
+{
+  "designOnly":true,
+  "recommendedFutureControl":"ONE_JOURNAL_ACCOUNTING_REMEDIATION",
+  "minimumDesign":"Owner-approved, auditable correction workflow that preserves the original posted journal, PO, Asset, cost revision, payable source and tax snapshot; no direct line edit.",
+  "optionsToEvaluate":["controlled correction/compensating journal","canonical reversal and repost only if the architecture supports the unbalanced source safely","source-specific remediation workflow"],
+  "notRecommended":["direct UPDATE of posted lines","delete/reinsert","silent balance plug","database restore over current state"],
+  "implementation":"NOT_PERFORMED"
+}

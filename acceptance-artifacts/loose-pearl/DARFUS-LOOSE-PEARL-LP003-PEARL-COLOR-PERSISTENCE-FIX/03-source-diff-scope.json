@@ -1,0 +1,11 @@
+{
+  "fileChanged": "backend/src/services/inventory-master-policy.service.js",
+  "functionChanged": "normalizeLooseDetails",
+  "change": "preserve pearlColor only for canonical LOOSE_PEARL input",
+  "aliasesAdded": 0,
+  "fallbackAdded": false,
+  "clientPayloadRenamed": false,
+  "accountingTaxSupplierAssetBarcodeLogicChanged": false,
+  "schemaChanged": false,
+  "migrationCreated": false
+}

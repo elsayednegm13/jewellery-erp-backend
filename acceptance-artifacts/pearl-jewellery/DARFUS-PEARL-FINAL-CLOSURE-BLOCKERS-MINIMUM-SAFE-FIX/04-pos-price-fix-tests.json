@@ -1,0 +1,4 @@
+{
+  "status": "PASS",
+  "cases": ["positive Pearl Asset.price authority", "invalid policy cannot zero valid price", "missing price remains unavailable", "no Product fallback", "scope limited to Pearl branch"]
+}

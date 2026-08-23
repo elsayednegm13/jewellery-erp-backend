@@ -1,0 +1,41 @@
+{
+  "database": "darfus_erp",
+  "readOnly": true,
+  "postCounts": {
+    "purchase_orders": 12,
+    "purchase_order_items": 12,
+    "assets": 12,
+    "asset_components": 9,
+    "asset_gemstone_component_details": 2,
+    "asset_barcode_history": 12,
+    "asset_origins": 12,
+    "asset_purchase_cost_revisions": 12,
+    "asset_current_valuations": 12,
+    "inventory_asset_movements": 12,
+    "journal_entries": 15,
+    "journal_lines": 42,
+    "cash_transactions": 3,
+    "idempotency_requests": 16,
+    "audit_logs": 71,
+    "loose_gemstone_assets": 1,
+    "gs_los_barcodes": 1
+  },
+  "expectedDelta": {
+    "purchase_orders": 1,
+    "purchase_order_items": 1,
+    "assets": 1,
+    "asset_components": 1,
+    "asset_gemstone_component_details": 1,
+    "asset_barcode_history": 1,
+    "asset_origins": 1,
+    "asset_purchase_cost_revisions": 1,
+    "asset_current_valuations": 1,
+    "inventory_asset_movements": 1,
+    "journal_entries": 1,
+    "journal_lines": 3,
+    "cash_transactions": 0,
+    "idempotency_requests": 1,
+    "audit_logs": 1
+  },
+  "replayAndConflictAddedNoBusinessRows": true
+}

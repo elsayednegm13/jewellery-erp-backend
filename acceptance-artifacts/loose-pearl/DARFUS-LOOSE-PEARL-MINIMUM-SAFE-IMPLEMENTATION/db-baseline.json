@@ -1,0 +1,28 @@
+{
+  "database": "darfus_erp",
+  "currentDatabaseProven": true,
+  "counts": {
+    "purchase_orders": 13,
+    "purchase_order_items": 13,
+    "assets": 13,
+    "loose_pearl_assets": 0,
+    "pearl_jewellery_assets": 1,
+    "asset_components": 10,
+    "asset_pearl_component_details": 1,
+    "asset_origins": 13,
+    "asset_purchase_cost_revisions": 13,
+    "asset_current_valuations": 13,
+    "inventory_asset_movements": 13,
+    "asset_barcode_history": 13,
+    "asset_rfid_assignments": 2,
+    "journal_entries": 16,
+    "journal_lines": 45,
+    "idempotency_requests": 17,
+    "cash_transactions": 3,
+    "suppliers": 2,
+    "inventory_locations": 2,
+    "pearl_size_master_data": 39,
+    "profile_master_data": 660
+  },
+  "writes": 0
+}

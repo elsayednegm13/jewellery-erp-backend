@@ -1,0 +1,12 @@
+{
+  "purchaseBasePreTax": "100.00000000",
+  "purchaseVat": "14.00000000",
+  "purchaseTotal": "114.00000000",
+  "currentBasePreTax": "120.00000000",
+  "currentVat": "16.80000000",
+  "currentTotal": "136.80000000",
+  "vatRate": 14,
+  "taxTreatment": "STANDARD_VAT",
+  "applyVat": true,
+  "taxIncluded": false
+}

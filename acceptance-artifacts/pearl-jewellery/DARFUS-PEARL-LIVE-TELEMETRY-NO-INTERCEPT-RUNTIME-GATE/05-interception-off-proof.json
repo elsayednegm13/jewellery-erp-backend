@@ -1,0 +1,7 @@
+{
+  "localReceiveInterceptionActive": false,
+  "interceptBranchReachableWithCurrentConfig": false,
+  "proof": ["NEXT_PUBLIC_PEARL_CONFIRM_INTERCEPT=false", "explicit separate helper", "localhost guard", "LL-014 truth-table test"],
+  "businessPostUsedForProof": false,
+  "onlineProductionInterception": "impossible_by_current_guard"
+}

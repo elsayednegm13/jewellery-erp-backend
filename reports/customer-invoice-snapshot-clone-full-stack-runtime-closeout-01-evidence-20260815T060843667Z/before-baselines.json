@@ -1,0 +1,44 @@
+{
+  "persistent": {
+    "database": "darfus_erp",
+    "migrations": 80,
+    "customers": 2,
+    "invoices": 15,
+    "payments": 30,
+    "journal_entries": 81,
+    "journal_lines": 209,
+    "cash_transactions": 58,
+    "assets": 62,
+    "customers_with_addresses": 2,
+    "snapshot_columns": 0,
+    "phone_snapshots": 0
+  },
+  "acceptance": {
+    "database": "darfus_erp_inventory_rehearsal_20260804_160500z",
+    "migrations": 80,
+    "customers": 3,
+    "invoices": 133,
+    "payments": 122,
+    "journal_entries": 497,
+    "journal_lines": 1423,
+    "cash_transactions": 173,
+    "assets": 475,
+    "customers_with_addresses": 3,
+    "snapshot_columns": 0,
+    "phone_snapshots": 0
+  },
+  "persistentIntegrity": {
+    "unbalanced_journals": 0,
+    "orphan_journal_lines": 0,
+    "unlinked_treasury": 0,
+    "duplicate_journal_sources": 0,
+    "duplicate_treasury_links": 0
+  },
+  "acceptanceIntegrity": {
+    "unbalanced_journals": 0,
+    "orphan_journal_lines": 0,
+    "unlinked_treasury": 0,
+    "duplicate_journal_sources": 0,
+    "duplicate_treasury_links": 1
+  }
+}

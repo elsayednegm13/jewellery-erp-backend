@@ -1,0 +1,952 @@
+{
+  "clone": "darfus_erp_invoice_snapshot_fullstack_1786772486724",
+  "backendOrigin": "http://127.0.0.1:44051",
+  "frontendOrigin": "http://127.0.0.1:44052",
+  "runtimeDatabase": "darfus_erp_invoice_snapshot_fullstack_1786772486724",
+  "companyId": "COMP-1384c23f-18ee-405f-8675-8e87746be72c",
+  "branchId": "BR-cf387f66-0904-471e-85b8-9346ac3dbb03",
+  "customer": {
+    "id": "CUS-SNAPSHOT-FS-1786772491941",
+    "initial": {
+      "name": "N1",
+      "phone": "P1",
+      "address": "A1"
+    }
+  },
+  "asset": {
+    "id": "AST-PUR-1786115811666-1-1-fift",
+    "barcode": "TDM1ODD00000034",
+    "name": "Concurrent diamond",
+    "price": "100"
+  },
+  "invoice": {
+    "id": "INV-ID-1786772597396-lnho2a",
+    "db": {
+      "id": "INV-ID-1786772597396-lnho2a",
+      "customerName": "N1",
+      "customer_phone_snapshot": "P1",
+      "customer_address_snapshot": {
+        "city": "C1",
+        "line1": "A1",
+        "country": "U1"
+      },
+      "total": "105.00000000",
+      "tax": "5.00000000"
+    },
+    "checkoutStatus": 201,
+    "checkoutResponseKeys": [
+      "branch",
+      "branchId",
+      "cancelReason",
+      "cancelledAt",
+      "companyId",
+      "createdAt",
+      "createdByEmployeeId",
+      "customerAddressSnapshot",
+      "customerId",
+      "customerName",
+      "customerPhoneSnapshot",
+      "data",
+      "date",
+      "deletedAt",
+      "deposit",
+      "discount",
+      "downPayment",
+      "finalizedByEmployeeId",
+      "guarantorName",
+      "guarantorPhone",
+      "id",
+      "idempotencyKey",
+      "installmentCount",
+      "installmentFrequency",
+      "installments",
+      "invoiceNumber",
+      "items",
+      "journalEntry",
+      "loyalty",
+      "makingCharge",
+      "notes",
+      "paidAmount",
+      "paymentMethod",
+      "paymentSplits",
+      "payments",
+      "postedAt",
+      "postingStatus",
+      "relatedInvoiceId",
+      "remainingAmount",
+      "status",
+      "stoneValue",
+      "subtotal",
+      "success",
+      "tax",
+      "total",
+      "type",
+      "updatedAt",
+      "vatRate"
+    ]
+  },
+  "network": [
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/auth/accessible-companies",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": false,
+      "hasBranch": false
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/auth/accessible-companies",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications?limit=20",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/settings",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/branches",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/events/stream",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications?limit=20",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "status": 200,
+      "responseKeys": [
+        "count",
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/branches",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ]
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/customers",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/customers",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": true
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/readiness/operations",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": true
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/invoices?postingStatus=draft&pageSize=100&sortBy=createdAt&sortDirection=desc",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": true
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/settings",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/customers",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/invoices?postingStatus=draft&pageSize=100&sortBy=createdAt&sortDirection=desc",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/readiness/operations",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/customers",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ]
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/customers/CUS-SNAPSHOT-FS-1786772491941/pos-summary",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": true
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/customers/CUS-SNAPSHOT-FS-1786772491941/pos-summary",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/pos/search?query=TDM1ODD00000034&type=all&limit=20&includeUnavailableExact=true",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": true
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/pos/search?query=TDM1ODD00000034&type=all&limit=20&includeUnavailableExact=true",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ]
+    },
+    {
+      "phase": "request",
+      "method": "POST",
+      "path": "http://127.0.0.1:44051/api/v1/pricing/calculate",
+      "requestKeys": [
+        "assetIds",
+        "customerId",
+        "discount",
+        "makingChargePerGram",
+        "stoneValue"
+      ],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": true
+    },
+    {
+      "phase": "response",
+      "method": "POST",
+      "path": "http://127.0.0.1:44051/api/v1/pricing/calculate",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "journalPreview",
+        "makingCharge",
+        "makingChargePerGram",
+        "subtotal",
+        "success",
+        "tax",
+        "total",
+        "totalMakingCharge",
+        "vatRate"
+      ]
+    },
+    {
+      "phase": "request",
+      "method": "POST",
+      "path": "http://127.0.0.1:44051/api/v1/pos/checkout",
+      "requestKeys": [
+        "branch",
+        "branchId",
+        "customerId",
+        "customerName",
+        "discount",
+        "downPayment",
+        "installmentCount",
+        "installmentFrequency",
+        "items",
+        "makingChargePerGram",
+        "notes",
+        "paymentMethod",
+        "paymentSplits",
+        "stoneValue",
+        "tax",
+        "total"
+      ],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": true
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications?limit=20",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/customers",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/customers",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": true
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications?limit=20",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "response",
+      "method": "POST",
+      "path": "http://127.0.0.1:44051/api/v1/pos/checkout",
+      "status": 201,
+      "responseKeys": [
+        "branch",
+        "branchId",
+        "cancelReason",
+        "cancelledAt",
+        "companyId",
+        "createdAt",
+        "createdByEmployeeId",
+        "customerAddressSnapshot",
+        "customerId",
+        "customerName",
+        "customerPhoneSnapshot",
+        "data",
+        "date",
+        "deletedAt",
+        "deposit",
+        "discount",
+        "downPayment",
+        "finalizedByEmployeeId",
+        "guarantorName",
+        "guarantorPhone",
+        "id",
+        "idempotencyKey",
+        "installmentCount",
+        "installmentFrequency",
+        "installments",
+        "invoiceNumber",
+        "items",
+        "journalEntry",
+        "loyalty",
+        "makingCharge",
+        "notes",
+        "paidAmount",
+        "paymentMethod",
+        "paymentSplits",
+        "payments",
+        "postedAt",
+        "postingStatus",
+        "relatedInvoiceId",
+        "remainingAmount",
+        "status",
+        "stoneValue",
+        "subtotal",
+        "success",
+        "tax",
+        "total",
+        "type",
+        "updatedAt",
+        "vatRate"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications?limit=20",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "status": 200,
+      "responseKeys": [
+        "count",
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/customers",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications?limit=20",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "status": 200,
+      "responseKeys": [
+        "count",
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "status": 200,
+      "responseKeys": [
+        "count",
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/customers",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "status": 200,
+      "responseKeys": [
+        "count",
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/customers",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/customers",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": true
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications?limit=20",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications?limit=20",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/customers",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications?limit=20",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "status": 200,
+      "responseKeys": [
+        "count",
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications?limit=20",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "status": 200,
+      "responseKeys": [
+        "count",
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/customers",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "status": 200,
+      "responseKeys": [
+        "count",
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "status": 200,
+      "responseKeys": [
+        "count",
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/events/stream",
+      "status": 200,
+      "responseKeys": []
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/auth/accessible-companies",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": false,
+      "hasBranch": false
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/auth/accessible-companies",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications?limit=20",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/settings",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/branches",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/events/stream",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications?limit=20",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/notifications/unread-count",
+      "status": 200,
+      "responseKeys": [
+        "count",
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/branches",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ]
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/invoices/search-print?page=1&pageSize=25",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": true
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/settings",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:44051/api/v1/invoices/search-print?page=1&pageSize=25",
+      "status": 200,
+      "responseKeys": [
+        "capabilities",
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ]
+    }
+  ],
+  "consoleErrors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ],
+  "screenshots": [
+    "pos-before-checkout.png",
+    "i1-checkout.png",
+    "i1-detail.png"
+  ],
+  "frontendOutput": "▲ Next.js 16.2.9\n- Local:         http://127.0.0.1:44052\n- Network:       http://127.0.0.1:44052\n✓ Ready in 428ms\n",
+  "migration": {
+    "name": "20260814010000-customer-invoice-contact-snapshots.js",
+    "columns": [
+      {
+        "column_name": "customer_address_snapshot",
+        "data_type": "jsonb",
+        "is_nullable": "YES"
+      },
+      {
+        "column_name": "customer_phone_snapshot",
+        "data_type": "character varying",
+        "is_nullable": "YES"
+      }
+    ],
+    "oldNullSnapshots": 133
+  }
+}

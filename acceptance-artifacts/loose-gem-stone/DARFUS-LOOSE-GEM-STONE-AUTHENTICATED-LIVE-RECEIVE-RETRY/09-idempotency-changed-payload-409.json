@@ -1,0 +1,9 @@
+{
+  "sameIdempotencyKey": true,
+  "payloadChanged": true,
+  "status": 409,
+  "errorCode": "STATE_CONFLICT",
+  "businessRowsCreated": 0,
+  "expectedConflict": true,
+  "secretKeyRecorded": false
+}

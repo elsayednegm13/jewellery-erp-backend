@@ -1,0 +1,9 @@
+{
+  "scope": "purchase.receive",
+  "algorithm": "existing idempotencyService.hashRequest",
+  "hashComputedBeforePost": true,
+  "hashValue": "d3d4c1da2f9cf081adf4771a7cec644f71203cdba1af209a393af552ce10422c",
+  "idempotencyKeyPresent": true,
+  "rawTokenPrinted": false,
+  "passwordPrinted": false
+}

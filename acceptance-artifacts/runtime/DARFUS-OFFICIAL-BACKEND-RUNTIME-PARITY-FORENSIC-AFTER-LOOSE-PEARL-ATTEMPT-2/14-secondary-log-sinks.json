@@ -1,0 +1,9 @@
+{
+  "applicationFileTransport": false,
+  "applicationLoggerTransport": "Winston Console only",
+  "containerLogDriver": "json-file",
+  "secondarySinkInspected": "Docker logs",
+  "additionalFileOrPm2Sink": false,
+  "status": "PASS_NO_ADDITIONAL_APP_FILE_SINK",
+  "limitation": "Docker console output retains stack but not the low-level SQL message"
+}

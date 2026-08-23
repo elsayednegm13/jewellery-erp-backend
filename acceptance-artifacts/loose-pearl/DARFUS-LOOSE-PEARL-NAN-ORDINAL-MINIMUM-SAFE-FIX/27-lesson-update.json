@@ -1,0 +1,7 @@
+{
+  "lesson": "LP-LESSON-002",
+  "sameCauseRepeatCount": 1,
+  "preventionGateFailedPreviously": true,
+  "preventionGateAfterFix": "SOURCE_AND_UNIT_TESTS_PASS_CLONE_RUNTIME_NOT_REACHED",
+  "duplicateLessonCreated": false
+}

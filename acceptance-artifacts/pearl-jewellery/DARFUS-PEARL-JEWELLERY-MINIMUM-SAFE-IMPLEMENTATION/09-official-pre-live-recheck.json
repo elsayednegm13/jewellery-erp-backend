@@ -1,0 +1,9 @@
+{
+  "currentDatabase": "darfus_erp",
+  "purchase_orders": 12,
+  "assets": 12,
+  "journal_entries": 15,
+  "idempotency_requests": 16,
+  "pearl_jewellery_assets": 0,
+  "businessDeltaBeforeOfficialConfirm": 0
+}

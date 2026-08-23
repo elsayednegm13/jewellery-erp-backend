@@ -1,0 +1,10 @@
+{
+  "httpStatus": 201,
+  "outcome": "Receive completed",
+  "livePO": "PO-1787391626460",
+  "liveAsset": "AST-PUR-1787391626468-1-1-wf0w",
+  "liveBarcode": "PLRNG18000001",
+  "liveJournal": "JE-1787391626555",
+  "idempotencyKey": "6adef4c9-a78a-4cdc-a5e5-c3aea56a3441",
+  "requestId": "a792e757-8668-40c3-897e-6e6fd86f7f43"
+}

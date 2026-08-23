@@ -1,0 +1,7 @@
+{
+  "lessonId": "RUNTIME-PARITY-001",
+  "lesson": "After source correction, a bind-mounted backend process is not proven fresh until process start/reload and runtime behavior are captured",
+  "requiredEvidenceBeforeAcceptance": ["container/process start time after fix","runtime file hashes","route-plumbing proof","health/db/redis","behavioral smoke on the guarded path"],
+  "currentControlAction": "recorded as forensic artifact only; no handoff/source/config mutation performed",
+  "preventionRegisterUpdated": false
+}

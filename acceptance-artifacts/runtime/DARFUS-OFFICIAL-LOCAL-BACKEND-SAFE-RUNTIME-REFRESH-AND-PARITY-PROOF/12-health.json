@@ -1,0 +1,7 @@
+{
+  "observedUtc": "2026-08-22T21:12:58Z",
+  "health": {"status": 200, "result": "UP"},
+  "dbHealth": {"status": 200, "result": "PostgreSQL connected successfully"},
+  "redisHealth": {"status": 200, "result": "Redis connected"},
+  "receiveRequests": 0
+}

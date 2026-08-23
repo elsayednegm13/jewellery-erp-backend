@@ -1,0 +1,9 @@
+{
+  "database": "darfus_erp",
+  "relevantTables": ["assets","asset_components","asset_pearl_component_details","asset_origins","asset_purchase_cost_revisions","asset_current_valuations","inventory_asset_movements","asset_barcode_history","asset_rfid_assignments","asset_lineage_links","purchase_orders","purchase_order_items","journal_entries","journal_lines","idempotency_requests"],
+  "assetQuantityColumn": false,
+  "pearlDetailTable": true,
+  "currentRepresentation": "Existing schema can represent one Loose Pearl component/detail attached to one Asset; it cannot prove the client group/partial-operation contract.",
+  "migrationNeeded": "UNPROVEN_DESIGN_ONLY",
+  "schemaProofBeforeMigration": true
+}

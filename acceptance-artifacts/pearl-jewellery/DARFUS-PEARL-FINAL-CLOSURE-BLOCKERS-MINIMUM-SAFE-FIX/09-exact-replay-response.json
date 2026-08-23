@@ -1,0 +1,12 @@
+{
+  "requestCount": 1,
+  "http": 201,
+  "responseState": "EXISTING_IDEMPOTENT_RESULT",
+  "sameTransaction": true,
+  "po": "PO-1787391626460",
+  "asset": "AST-PUR-1787391626468-1-1-wf0w",
+  "barcode": "PLRNG18000001",
+  "authFreshness": "FRESH",
+  "companyContextMatch": true,
+  "branchContextMatch": true
+}

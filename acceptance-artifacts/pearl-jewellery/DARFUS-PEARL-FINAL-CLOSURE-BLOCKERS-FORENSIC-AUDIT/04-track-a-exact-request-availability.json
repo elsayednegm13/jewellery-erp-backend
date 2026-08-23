@@ -1,0 +1,9 @@
+{
+  "exactRequestArtifactPresent": true,
+  "sameIdempotencyKeyReferenceAvailable": true,
+  "canonicalHashArtifactPresent": true,
+  "businessPayloadReconstructionRequired": false,
+  "savedRequestPath": "../DARFUS-OWNER-AUTHORIZED-STRICTLY-INSTRUMENTED-PEARL-LIVE-RETRY/06-exact-prepared-request.json",
+  "replayExecuted": false,
+  "keyValuePrinted": false
+}

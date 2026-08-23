@@ -1,0 +1,8 @@
+{
+  "pearlSize": {"table":"pearl_size_master_data","total":39,"active":39,"distinct":39,"min":"1.00000000","max":"20.00000000","step":"0.5","display":"<value> mm","status":"READY"},
+  "categories": {"PEARL_TYPE":10,"PEARL_COLOR":17,"PEARL_OVERTONE":19,"PEARL_ORIENT":6,"PEARL_SHAPE":10,"PEARL_LUSTER":26,"PEARL_SURFACE_QUALITY":18,"PEARL_NACRE_QUALITY":27,"PEARL_ORIGIN":20,"CERTIFICATE_AUTHORITY":16,"PEARL_ITEM_DESCRIPTION":18},
+  "clientCertificateBaseline": 14,
+  "permissionedWritePaths": ["GET /pearl-size-master-data", "GET /profile-master-data", "POST/PATCH admin paths guarded by settings.update or inventory.adjust"],
+  "status": "PARTIAL",
+  "mutated": false
+}

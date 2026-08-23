@@ -1,0 +1,23 @@
+{
+  "authority": "CLIENT_DOCUMENT",
+  "section": "Loose Pearl / اللؤلؤ المفرد",
+  "sections": 8,
+  "standaloneInventory": true,
+  "noGoldData": true,
+  "noGoldWeight": true,
+  "noGoldCost": true,
+  "noMakingCost": true,
+  "directSale": true,
+  "stockHolding": true,
+  "futureManufacturingUse": true,
+  "lineageOnManufacturingUse": "REQUIRED",
+  "oneRecordCanRepresentGroup": true,
+  "groupRule": "Homogeneous identical pearls may be represented by one record; differing specifications require a new record.",
+  "totalWeight": "Required combined weight; do not multiply again by quantity.",
+  "historicalCost": "Combined cost for the represented record/group; not per-pearl when quantity > 1.",
+  "supplierRequired": false,
+  "barcode": "Automatic, globally unique, primary identity",
+  "expectedBarcodeShape": "PLLOS00XXXXXX",
+  "rfid": "Optional, unique, supplementary",
+  "statuses": ["Available", "Reserved", "Pending Transfer", "Workshop", "Returned", "Missing", "Melted", "Sold"]
+}

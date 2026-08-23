@@ -1,0 +1,11 @@
+{
+  "canonicalAuthority": "piece.pieceIndex when valid",
+  "fallbackAuthority": "validated runtime array pieceIndex/qtyIndex",
+  "invariant": [
+    "finite",
+    "safe integer",
+    "positive ordinal"
+  ],
+  "invalidBoth": "FAIL_CLOSED_BEFORE_SQL",
+  "businessLogicChange": false
+}

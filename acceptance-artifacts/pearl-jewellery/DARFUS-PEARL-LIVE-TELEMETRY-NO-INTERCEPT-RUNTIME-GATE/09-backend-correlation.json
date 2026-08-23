@@ -1,0 +1,10 @@
+{
+  "backendRequestIdLogging": "PASS",
+  "routeStatusTimestampLogging": "PASS",
+  "safeRequestBrowserBackendCorrelation": "PASS",
+  "examples": [
+    {"path": "/api/v1/inventory-v2/pearl-jewellery/preview", "status": 200, "requestId": "7206e53b-73c0-4088-a9c0-7248bec8f790", "timestamp": "2026-08-22 09:16:40"},
+    {"path": "/api/v1/inventory-v2/receive-preview", "status": 200, "requestId": "14f4d263-856d-45ee-b934-6f355c5461f4", "timestamp": "2026-08-22 09:16:40"}
+  ],
+  "secretsRecorded": false
+}

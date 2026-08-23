@@ -1,0 +1,12 @@
+{
+  "page": "http://localhost:3000/en/inventory/pearl",
+  "method": "POST",
+  "route": "/api/v1/purchase-orders/receive",
+  "requestObserved": true,
+  "status": 201,
+  "oneDistinctReceive": true,
+  "secondConfirmClicked": false,
+  "consoleErrors": 0,
+  "diagnostics": "ON",
+  "interception": "OFF"
+}

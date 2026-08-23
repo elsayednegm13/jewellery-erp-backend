@@ -1,0 +1,8 @@
+{
+  "control": "DARFUS-PEARL-JEWELLERY-CONFIRM-AUTH-PATH-MINIMUM-SAFE-FIX",
+  "scope": "pre-confirm auth freshness only",
+  "prior_root_cause": "access token was no longer accepted at Confirm; refresh succeeded and unsafe POST replay was intentionally refused",
+  "prevention": "freshness preflight before opening and immediately before critical Confirm",
+  "safety_margin_seconds": 60,
+  "business_mutation": false
+}

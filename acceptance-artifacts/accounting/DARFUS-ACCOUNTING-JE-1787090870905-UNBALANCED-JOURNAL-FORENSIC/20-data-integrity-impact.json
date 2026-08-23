@@ -1,0 +1,11 @@
+{
+  "sourceLink":"PASS",
+  "duplicateSourceJournal":"NO - count 1",
+  "orphanJournalLines":"NO for target",
+  "duplicatePayableEffect":"NOT_FOUND for target source; one purchase journal",
+  "supplierDueField":"0.00000000; frozen legacy/reference field, not payable authority",
+  "assetPurchaseCostConsistency":"Asset cost and current cost revision agree at 1871.24177528",
+  "poRemainingAmount":"2133.21562382",
+  "payments":"NONE linked to target PO",
+  "impact":"Isolated posted-journal imbalance plus ledger-vs-source rounding deltas; no duplicate source or cash effect proven"
+}

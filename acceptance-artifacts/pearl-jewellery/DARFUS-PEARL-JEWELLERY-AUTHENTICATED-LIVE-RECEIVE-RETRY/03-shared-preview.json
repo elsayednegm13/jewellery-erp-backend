@@ -1,0 +1,13 @@
+{
+  "profile_preview_base": 3984,
+  "shared_preview_base": 3984,
+  "shared_preview_vat": 557.76,
+  "shared_preview_total": 4541.76,
+  "configured_vat_rate": 14,
+  "tax_application_count": 1,
+  "prepared_unit_cost": 3984,
+  "per_piece_purchase_cost": 3984,
+  "tax_included": false,
+  "apply_vat": true,
+  "parity": "PASS"
+}

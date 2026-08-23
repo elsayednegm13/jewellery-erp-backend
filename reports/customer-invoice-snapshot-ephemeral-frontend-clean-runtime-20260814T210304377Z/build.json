@@ -1,0 +1,6 @@
+{
+  "command": "C:\\Program Files\\nodejs\\node.exe C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js run build -- --webpack",
+  "cwd": "C:\\WINDOWS\\TEMP\\darfus-invoice-frontend-clean-pfD4fN\\frontend",
+  "exitCode": 1,
+  "error": null
+}

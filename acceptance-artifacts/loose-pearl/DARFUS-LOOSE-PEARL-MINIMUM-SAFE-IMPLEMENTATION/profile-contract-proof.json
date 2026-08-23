@@ -1,0 +1,13 @@
+{
+  "profile": "LOOSE_PEARL",
+  "currency": "AED",
+  "weightUnit": "CT",
+  "weightInputPrecision": 2,
+  "weightDisplayPrecision": 2,
+  "excessPrecision": "REJECT",
+  "noGoldKaratMaking": true,
+  "dedicatedContract": "GET /api/v1/inventory-v2/loose-pearl/contract",
+  "dedicatedPreview": "POST /api/v1/inventory-v2/loose-pearl/preview",
+  "sharedPreview": "POST /api/v1/inventory-v2/receive-preview",
+  "readiness": "READY on disposable clone"
+}

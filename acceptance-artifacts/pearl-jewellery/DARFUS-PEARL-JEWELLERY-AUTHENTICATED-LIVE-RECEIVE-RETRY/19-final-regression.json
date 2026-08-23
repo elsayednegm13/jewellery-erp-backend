@@ -1,0 +1,8 @@
+{
+  "status": "PRE_LIVE_PROOF_ONLY",
+  "focused_auth_and_pearl_tests": "PASS",
+  "typecheck": "PASS",
+  "production_build": "PASS",
+  "official_receive_replay": "NOT_RUN",
+  "note": "No post-click regression actions were run after the ambiguous result."
+}

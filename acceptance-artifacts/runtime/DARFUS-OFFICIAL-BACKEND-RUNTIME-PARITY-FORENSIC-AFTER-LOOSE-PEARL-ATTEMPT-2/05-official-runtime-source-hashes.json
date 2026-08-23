@@ -1,0 +1,11 @@
+{
+  "algorithm": "SHA-256",
+  "files": {
+    "/app/src/services/inventory-v2-runtime.service.js": "6932876d0be62929ba0c300771996188a6fa130711619311213f509fa520c157",
+    "/app/src/routes/erp.routes.js": "8e53712b0b1cf5b384adb66e50899c0e39e51820791a9e4621b15aa4f42be34b",
+    "/app/package.json": "231a19d0a81c2579f4d1b8e4d676a7085ba6811516630b811627b58a5cb3a86b",
+    "/app/package-lock.json": "a2e65bf8d4ebbff9ce559532130dc896433a931c5b6515102fc48149fe602551"
+  },
+  "filesystemParity": "PASS",
+  "importantQualification": "filesystem parity does not prove the already-running Node module was reloaded after the source fix"
+}

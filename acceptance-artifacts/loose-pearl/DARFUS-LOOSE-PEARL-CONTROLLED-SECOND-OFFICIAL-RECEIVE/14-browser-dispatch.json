@@ -1,0 +1,11 @@
+{
+  "canonicalUi": "Inventory -> Add / Receive Inventory -> Loose Pearl",
+  "diagnostics": "ON",
+  "clickedOnce": true,
+  "interception": "OFF",
+  "confirmEnabled": true,
+  "sharedPreview": "READY",
+  "secondClick": "NOT_RUN",
+  "profilePreview": "READY",
+  "uiAfterClick": "An unexpected server error occurred"
+}

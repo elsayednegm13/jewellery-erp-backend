@@ -1,0 +1,16 @@
+{
+  "newLessonThisControl": "LP003",
+  "preflightCorrection": "The first read-only artifact construction included a forbidden nested perPiece quantity; it was removed before the single Receive POST. It was not a failed Receive and caused no persistence.",
+  "preservedLessons": [
+    "LP001: production builder must include outer item quantity and perPiece array with matching length.",
+    "LP002: perPiece entries must not carry quantity as physical stock authority."
+  ],
+  "newLesson": {
+    "id": "LP003",
+    "rootCause": "inventory-master-policy.normalizeLooseDetails reads color/stoneColor, while the production Loose Pearl builder sends pearlColor inside looseDetails; persistAssetComponents therefore receives no color value.",
+    "whatAllowedIt": "The controlled receive path validated the core Pearl identity but did not assert field-by-field persistence parity for optional Pearl detail fields.",
+    "minimumFix": "Align the proven Loose Pearl field mapping at the canonical normalization boundary and add a readback assertion; owner approval required before source change.",
+    "preventionGate": "Exact request-to-asset detail reconciliation for every client-required Loose Pearl field before official acceptance.",
+    "test": "Loose Pearl receive/readback test asserting pearlColor persistence from the production builder."
+  }
+}

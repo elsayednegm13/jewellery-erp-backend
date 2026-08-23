@@ -1,0 +1,6 @@
+{
+  "businessRollbackRoute": "NOT_SUPPORTED",
+  "businessRecoveryResult": "NOT_APPLICABLE",
+  "cloneDrop": "environment cleanup only, not business rollback proof",
+  "officialReceiveRecoveryPlanDocumented": true
+}

@@ -1,0 +1,18 @@
+{
+  "url": "http://127.0.0.1:45740/ar/login",
+  "title": "DARFUS Jewellery ERP",
+  "route": "/ar/login",
+  "readOnly": true,
+  "consoleLogs": [],
+  "visibleMarkers": [
+    "DARFUS",
+    "JEWELLERY ERP",
+    "تسجيل الدخول",
+    "البريد الإلكتروني",
+    "كلمة المرور",
+    "دخول إلى النظام"
+  ],
+  "screenshot": "frontend-smoke.png",
+  "browserClosed": true,
+  "frontendStopped": true
+}

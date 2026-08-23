@@ -1,0 +1,11 @@
+{
+  "receiveRoute": "POST /purchase-orders/receive",
+  "transactionAtomicity": "supported; route rolls back transaction on error",
+  "idempotencyClaim": "after supplier/branch/location validation",
+  "purchaseReceiveReversalRoute": "not found",
+  "purchaseOrderCancellationRoute": "not found for completed receive",
+  "assetAcquisitionReversalRoute": "not found",
+  "journalReversal": "manual journal route only; rejects non-manual source",
+  "paymentReversal": "supplier payment only; does not reverse PO/Asset acquisition",
+  "cgpReversal": "separate CGP scope; not applicable to Supplier Receive"
+}

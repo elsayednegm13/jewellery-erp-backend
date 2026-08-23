@@ -1,0 +1,9 @@
+{
+  "sameInputs":"1871.2418 tax base, 261.9738 input VAT, 2133.21562382 total",
+  "roundedLines":{"inventory":"1871.24","vat":"261.97","ap":"2133.22","debit":"2133.21","credit":"2133.22"},
+  "historicalGuardResult":"ACCEPTED_BY_OLD_>_0.01_GUARD",
+  "currentWorkingTreeGuardResult":"REJECTED_BY_EXACT_CENT_GUARD",
+  "currentCodeReproducesDefect":"NO",
+  "evidence":"Current working tree postEntry compares rounded persisted lines with exact cent equality; this is an existing dirty-worktree change and was not made by this control.",
+  "runtimeMutation":"NOT_RUN"
+}

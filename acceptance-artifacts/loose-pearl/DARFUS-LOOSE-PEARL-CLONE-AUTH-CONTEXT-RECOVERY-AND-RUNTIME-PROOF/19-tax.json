@@ -1,0 +1,12 @@
+{
+  "taxTreatment": "STANDARD_VAT",
+  "configuredRate": 14,
+  "purchaseBase": "100.00000000",
+  "purchaseVat": "14.00000000",
+  "purchaseTotal": "114.00000000",
+  "currentBase": "120.00000000",
+  "currentVat": "16.80000000",
+  "currentTotal": "136.80000000",
+  "taxApplicationCount": 1,
+  "dynamicRate": true
+}

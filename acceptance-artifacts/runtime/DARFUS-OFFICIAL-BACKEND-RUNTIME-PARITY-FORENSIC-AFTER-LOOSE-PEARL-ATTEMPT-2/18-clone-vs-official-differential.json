@@ -1,0 +1,6 @@
+{
+  "clone": {"database":"darfus_erp_loose_pearl_auth_runtime_20260822_02","port":18013,"source":"current worktree backend","receiveStatus":201,"ordinal":1,"officialPortTouched":false},
+  "official": {"database":"darfus_erp","port":8000,"attempt2Status":500,"attempt2RequestId":"f757c8d1-1553-42e9-87e2-01f653f37611","businessDelta":0},
+  "differential": "clone current-worktree path passed; official long-running process failed at the old persistReceiptEvidence line layout",
+  "interpretation": "runtime/process freshness divergence, not a proven business-rule difference"
+}

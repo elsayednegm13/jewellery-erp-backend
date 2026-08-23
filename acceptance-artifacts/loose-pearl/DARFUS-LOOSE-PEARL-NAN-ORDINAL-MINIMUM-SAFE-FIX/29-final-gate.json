@@ -1,0 +1,6 @@
+{
+  "gate": "BLOCKED_LOOSE_PEARL_NAN_ORDINAL_FIX",
+  "moduleStatus": "NOT_READY_FOR_OFFICIAL_RETRY",
+  "officialRetryAllowed": false,
+  "nextBatchAllowed": "NO_AUTOMATIC_START"
+}
