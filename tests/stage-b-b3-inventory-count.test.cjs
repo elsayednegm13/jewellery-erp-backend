@@ -7,6 +7,7 @@ const policy = require("../src/services/inventory-count-policy.service.js");
 const serviceSource = fs.readFileSync(path.join(__dirname, "../src/services/inventory-audit-canonical.service.js"), "utf8");
 const routeSource = fs.readFileSync(path.join(__dirname, "../src/routes/erp.routes.js"), "utf8");
 const pageSource = fs.readFileSync(path.join(__dirname, "../../app/[locale]/(dashboard)/inventory/stock-audit/page.tsx"), "utf8");
+const semanticsSource = fs.readFileSync(path.join(__dirname, "../../components/inventory/count-semantics.ts"), "utf8");
 const migrationSource = fs.readFileSync(path.join(__dirname, "../migrations/20260823030000-inventory-count-authority-foundation.js"), "utf8");
 const canonicalRouteSource = routeSource.slice(routeSource.indexOf("// Canonical B3 Inventory Count routes"), routeSource.indexOf('router.post("/inventory-v2/audits", authMiddleware, requireBusinessPermission("inventory.adjust"'));
 
@@ -122,7 +123,11 @@ test("UI is one barcode-first workflow with DB location and no automatic resolut
 });
 
 test("UI exposes expected, counted, missing, and variance totals", () => {
-  for (const label of ["Expected", "Counted", "Missing", "Variance", "EXPECTED_AND_COUNTED", "EXPECTED_NOT_COUNTED", "COUNTED_NOT_EXPECTED"]) assert.match(pageSource, new RegExp(label));
+  for (const label of ["Expected", "Counted", "Missing", "Variance", "Not Counted Yet", "Final Variance"]) assert.match(pageSource, new RegExp(label));
+  assert.match(pageSource, /countTotals\(count\)/);
+  assert.match(semanticsSource, /const unobserved/);
+  assert.match(semanticsSource, /isFinalizedCount\(candidate\.status\)/);
+  assert.doesNotMatch(pageSource, /EXPECTED_AND_COUNTED|EXPECTED_NOT_COUNTED|COUNTED_NOT_EXPECTED/);
 });
 
 test("UI has Arabic and English business labels", () => {
