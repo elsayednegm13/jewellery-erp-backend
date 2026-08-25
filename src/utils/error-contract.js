@@ -40,6 +40,7 @@ function normalizeDetails(value) {
   for (const [key, item] of Object.entries(value)) {
     if (!/^[A-Za-z0-9_.-]{1,64}$/.test(key)) continue;
     if (typeof item === "boolean" || (typeof item === "number" && Number.isFinite(item))) details[key] = item;
+    else if (typeof item === "string" && item.trim()) details[key] = item.trim().slice(0, 256);
   }
   return Object.keys(details).length ? details : null;
 }

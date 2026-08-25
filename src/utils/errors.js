@@ -35,8 +35,9 @@ class ForbiddenError extends AppError {
 }
 
 class ConflictError extends AppError {
-  constructor(message = "حدث تعارض في الحالة أو تحديث متزامن") {
+  constructor(message = "حدث تعارض في الحالة أو تحديث متزامن", details = null) {
     super(message, 409, "STATE_CONFLICT");
+    this.details = details;
   }
 }
 

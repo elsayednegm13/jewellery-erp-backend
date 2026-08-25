@@ -12,6 +12,18 @@ function requireMethod(value) {
   return method;
 }
 
+function eligibilityConflict(message, reasonCode, asset, extra = {}) {
+  throw new ConflictError(message, {
+    reasonCode,
+    assetId: String(asset?.id || ""),
+    barcode: String(asset?.barcode || ""),
+    currentOperationalStatus: String(asset?.operationalStatus || "UNKNOWN").toUpperCase(),
+    currentBranchId: String(asset?.branchId || ""),
+    currentLocationId: String(asset?.locationId || ""),
+    ...extra,
+  });
+}
+
 async function findScopedAudit({ models, companyId, branchId, auditId, transaction }) {
   const audit = await models.StockAudit.findOne({
     where: { id: auditId, companyId, branchId },
@@ -84,8 +96,17 @@ async function observeAudit({ models, companyId, branchId, auditId, assetIds = [
   const byId = new Map(assets.map((asset) => [String(asset.id), asset]));
   const scopedAssets = [];
   for (const asset of assets) {
-    if (["SOLD", "MELTED", "MISSING"].includes(String(asset.operationalStatus || "").toUpperCase())) throw new ConflictError("Scanned Asset is not count-eligible.");
-    if (String(asset.branchId) !== String(branchId) || String(asset.locationId || "") !== String(audit.locationId || "")) throw new ConflictError("Scanned Asset is outside the Count location scope.");
+    const operationalStatus = String(asset.operationalStatus || "").toUpperCase();
+    if (["SOLD", "MELTED", "MISSING"].includes(operationalStatus)) {
+      const reasonCode = operationalStatus === "SOLD" ? "ASSET_SOLD" : operationalStatus === "MELTED" ? "ASSET_MELTED" : "ASSET_MISSING";
+      eligibilityConflict("Scanned Asset is not count-eligible.", reasonCode, asset);
+    }
+    if (String(asset.branchId) !== String(branchId)) {
+      eligibilityConflict("Scanned Asset is outside the Count location scope.", "ASSET_BRANCH_MISMATCH", asset, { expectedBranchId: String(branchId || "") });
+    }
+    if (String(asset.locationId || "") !== String(audit.locationId || "")) {
+      eligibilityConflict("Scanned Asset is outside the Count location scope.", "ASSET_LOCATION_MISMATCH", asset, { expectedLocationId: String(audit.locationId || "") });
+    }
     if (!byId.has(String(asset.id))) throw new ValidationError("Scanned Asset identity is invalid.");
     scopedAssets.push(asset);
   }
@@ -93,7 +114,7 @@ async function observeAudit({ models, companyId, branchId, auditId, assetIds = [
   const observed = [];
   for (const asset of scopedAssets) {
     const expected = await models.StockAuditItem.findOne({ where: { stockAuditId: audit.id, assetId: asset.id }, transaction, lock: true });
-    if (!expected) throw new ConflictError("Scanned Asset is not part of the frozen expected set.");
+    if (!expected) eligibilityConflict("Scanned Asset is not part of the frozen expected set.", "ASSET_NOT_IN_FROZEN_SET", asset, { auditId: String(audit.id || "") });
     const replayed = expected.status === "matched" && expected.result === "MATCHED";
     await expected.update({ status: "matched", result: "MATCHED", observedAt: new Date(), scanMethod, scannedBranchId: branchId }, { transaction });
     observed.push({ assetId: asset.id, result: "MATCHED", replayed });

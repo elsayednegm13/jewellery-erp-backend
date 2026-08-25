@@ -6092,7 +6092,16 @@ async function returnInventoryCountIdempotency(res, req, scope, idem, transactio
 
 function inventoryCountReadModel(audit) {
   const data = audit.toJSON();
-  const items = data.items || [];
+  const items = (data.items || []).map((item) => {
+    if (!item.asset || !item.createdAt || !item.asset.updatedAt) return item;
+    return {
+      ...item,
+      asset: {
+        ...item.asset,
+        lifecycleChangedAfterSnapshot: new Date(item.asset.updatedAt).getTime() > new Date(item.createdAt).getTime(),
+      },
+    };
+  });
   return {
     ...data,
     expectedCount: items.length,
