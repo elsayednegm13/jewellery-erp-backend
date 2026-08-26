@@ -45,6 +45,7 @@ const goldValuationService = require("../services/gold-valuation.service");
 const looseProfileFinanceService = require("../services/loose-profile-finance.service");
 const supplierAcquisitionPreviewService = require("../services/supplier-acquisition-preview.service");
 const supplierReceiveContractService = require("../services/supplier-receive-contract.service");
+const inventoryCommonProfileFieldsService = require("../services/inventory-common-profile-fields.service");
 const goldSalePricingService = require("../services/gold-sale-pricing.service");
 const goldByPieceProfileService = require("../services/gold-by-piece-profile.service");
 const assetMetadataService = require("../services/asset-metadata.service");
@@ -80,6 +81,7 @@ const logger = require("../utils/logger");
 const { AppError, ValidationError, NotFoundError, ConflictError, ForbiddenError } = require("../utils/errors");
 const uploadMiddleware = require("../middleware/upload.middleware");
 const { moveUploadedFileSafe } = require("../utils/file-move");
+const { CRUD_PERMISSIONS, crudGuardPermissionCandidates } = require("../bootstrap/permission-consumer-coverage");
 
 const router = express.Router();
 const allowAuthenticated = (req, res, next) => next();
@@ -376,22 +378,6 @@ async function countLinkedRecords(checks) {
   return Object.fromEntries(entries.filter(([, count]) => Number(count) > 0));
 }
 
-const CRUD_PERMISSIONS = {
-  customers: "customers",
-  suppliers: "suppliers",
-  assets: "inventory",
-  products: "inventory",
-  "stock-movements": "inventory",
-  invoices: "sales",
-  reservations: "sales",
-  "purchase-orders": "suppliers",
-  "approval-requests": "approvals",
-  "journal-entries": "accounting",
-  accounts: "accounting",
-  "cash-transactions": "treasury",
-  branches: "branches",
-};
-
 // CRUD routes in this set are business surfaces. A Branch Account reaches them
 // through the verified Employee operator; technical accounts retain their
 // existing permission checks.
@@ -411,18 +397,8 @@ const EMPLOYEE_BUSINESS_CRUD_RESOURCES = new Set([
 ]);
 
 function guardFor(resourceName, action) {
-  const permissionModule = CRUD_PERMISSIONS[resourceName];
-  if (!permissionModule) return allowAuthenticated;
-  const mappedAction = action === "list" || action === "get" ? "view" : action;
-  const candidates = [
-    `${permissionModule}.${mappedAction}`,
-    mappedAction === "delete" ? `${permissionModule}.update` : null,
-    mappedAction === "update" ? `${permissionModule}.adjust` : null,
-    mappedAction === "create" ? `${permissionModule}.update` : null,
-    permissionModule === "approvals" && mappedAction !== "view" ? "approvals.manage" : null,
-    permissionModule === "accounting" && mappedAction !== "view" ? "accounting.post" : null,
-    permissionModule === "treasury" && mappedAction !== "view" ? "treasury.update" : null,
-  ].filter(Boolean);
+  if (!CRUD_PERMISSIONS[resourceName]) return allowAuthenticated;
+  const candidates = crudGuardPermissionCandidates(resourceName, action);
   const one = EMPLOYEE_BUSINESS_CRUD_RESOURCES.has(resourceName)
     ? requireBusinessPermission
     : requirePermission;
@@ -4018,7 +3994,7 @@ router.get("/customers/:id/attachments", authMiddleware, requireBusinessPermissi
   }
 });
 
-router.post("/customers/:id/attachments", authMiddleware, requireAnyBusinessPermission(["customers.update", "customers.attachments.manage"], { touch: true }), uploadMiddleware.single("file"), async (req, res, next) => {
+router.post("/customers/:id/attachments", authMiddleware, requireAnyBusinessPermission(["customers.update"], { touch: true }), uploadMiddleware.single("file"), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   let targetPath = "";
   try {
@@ -4086,7 +4062,7 @@ router.post("/customers/:id/attachments", authMiddleware, requireAnyBusinessPerm
   }
 });
 
-router.delete("/customers/:id/attachments/:attachmentId", authMiddleware, requireAnyBusinessPermission(["customers.update", "customers.attachments.manage"], { touch: true }), async (req, res, next) => {
+router.delete("/customers/:id/attachments/:attachmentId", authMiddleware, requireAnyBusinessPermission(["customers.update"], { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const customer = await models.Customer.findOne({
@@ -4135,7 +4111,7 @@ router.delete("/customers/:id/attachments/:attachmentId", authMiddleware, requir
   }
 });
 
-router.patch("/customers/:id/kyc", authMiddleware, requireAnyBusinessPermission(["customers.update", "customers.kyc.manage"], { touch: true }), async (req, res, next) => {
+router.patch("/customers/:id/kyc", authMiddleware, requireAnyBusinessPermission(["customers.update"], { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const customer = await models.Customer.findOne({
@@ -4256,7 +4232,7 @@ router.get("/assets/:id/attachments", authMiddleware, requireBusinessPermission(
 });
 
 // 2. Upload an attachment for an asset
-router.post("/assets/:id/attachments", authMiddleware, requireAnyBusinessPermission(["inventory.attachments.manage", "inventory.adjust"], { touch: true }), uploadMiddleware.single("file"), async (req, res, next) => {
+router.post("/assets/:id/attachments", authMiddleware, requireAnyBusinessPermission(["inventory.adjust"], { touch: true }), uploadMiddleware.single("file"), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   let transactionFinalized = false;
   try {
@@ -4366,7 +4342,7 @@ router.post("/assets/:id/attachments", authMiddleware, requireAnyBusinessPermiss
 });
 
 // 3. Delete an attachment for an asset
-router.delete("/assets/:id/attachments/:attachmentId", authMiddleware, requireAnyBusinessPermission(["inventory.attachments.manage", "inventory.adjust"], { touch: true }), async (req, res, next) => {
+router.delete("/assets/:id/attachments/:attachmentId", authMiddleware, requireAnyBusinessPermission(["inventory.adjust"], { touch: true }), async (req, res, next) => {
   const t = await models.sequelize.transaction();
   try {
     const asset = await models.Asset.findOne({
@@ -5083,15 +5059,21 @@ router.post("/employees", authMiddleware, requireAnyPermission(employeeCoreManag
         transaction: t
       });
     }
-    await auditService.record(req.companyId, {
+    const attribution = commandActorContext.buildAttributionContract(req, {
+      sourceOperation: "employees.create",
+      sourceReference: employee.id
+    });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
       action: "employee.created",
       description: `Employee ${employee.name} created.`,
       user: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
       userId: req.user?.id,
       place: req.branchId || "Employees",
       sourceDocument: employee.id,
+      ...attribution,
+      date: attribution.occurredAt,
       after: JSON.stringify({ employeeId: employee.id, employeeCode: employee.employeeCode })
-    }, { transaction: t });
+    }, { requestedOperation: "employees.create", authorizationResult: "allowed" }), { transaction: t });
     await t.commit();
     emitEntityChanged(req.companyId, { entity: "Employee", action: "create", id: employee.id });
     return res.status(201).json({ success: true, data: employee, setupState: "BRANCH_ASSIGNMENT_REQUIRED" });
@@ -5143,16 +5125,22 @@ async function updateEmployeeAuthoritative(req, res, next) {
         transaction: t
       });
     }
-    await auditService.record(req.companyId, {
+    const attribution = commandActorContext.buildAttributionContract(req, {
+      sourceOperation: "employees.update",
+      sourceReference: employee.id
+    });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
       action: "employee.updated",
       description: `Employee ${employee.name} updated.`,
       user: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
       userId: req.user?.id,
       place: req.branchId || "Employees",
       sourceDocument: employee.id,
+      ...attribution,
+      date: attribution.occurredAt,
       before: JSON.stringify({ employeeCode: before.employeeCode, role: before.role, branchId: before.branchId }),
       after: JSON.stringify({ employeeCode: employee.employeeCode, role: employee.role, branchId: employee.branchId })
-    }, { transaction: t });
+    }, { requestedOperation: "employees.update", authorizationResult: "allowed" }), { transaction: t });
     await t.commit();
     emitEntityChanged(req.companyId, { entity: "Employee", action: "update", id: employee.id });
     return res.status(200).json({ success: true, data: employee });
@@ -5165,31 +5153,61 @@ async function updateEmployeeAuthoritative(req, res, next) {
 router.put("/employees/:id", authMiddleware, requireAnyPermission(employeeCoreManagePermissions), updateEmployeeAuthoritative);
 router.patch("/employees/:id", authMiddleware, requireAnyPermission(employeeCoreManagePermissions), updateEmployeeAuthoritative);
 router.post("/employees/:id/deactivate", authMiddleware, requireAnyPermission(employeeCoreManagePermissions), async (req, res, next) => {
+  const t = await models.sequelize.transaction();
   try {
-    const employee = await models.Employee.findOne({ where: { id: req.params.id, companyId: req.companyId } });
+    const employee = await models.Employee.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t, lock: t.LOCK.UPDATE });
     if (!employee) throw new NotFoundError("Employee not found.");
-    await employee.update({ status: "inactive", deactivateReason: req.body?.reason || employee.deactivateReason || "" });
+    const before = employee.toJSON();
+    await employee.update({ status: "inactive", deactivateReason: req.body?.reason || employee.deactivateReason || "" }, { transaction: t });
+    const attribution = commandActorContext.buildAttributionContract(req, { sourceOperation: "employees.deactivate", sourceReference: employee.id });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
+      action: "employee.deactivated",
+      description: `Employee ${employee.name} deactivated.`,
+      place: req.branchId || "Employees",
+      sourceDocument: employee.id,
+      ...attribution,
+      date: attribution.occurredAt,
+      before: JSON.stringify({ status: before.status, deactivateReason: before.deactivateReason }),
+      after: JSON.stringify({ status: employee.status, deactivateReason: employee.deactivateReason })
+    }, { requestedOperation: "employees.deactivate", authorizationResult: "allowed" }), { transaction: t });
+    await t.commit();
     emitEntityChanged(req.companyId, { entity: "Employee", action: "update", id: employee.id });
     return res.status(200).json({ success: true, data: employee });
   } catch (error) {
+    await t.rollback();
     next(error);
   }
 });
 router.post("/employees/:id/reactivate", authMiddleware, requireAnyPermission(employeeCoreManagePermissions), async (req, res, next) => {
+  const t = await models.sequelize.transaction();
   try {
-    const employee = await models.Employee.findOne({ where: { id: req.params.id, companyId: req.companyId } });
+    const employee = await models.Employee.findOne({ where: { id: req.params.id, companyId: req.companyId }, transaction: t, lock: t.LOCK.UPDATE });
     if (!employee) throw new NotFoundError("Employee not found.");
-    if (!(await employeeHasConfiguredCredential(req.companyId, employee.id))) {
+    if (!(await employeeHasConfiguredCredential(req.companyId, employee.id, t))) {
       throw new ValidationError("Employee PIN must be configured before activation.", { pin: ["Set a six-digit Employee PIN before activating this Employee."] });
     }
-    const readiness = await employeeAuthorizationService.assertEmployeeOperationalReadiness({ companyId: req.companyId, employeeId: employee.id });
+    const readiness = await employeeAuthorizationService.assertEmployeeOperationalReadiness({ companyId: req.companyId, employeeId: employee.id, transaction: t });
     if (!readiness.ready) {
       throw new ValidationError("Employee Branch assignment must be completed before activation.", { branchId: ["Assign at least one active Branch before activating this Employee."] });
     }
-    await employee.update({ status: "present", deactivateReason: null });
+    const before = employee.toJSON();
+    await employee.update({ status: "present", deactivateReason: null }, { transaction: t });
+    const attribution = commandActorContext.buildAttributionContract(req, { sourceOperation: "employees.reactivate", sourceReference: employee.id });
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
+      action: "employee.reactivated",
+      description: `Employee ${employee.name} reactivated.`,
+      place: req.branchId || "Employees",
+      sourceDocument: employee.id,
+      ...attribution,
+      date: attribution.occurredAt,
+      before: JSON.stringify({ status: before.status, deactivateReason: before.deactivateReason }),
+      after: JSON.stringify({ status: employee.status, deactivateReason: employee.deactivateReason })
+    }, { requestedOperation: "employees.reactivate", authorizationResult: "allowed" }), { transaction: t });
+    await t.commit();
     emitEntityChanged(req.companyId, { entity: "Employee", action: "update", id: employee.id });
     return res.status(200).json({ success: true, data: employee });
   } catch (error) {
+    await t.rollback();
     next(error);
   }
 });
@@ -5348,7 +5366,13 @@ router.get("/inventory-v2/profiles", authMiddleware, requireBusinessPermission("
       masterDataCategories: profileMasterDataService.categoriesForProfile(key),
       goldValuation: contract.goldValuation || { enabled: false },
     }));
-    return res.status(200).json({ success: true, data: { profiles } });
+    return res.status(200).json({ success: true, data: {
+      profiles,
+      // C3 additive read-only contract: the existing profile registry remains
+      // the authority; this metadata makes its shared Asset/receive boundary
+      // explicit without creating another persistence or mutation path.
+      commonFieldContract: inventoryCommonProfileFieldsService.getPublicContract(),
+    } });
   } catch (error) { return next(error); }
 });
 
@@ -14259,7 +14283,7 @@ router.get("/suppliers/:id/documents", authMiddleware, requireBusinessPermission
   }
 });
 
-router.post("/suppliers/:id/documents", authMiddleware, requireAnyBusinessPermission(["suppliers.update", "suppliers.documents.manage"], { touch: true }), uploadMiddleware.single("file"), async (req, res, next) => {
+router.post("/suppliers/:id/documents", authMiddleware, requireAnyBusinessPermission(["suppliers.update"], { touch: true }), uploadMiddleware.single("file"), async (req, res, next) => {
   try {
     const supplierId = req.params.id;
     const file = req.file;
@@ -14274,7 +14298,7 @@ router.post("/suppliers/:id/documents", authMiddleware, requireAnyBusinessPermis
 
     // 2. Validate permission
     const permissionService = require("../services/permission.service");
-    const hasPermission = await permissionService.userHasAnyPermission(req.user, ["suppliers.update", "suppliers.documents.manage"]);
+    const hasPermission = await permissionService.userHasAnyPermission(req.user, ["suppliers.update"]);
     if (!hasPermission) {
       return res.status(403).json({ success: false, message: "تم رفض الدخول. لا تملك الصلاحية اللازمة لإدارة مستندات الموردين." });
     }
@@ -14354,7 +14378,7 @@ router.post("/suppliers/:id/documents", authMiddleware, requireAnyBusinessPermis
   }
 });
 
-router.delete("/suppliers/:id/documents/:docId", authMiddleware, requireAnyBusinessPermission(["suppliers.update", "suppliers.documents.manage"], { touch: true }), async (req, res, next) => {
+router.delete("/suppliers/:id/documents/:docId", authMiddleware, requireAnyBusinessPermission(["suppliers.update"], { touch: true }), async (req, res, next) => {
   try {
     const supplierId = req.params.id;
     const docId = req.params.docId;
@@ -14369,7 +14393,7 @@ router.delete("/suppliers/:id/documents/:docId", authMiddleware, requireAnyBusin
 
     // 2. Validate permission
     const permissionService = require("../services/permission.service");
-    const hasPermission = await permissionService.userHasAnyPermission(req.user, ["suppliers.update", "suppliers.documents.manage"]);
+    const hasPermission = await permissionService.userHasAnyPermission(req.user, ["suppliers.update"]);
     if (!hasPermission) {
       return res.status(403).json({ success: false, message: "تم رفض الدخول. لا تملك الصلاحية اللازمة لإدارة مستندات الموردين." });
     }

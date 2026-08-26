@@ -1,7 +1,7 @@
 const { Permission, Role, RolePermission, UserRole } = require("../models");
 const { PERMISSIONS: BASELINE_PERMISSIONS, ROLE_DEFS } = require("./permission-baseline-v1");
-const { INVENTORY_RETURN_RESTOCK_PERMISSIONS } = require("./permission-catalog-v2");
-const PERMISSIONS = [...BASELINE_PERMISSIONS, ...INVENTORY_RETURN_RESTOCK_PERMISSIONS];
+const { INVENTORY_RETURN_RESTOCK_PERMISSIONS, INVENTORY_REVISION_PERMISSIONS } = require("./permission-catalog-v2");
+const PERMISSIONS = [...BASELINE_PERMISSIONS, ...INVENTORY_RETURN_RESTOCK_PERMISSIONS, ...INVENTORY_REVISION_PERMISSIONS];
 
 async function ensurePermissions({ transaction } = {}) {
   const rows = [];

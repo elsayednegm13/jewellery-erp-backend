@@ -316,6 +316,7 @@ async function recordAssetEvent({ models, transaction, asset, context, eventType
     occurredAt,
     user: context.actorName || "System",
     userId: context.actorId || null,
+    employeeCode: context.employeeCode || null,
     employeeName: context.actorName || null,
     branch: context.branchName,
     note,

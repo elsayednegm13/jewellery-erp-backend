@@ -104,7 +104,7 @@ function createAuthMiddleware({ requireSuperAdminCompanyContext = true } = {}) {
 
       if (user.branchId && user.branchId !== headerBranchId) {
         const hasCrossBranch = user.role === "admin" || user.role === "owner" || 
-          await permissionService.userHasAnyPermission(user, ["pos.view", "branches.cross", "pos.sell"]);
+          await permissionService.userHasAnyPermission(user, ["pos.view", "pos.sell"]);
         if (!hasCrossBranch) {
           throw new ForbiddenError("ليس لديك صلاحية للوصول إلى هذا الفرع");
         }

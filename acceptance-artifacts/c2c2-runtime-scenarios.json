@@ -1,0 +1,83 @@
+{
+  "database": "darfus_c2c2_revision_runtime_02",
+  "backend": "http://localhost:8001",
+  "assetId": "AST-PUR-1787083585731-1-1-plz5",
+  "scenarios": [
+    {
+      "id": "R1-permission-denied",
+      "status": 403,
+      "code": "REVISION_PERMISSION_DENIED"
+    },
+    {
+      "id": "R4-no-op",
+      "status": 422,
+      "code": "REVISION_NO_EFFECTIVE_CHANGE"
+    },
+    {
+      "id": "R5-unknown-field",
+      "status": 422,
+      "code": "REVISION_FIELD_NOT_ALLOWED"
+    },
+    {
+      "id": "R6-dedicated-field",
+      "status": 422,
+      "code": "REVISION_DEDICATED_OPERATION_REQUIRED"
+    },
+    {
+      "id": "R7-wrong-company",
+      "status": 403,
+      "code": "COMPANY_SCOPE_INVALID"
+    },
+    {
+      "id": "R8-wrong-branch",
+      "status": 403,
+      "code": "ASSET_SCOPE_INVALID"
+    },
+    {
+      "id": "R9-replay-exact-body",
+      "status": 201,
+      "revisionNo": 4,
+      "revisionId": "ASREV-3296e179350e47ee9d50bf5a9f",
+      "semanticReplay": true
+    },
+    {
+      "id": "R10-same-key-changed",
+      "status": 409,
+      "code": "REVISION_IDEMPOTENCY_CONFLICT"
+    },
+    {
+      "id": "R12-stale-precondition",
+      "status": 409,
+      "code": "REVISION_CONCURRENT_CONFLICT"
+    },
+    {
+      "id": "R13-list",
+      "status": 200,
+      "total": 6,
+      "revisionNos": "6,5,4,3,2,1"
+    },
+    {
+      "id": "R14-detail",
+      "status": 200,
+      "revisionNo": 4,
+      "changeCount": 1,
+      "actorId": "USR-2c71b1b5-477b-4f00-a097-de0488339b41"
+    },
+    {
+      "id": "R11-concurrent-C",
+      "status": 201,
+      "revisionNo": 5
+    },
+    {
+      "id": "R11-concurrent-D",
+      "status": 409,
+      "code": "REVISION_CONCURRENT_CONFLICT"
+    },
+    {
+      "id": "R15-immutability",
+      "updateStatus": "rejected",
+      "deleteStatus": "rejected",
+      "triggerMessage": "Asset revision history is immutable"
+    }
+  ]
+}

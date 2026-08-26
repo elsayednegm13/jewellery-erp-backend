@@ -15,8 +15,9 @@ const {
   calculateEffectiveRate,
 } = require("./gold-pricing-policy.contract");
 const { AppError, ForbiddenError, NotFoundError, ValidationError } = require("../utils/errors");
+const { GOLD_PRICING_POLICY_PERMISSION } = require("../bootstrap/gold-pricing-policy-permission-catalog");
 
-const PRICING_POLICY_PERMISSION = "gold.manage_pricing_policy";
+const PRICING_POLICY_PERMISSION = GOLD_PRICING_POLICY_PERMISSION.name;
 const READ_PERMISSION = "gold.view";
 
 function requireCompany(context = {}) {

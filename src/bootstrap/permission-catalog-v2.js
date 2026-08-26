@@ -5,4 +5,9 @@ const INVENTORY_RETURN_RESTOCK_PERMISSIONS = [
   "inventory.returns.approve_restock",
 ];
 
-module.exports = { INVENTORY_RETURN_RESTOCK_PERMISSIONS };
+const INVENTORY_REVISION_PERMISSIONS = [
+  "inventory.revision.create",
+  "inventory.revision.view",
+];
+
+module.exports = { INVENTORY_RETURN_RESTOCK_PERMISSIONS, INVENTORY_REVISION_PERMISSIONS };

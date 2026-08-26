@@ -18,6 +18,8 @@ const EmployeeVerificationAttempt = require("./employeeVerificationAttempt.model
 const EmployeeOperationalSession = require("./employeeOperationalSession.model");
 const Asset = require("./asset.model");
 const AssetEvent = require("./assetEvent.model");
+const AssetRevision = require("./assetRevision.model");
+const AssetRevisionChange = require("./assetRevisionChange.model");
 const AssetBarcodeHistory = require("./assetBarcodeHistory.model");
 const AssetReturnReview = require("./assetReturnReview.model");
 const AssetCertificate = require("./assetCertificate.model");
@@ -414,6 +416,10 @@ EmployeeOperationalSession.hasMany(AuditLog, { foreignKey: "operatorSessionId", 
 // Asset relationships
 Asset.hasMany(AssetEvent, { foreignKey: "assetId", as: "events" });
 AssetEvent.belongsTo(Asset, { foreignKey: "assetId", as: "asset" });
+Asset.hasMany(AssetRevision, { foreignKey: "assetId", as: "revisions" });
+AssetRevision.belongsTo(Asset, { foreignKey: "assetId", as: "asset" });
+AssetRevision.hasMany(AssetRevisionChange, { foreignKey: "revisionId", as: "changes" });
+AssetRevisionChange.belongsTo(AssetRevision, { foreignKey: "revisionId", as: "revision" });
 Asset.hasMany(AssetReturnReview, { foreignKey: "assetId", as: "returnReviews" });
 AssetReturnReview.belongsTo(Asset, { foreignKey: "assetId", as: "asset" });
 
@@ -674,6 +680,8 @@ module.exports = {
   EmployeeOperationalSession,
   Asset,
   AssetEvent,
+  AssetRevision,
+  AssetRevisionChange,
   AssetBarcodeHistory,
   AssetReturnReview,
   AssetCertificate,
