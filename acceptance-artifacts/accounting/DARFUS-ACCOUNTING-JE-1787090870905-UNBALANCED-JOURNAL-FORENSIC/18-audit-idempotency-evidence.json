@@ -1,0 +1,7 @@
+{
+  "idempotency":{"id":15,"scope":"purchase.receive","key":"8209162d-bc81-4428-bcee-2453b49691b2","requestHash":"507c38cb2cfb160724d64725cb5c9bf28d75b6dd5e6a268a10d45730aaeb2740","status":"succeeded","statusCode":201},
+  "audit":{"action":"purchase.receive","sourceDocument":"PO-1787090870807","createdAt":"2026-08-18T22:07:50.94Z","assetIds":["AST-PUR-1787090870838-1-1-9k4e"],"taxSnapshotPresent":true},
+  "originalRequestBody":"NOT_RETAINED_AS_A_STANDALONE_RECORD",
+  "originalRequestEvidence":"INCOMPLETE",
+  "hashCanonicalization":"scope + params + body with idempotencyKey fields removed, stable sorted stringify, SHA-256"
+}

@@ -1,0 +1,11 @@
+{
+  "journalId": "JE-1787429166495",
+  "debit": "114.00000000",
+  "credit": "114.00000000",
+  "difference": "0.00000000",
+  "inventoryDebit": "100.00000000",
+  "inputVatDebit": "14.00000000",
+  "supplierPayableCredit": "114.00000000",
+  "cashDelta": 0,
+  "treasuryDelta": 0
+}

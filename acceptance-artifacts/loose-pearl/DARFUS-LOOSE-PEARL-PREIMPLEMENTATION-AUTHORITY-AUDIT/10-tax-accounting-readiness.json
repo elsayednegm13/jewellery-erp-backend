@@ -1,0 +1,10 @@
+{
+  "taxEngine": "UAE Tax Engine -> Company Tax Policy -> Transaction Tax Context -> immutable snapshot -> accounting",
+  "configuredRate": 14,
+  "enabledTreatments": ["STANDARD_VAT","EXEMPT","REVERSE_CHARGE","OUT_OF_SCOPE"],
+  "defaultTreatment": "STANDARD_VAT",
+  "purchaseVatApplicationExpected": 1,
+  "sourceCalculation": "loose-profile-finance.calculatePurchase uses pre-tax base and applies configured VAT once; generic receive persists tax snapshot and uses canonical posting path.",
+  "accountingProof": "Not executed; no journal posted in this audit.",
+  "status": "DESIGN_READY_FOR_FUTURE_PROFILE_PROOF"
+}

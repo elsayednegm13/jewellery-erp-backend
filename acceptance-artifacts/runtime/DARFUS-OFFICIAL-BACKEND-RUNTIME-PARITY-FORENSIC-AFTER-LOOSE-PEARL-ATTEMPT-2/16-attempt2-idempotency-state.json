@@ -1,0 +1,9 @@
+{
+  "database": "darfus_erp",
+  "idempotencyRowsBeforeAndAfter": 17,
+  "attempt2Key": "REDACTED",
+  "attempt2MatchingRows": 0,
+  "recentRowsAfterAttempt": "unchanged successful historical rows only",
+  "status": "NO_IDEMPOTENCY_RESERVATION_PERSISTED",
+  "interpretation": "transaction rollback/no committed idempotency state; no replay or third attempt was performed"
+}

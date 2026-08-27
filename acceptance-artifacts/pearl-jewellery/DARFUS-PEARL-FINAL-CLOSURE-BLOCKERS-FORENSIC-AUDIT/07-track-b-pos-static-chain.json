@@ -1,0 +1,12 @@
+{
+  "status": "COMPLETE",
+  "chain": [
+    {"step":"barcode input","file":"app/[locale]/(dashboard)/pos/page.tsx","function":"search effect","input":"PLRNG18000001","output":"GET /pos/search query"},
+    {"step":"backend route","file":"backend/src/routes/erp.routes.js:7663","function":"router.get('/pos/search')","input":"query/type/limit/includeUnavailableExact","output":"bounded result projection"},
+    {"step":"DB lookup","file":"backend/src/routes/erp.routes.js:7715-7726","function":"Asset.findAll/findOne","input":"company/branch/barcode","output":"Asset.price, inventoryProfile, operationalStatus"},
+    {"step":"price resolution","file":"backend/src/routes/erp.routes.js:7737-7763","function":"resolveSearchAssetPrice","input":"PEARL_JEWELLERY Asset","output":"goldSalePricingService result or 0/unavailable on error"},
+    {"step":"DTO","file":"backend/src/routes/erp.routes.js:7797-7832","function":"addAsset","input":"resolvedPrice","output":"top-level price; rawItem.price retains Asset.price"},
+    {"step":"frontend normalization","file":"app/[locale]/(dashboard)/pos/page.tsx:679-684","function":"setSearchResults","input":"response.items","output":"searchItems"},
+    {"step":"disabled state","file":"app/[locale]/(dashboard)/pos/page.tsx:1331-1366","function":"result card","input":"item.price/unavailable","output":"disabled when price<=0 or unavailable"}
+  ]
+}

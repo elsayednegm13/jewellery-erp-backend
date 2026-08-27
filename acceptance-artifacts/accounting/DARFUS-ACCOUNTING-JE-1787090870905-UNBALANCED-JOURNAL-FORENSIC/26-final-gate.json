@@ -1,0 +1,11 @@
+{
+  "gate":"PASS_ACCOUNTING_JE_1787090870905_FORENSIC_ROOT_CAUSE_IDENTIFIED",
+  "forensicComplete":true,
+  "rootCauseIdentified":true,
+  "firstProvenBrokenBoundary":"Historical postEntry tolerance accepted an unbalanced 0.01 difference",
+  "remediationDesign":"COMPLETE_DESIGN_ONLY",
+  "dbWrites":0,
+  "journalFix":false,
+  "loosePearlOfficialReceiveAllowed":"NO_UNTIL_ACCOUNTING_BASELINE_RESOLVED",
+  "nextBatchAllowed":"NO_AUTOMATIC_START"
+}

@@ -1,0 +1,8 @@
+{
+  "retry": "NOT_RUN",
+  "endpoint": "/api/v1/purchase-orders/receive",
+  "requestId": "f757c8d1-1553-42e9-87e2-01f653f37611",
+  "serverLogMessage": "An unexpected server error occurred.",
+  "http": 500,
+  "method": "POST"
+}

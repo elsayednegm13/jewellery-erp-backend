@@ -1,0 +1,10 @@
+{
+  "route": "/en/inventory/pearl",
+  "routePass": true,
+  "profilePreview": "READY",
+  "sharedPreview": "READY",
+  "diagnosticsActive": true,
+  "interceptionActive": false,
+  "consoleErrors": 0,
+  "confirmClicked": false
+}

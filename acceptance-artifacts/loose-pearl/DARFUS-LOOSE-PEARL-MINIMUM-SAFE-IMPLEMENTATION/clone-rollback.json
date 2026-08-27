@@ -1,0 +1,8 @@
+{
+  "rollbackRequestArtifactCaptured": true,
+  "rollbackExecutedOnClone": true,
+  "method": "stop temporary backend and drop exact disposable clone",
+  "cloneExistsAfterRollback": false,
+  "persistentBusinessDeltaAfterRollback": 0,
+  "officialDatabaseUnchanged": true
+}

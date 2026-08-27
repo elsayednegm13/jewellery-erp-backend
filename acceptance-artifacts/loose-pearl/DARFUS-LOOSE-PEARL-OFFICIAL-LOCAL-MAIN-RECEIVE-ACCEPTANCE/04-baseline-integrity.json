@@ -1,0 +1,16 @@
+{
+  "duplicate_active_barcodes": 0,
+  "orphan_pearl_details": 0,
+  "orphan_origins": 0,
+  "orphan_movements": 0,
+  "unbalanced_journals": 1,
+  "blockingJournal": {
+    "id": "JE-1787090870905",
+    "status": "posted",
+    "sourceType": "purchase_order",
+    "sourceId": "PO-1787090870807",
+    "totalDebit": "2133.21000000",
+    "totalCredit": "2133.22000000"
+  },
+  "baselineIntegrity": "FAIL"
+}

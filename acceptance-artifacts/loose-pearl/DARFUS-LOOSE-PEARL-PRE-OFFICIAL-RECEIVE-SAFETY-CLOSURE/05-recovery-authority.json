@@ -1,0 +1,6 @@
+{
+  "businessRollbackRoute": "NOT_SUPPORTED",
+  "businessRecoveryProof": "NOT_APPLICABLE; no successful business transaction in this control",
+  "officialReceiveRecoveryPlan": "transaction atomicity before commit; idempotency protection; stop on ambiguous result; future explicit owner-approved purchase reversal workflow; no manual SQL cleanup",
+  "ownerReviewRequiredBeforeOfficialReceive": true
+}

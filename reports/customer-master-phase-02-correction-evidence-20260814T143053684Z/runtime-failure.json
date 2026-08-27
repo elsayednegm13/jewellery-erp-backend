@@ -1,0 +1,10 @@
+{
+  "result": "FAIL",
+  "stage": "pos_primary_b_to_a",
+  "message": "HORIZONTAL_OVERFLOW:empty-address-tablet-768x800:{\"viewportWidth\":768,\"documentClientWidth\":768,\"documentScrollWidth\":781,\"bodyClientWidth\":768,\"bodyScrollWidth\":781,\"label\":\"empty-address-tablet-768x800\",\"horizontalOverflow\":true}",
+  "stack": [
+    "Error: HORIZONTAL_OVERFLOW:empty-address-tablet-768x800:{\"viewportWidth\":768,\"documentClientWidth\":768,\"documentScrollWidth\":781,\"bodyClientWidth\":768,\"bodyScrollWidth\":781,\"label\":\"empty-address-tablet-768x800\",\"horizontalOverflow\":true}",
+    "    at captureOverflow (H:\\WORK\\jewellery-erp-master\\backend\\tests\\customer-master-phase-02-browser-runtime.cjs:293:45)",
+    "    at async main (H:\\WORK\\jewellery-erp-master\\backend\\tests\\customer-master-phase-02-browser-runtime.cjs:431:5)"
+  ]
+}

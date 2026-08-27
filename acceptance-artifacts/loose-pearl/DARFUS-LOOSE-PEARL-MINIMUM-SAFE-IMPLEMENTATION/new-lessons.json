@@ -1,0 +1,9 @@
+{
+  "lessons": [
+    {"id": "LP-LESSON-001", "boundary": "generic receive weight guard", "cause": "Loose Pearl CT was not excluded from gram/gold guard", "fix": "derive Loose Pearl gross weight from loose CT details and exclude gold guard", "verified": true},
+    {"id": "LP-LESSON-002", "boundary": "receive evidence ordinal", "cause": "profile mapper dropped item/piece indices", "fix": "preserve itemIndex and pieceIndex into receive piece", "verified": true}
+  ],
+  "sameCauseRepeatCount": 0,
+  "failedReceiveCount": 2,
+  "controlledRetryCount": 1
+}

@@ -1,0 +1,22 @@
+{
+  "profile": "PEARL_JEWELLERY",
+  "item_description": "Pearl Ring",
+  "karat": 18,
+  "gross_weight": 12,
+  "pearl_weight": 1.2,
+  "other_stones_weight": 0,
+  "net_gold_weight": 10.8,
+  "pure_gold_weight_9999": 8.1,
+  "purchase_gold_rate": 200,
+  "gold_purchase_value": 2160,
+  "making_per_gram": 30,
+  "making_total": 324,
+  "pearl_cost_total": 1500,
+  "other_stone_cost_total": 0,
+  "pre_tax_base": 3984,
+  "vat_amount": 557.76,
+  "purchase_total": 4541.76,
+  "tax_treatment": "STANDARD_VAT",
+  "pearl_size_user_label": "8.5 mm",
+  "pearl_size_internal_id_visible": false
+}

@@ -1,0 +1,9 @@
+{
+  "scope": "purchase.receive",
+  "serverHash": "b94b47c5f1dfdb5a1dabaa722992c32fd3c41fb3e5098db75854359d8fc5a481",
+  "calculatedHash": "b94b47c5f1dfdb5a1dabaa722992c32fd3c41fb3e5098db75854359d8fc5a481",
+  "match": true,
+  "keyExcludedFromHash": true,
+  "rawTokenPrinted": false,
+  "passwordPrinted": false
+}

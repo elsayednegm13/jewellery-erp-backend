@@ -1,0 +1,18 @@
+{
+  "result": "BLOCKED",
+  "stage": "frontend_build",
+  "message": "Command failed: C:\\Program Files\\nodejs\\node.exe C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js run build -- --webpack\nFailed to compile.\n\nModule not found: Error: Can't resolve './H:/WORK/jewellery-erp-master/node_modules/next/dist/client/next.js' in 'C:\\Windows\\Temp\\darfus-invoice-snapshot-fullstack-IsHSSW\\frontend'\n\nModule not found: Error: Can't resolve './H:/WORK/jewellery-erp-master/node_modules/next/dist/client/app-next.js' in 'C:\\Windows\\Temp\\darfus-invoice-snapshot-fullstack-IsHSSW\\frontend'\n\n\n> Build failed because of webpack errors\n",
+  "stack": [
+    "Error: Command failed: C:\\Program Files\\nodejs\\node.exe C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js run build -- --webpack",
+    "Failed to compile.",
+    "",
+    "Module not found: Error: Can't resolve './H:/WORK/jewellery-erp-master/node_modules/next/dist/client/next.js' in 'C:\\Windows\\Temp\\darfus-invoice-snapshot-fullstack-IsHSSW\\frontend'",
+    "",
+    "Module not found: Error: Can't resolve './H:/WORK/jewellery-erp-master/node_modules/next/dist/client/app-next.js' in 'C:\\Windows\\Temp\\darfus-invoice-snapshot-fullstack-IsHSSW\\frontend'",
+    "",
+    "",
+    "> Build failed because of webpack errors",
+    ""
+  ],
+  "clone": "darfus_erp_invoice_snapshot_fullstack_1786739715981"
+}

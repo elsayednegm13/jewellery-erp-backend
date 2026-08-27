@@ -1,0 +1,12 @@
+{
+  "url": "/en/pos",
+  "method": "read_only_search",
+  "query": "GSLOS00000001",
+  "resultCount": 1,
+  "assetVisible": true,
+  "assetDescription": "Synthetic Ruby EN",
+  "barcodeVisible": true,
+  "sellingPrice": "8000.00",
+  "checkoutExecuted": false,
+  "consoleErrors": 0
+}

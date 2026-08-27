@@ -1,0 +1,7 @@
+{
+  "static_call_chain": "COMPLETE",
+  "chain": ["Confirm onClick", "submit", "guards", "auth freshness", "context/hash parity", "apiClient", "execute", "fetch"],
+  "business_logic_changed": false,
+  "receive_service_changed": false,
+  "secrets_recorded": false
+}

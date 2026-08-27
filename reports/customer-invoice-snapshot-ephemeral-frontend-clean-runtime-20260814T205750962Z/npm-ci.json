@@ -1,0 +1,6 @@
+{
+  "command": "C:\\Program Files\\nodejs\\node.exe C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js ci --no-audit --no-fund",
+  "cwd": "C:\\WINDOWS\\TEMP\\darfus-invoice-frontend-clean-xLS3bN\\frontend",
+  "exitCode": 0,
+  "error": null
+}

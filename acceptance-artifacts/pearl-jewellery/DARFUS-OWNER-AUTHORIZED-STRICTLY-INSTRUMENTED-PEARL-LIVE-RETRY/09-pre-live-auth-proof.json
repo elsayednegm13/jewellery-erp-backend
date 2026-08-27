@@ -1,0 +1,9 @@
+{
+  "authPreflightStarted": true,
+  "authSession": "authenticated_local_browser",
+  "authResult": "FRESH",
+  "companyContextMatch": true,
+  "branchContextMatch": true,
+  "tokenRecorded": false,
+  "refreshTokenRecorded": false
+}

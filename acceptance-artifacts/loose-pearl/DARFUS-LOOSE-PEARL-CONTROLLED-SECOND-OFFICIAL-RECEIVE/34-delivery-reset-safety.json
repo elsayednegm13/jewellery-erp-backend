@@ -1,0 +1,6 @@
+{
+  "localMainDb": "integration/test only",
+  "resetBeforeCustomerDelivery": true,
+  "finalCustomerDb": "fresh",
+  "syntheticBusinessDataMustNotBeMigrated": true
+}

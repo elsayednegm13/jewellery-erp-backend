@@ -1,0 +1,9 @@
+{
+  "safety_margin_seconds": 60,
+  "session_state_before_confirm": "FRESH",
+  "refresh_attempted": false,
+  "company_context_unchanged": true,
+  "branch_context_unchanged": true,
+  "raw_token_recorded": false,
+  "auth_preflight": "PASS"
+}

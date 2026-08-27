@@ -1,0 +1,20 @@
+{
+  "gate": "BLOCKED_LOOSE_PEARL_TRUE_OWNER_DECISION_REQUIRED",
+  "clientAuthority": "READ_AND_NORMALIZED",
+  "trueOwnerDecisionsRemaining": 2,
+  "implementationGaps": 9,
+  "authorityNormalizations": 1,
+  "authorityConflicts": 2,
+  "futureLifecycleDependencies": 1,
+  "migrationNeeded": "UNPROVEN_DESIGN_ONLY",
+  "officialDbBusinessDelta": 0,
+  "sourceChanges": 0,
+  "migrationsCreated": 0,
+  "migrationsExecuted": 0,
+  "seedsExecuted": 0,
+  "masterDataMutations": 0,
+  "businessWrites": 0,
+  "businessPostCount": 0,
+  "nextRecommendedStep": "OWNER_RESOLUTION_OF_EXACT_LISTED_CONFLICTS",
+  "nextBatchAllowed": "NO_AUTOMATIC_START"
+}

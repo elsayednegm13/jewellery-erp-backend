@@ -1,0 +1,19 @@
+{
+  "command": "C:\\Program Files\\nodejs\\node.exe C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js run build -- --webpack",
+  "cwd": "C:\\WINDOWS\\TEMP\\darfus-invoice-build-forensic-EnCq5g\\frontend",
+  "sourceRoot": "H:\\WORK\\jewellery-erp-master",
+  "nodeModulesStrategy": "junction to repository node_modules",
+  "nextArtifactsStrategy": "temporary copy excludes .next",
+  "env": {
+    "NODE_ENV": "production",
+    "NEXT_PUBLIC_DATA_SOURCE": "api",
+    "NEXT_PUBLIC_API_URL": "http://127.0.0.1:39991/api/v1",
+    "NEXT_PUBLIC_API_ORIGIN": "http://127.0.0.1:39991",
+    "BACKEND_ORIGIN": "http://127.0.0.1:39991"
+  },
+  "startedAt": "2026-08-14T20:54:16.652Z",
+  "finishedAt": "2026-08-14T20:54:58.461Z",
+  "exitCode": 1,
+  "signal": null,
+  "error": null
+}

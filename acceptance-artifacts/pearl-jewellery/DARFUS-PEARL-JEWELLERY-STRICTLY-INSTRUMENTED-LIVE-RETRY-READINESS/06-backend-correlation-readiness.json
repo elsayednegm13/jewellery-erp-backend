@@ -1,0 +1,7 @@
+{
+  "backend_log_correlation_capable": "PASS",
+  "request_id_logs_available": true,
+  "read_only_preview_requests_correlated": true,
+  "receive_route_observed": false,
+  "future_live_correlation_fields": ["browser timestamp", "request id", "route hit", "auth result", "business handler entry"]
+}

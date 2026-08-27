@@ -1,0 +1,14 @@
+{
+  "inputKey": "looseDetails.pearlColor",
+  "requestBuilder": "CORRECT",
+  "masterDataCategory": "PEARL_COLOR",
+  "normalizerBeforeFix": "accepted color/stoneColor but omitted pearlColor from normalized output",
+  "persistenceMapper": "persistAssetComponents reads component.pearlDetails.pearlColor via normalized looseDetails",
+  "readbackBeforeFix": null,
+  "firstProvenBrokenBoundary": "LOOSE_DETAILS_NORMALIZATION_TO_PERSISTENCE_MAPPING",
+  "rootCause": "CANONICAL_PEARL_COLOR_KEY_NOT_MAPPED",
+  "uiInputDefect": false,
+  "masterDataDefect": false,
+  "requestBuilderDefect": false,
+  "serverValidationDefect": false
+}

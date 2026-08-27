@@ -1,0 +1,9 @@
+{
+  "currentSourceFixPresent": true,
+  "newProcessStartAfterFix": true,
+  "filesystemHashParityAfter": "PASS",
+  "noWatcherDependency": true,
+  "loadedBehaviorReadinessProof": "not run because strict PID gate failed",
+  "executingModuleParity": "BLOCKED_STRICT_PID_REQUIREMENT",
+  "reason": "process start time changed, but the Node PID remained 40 inside the restarted container namespace"
+}

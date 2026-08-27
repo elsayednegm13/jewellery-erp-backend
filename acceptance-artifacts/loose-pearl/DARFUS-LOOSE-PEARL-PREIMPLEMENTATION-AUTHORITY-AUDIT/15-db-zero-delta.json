@@ -1,0 +1,9 @@
+{
+  "database": "darfus_erp",
+  "currentDatabaseProof": "darfus_erp",
+  "snapshot": {"purchase_orders":13,"assets":13,"journal_entries":16,"idempotency_requests":17,"cash_transactions":3,"pearl_size_master_data":39,"profile_master_data":660,"suppliers":2,"inventory_locations":2,"PEARL_JEWELLERY_assets":1,"LOOSE_PEARL_assets":0},
+  "beforeAfterMethod": "Read-only snapshots and controlled audit command history; no write operation was executed.",
+  "businessDelta": 0,
+  "officialDbMutation": false,
+  "backup": "not performed"
+}

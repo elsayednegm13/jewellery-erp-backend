@@ -1,0 +1,11 @@
+{
+  "result": "BLOCKED",
+  "stage": "clone_fixture_and_backend",
+  "message": "CLONE_SALE_ITEM_NOT_READY:{\"companyId\":\"COMP-1384c23f-18ee-405f-8675-8e87746be72c\",\"branchId\":\"BR-cf387f66-0904-471e-85b8-9346ac3dbb03\",\"available\":284,\"sample\":[{\"id\":\"AST-PUR-1786116487599-1-1-lyaa\",\"company_id\":\"COMP-1384c23f-18ee-405f-8675-8e87746be72c\",\"branch_id\":\"BR-cf387f66-0904-471e-85b8-9346ac3dbb03\",\"operational_status\":\"AVAILABLE\",\"status\":\"available\",\"price\":200},{\"id\":\"ASTV2MFG-86c7b016ff80498690cf17461d\",\"company_id\":\"COMP-1384c23f-18ee-405f-8675-8e87746be72c\",\"branch_id\":\"BR-cf387f66-0904-471e-85b8-9346ac3dbb03\",\"operational_status\":\"AVAILABLE\",\"status\":\"available\",\"price\":100},{\"id\":\"AST-PUR-1786116487130-1-1-qcf5\",\"company_id\":\"COMP-1384c23f-18ee-405f-8675-8e87746be72c\",\"branch_id\":\"BR-cf387f66-0904-471e-85b8-9346ac3dbb03\",\"operational_status\":\"AVAILABLE\",\"status\":\"available\",\"price\":200}]}",
+  "stack": [
+    "Error: CLONE_SALE_ITEM_NOT_READY:{\"companyId\":\"COMP-1384c23f-18ee-405f-8675-8e87746be72c\",\"branchId\":\"BR-cf387f66-0904-471e-85b8-9346ac3dbb03\",\"available\":284,\"sample\":[{\"id\":\"AST-PUR-1786116487599-1-1-lyaa\",\"company_id\":\"COMP-1384c23f-18ee-405f-8675-8e87746be72c\",\"branch_id\":\"BR-cf387f66-0904-471e-85b8-9346ac3dbb03\",\"operational_status\":\"AVAILABLE\",\"status\":\"available\",\"price\":200},{\"id\":\"ASTV2MFG-86c7b016ff80498690cf17461d\",\"company_id\":\"COMP-1384c23f-18ee-405f-8675-8e87746be72c\",\"branch_id\":\"BR-cf387f66-0904-471e-85b8-9346ac3dbb03\",\"operational_status\":\"AVAILABLE\",\"status\":\"available\",\"price\":100},{\"id\":\"AST-PUR-1786116487130-1-1-qcf5\",\"company_id\":\"COMP-1384c23f-18ee-405f-8675-8e87746be72c\",\"branch_id\":\"BR-cf387f66-0904-471e-85b8-9346ac3dbb03\",\"operational_status\":\"AVAILABLE\",\"status\":\"available\",\"price\":200}]}",
+    "    at main (H:\\WORK\\jewellery-erp-master\\backend\\scripts\\customer-invoice-snapshot-clone-full-stack-runtime-closeout.js:126:11)",
+    "    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)"
+  ],
+  "clone": "darfus_erp_invoice_snapshot_fullstack_1786737624198"
+}

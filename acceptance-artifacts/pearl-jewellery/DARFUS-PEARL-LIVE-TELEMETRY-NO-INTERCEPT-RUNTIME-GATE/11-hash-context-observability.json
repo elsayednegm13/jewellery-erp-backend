@@ -1,0 +1,7 @@
+{
+  "companyContextMatchEventAvailable": "PASS",
+  "branchContextMatchEventAvailable": "PASS",
+  "hashMatchEventAvailable": "PASS",
+  "rawIdsOrHashesRecorded": false,
+  "mismatchBlockTested": true
+}

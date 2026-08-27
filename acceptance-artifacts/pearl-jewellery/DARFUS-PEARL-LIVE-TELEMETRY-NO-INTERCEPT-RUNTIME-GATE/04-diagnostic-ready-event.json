@@ -1,0 +1,7 @@
+{
+  "eventName": "PEARL_CONFIRM_DIAGNOSTIC_READY",
+  "ar": {"correlationId": "PEARL-DISPATCH-7b4fa261-3e79-41af-b1b4-5704fc1c75e0", "runtimeMode": "NEXT_PRODUCTION_START_LOCALHOST", "hostname": "localhost", "diagnosticsEnabled": true, "interceptionEnabled": false, "consoleErrors": 0},
+  "en": {"correlationId": "PEARL-DISPATCH-15a99ac4-32b0-42dc-ab5b-42697f56f876", "runtimeMode": "NEXT_PRODUCTION_START_LOCALHOST", "hostname": "localhost", "diagnosticsEnabled": true, "interceptionEnabled": false, "consoleErrors": 0},
+  "secretsRecorded": false,
+  "businessConfirmCalled": false
+}

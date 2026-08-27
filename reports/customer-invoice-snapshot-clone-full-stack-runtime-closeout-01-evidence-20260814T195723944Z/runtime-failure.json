@@ -1,0 +1,14 @@
+{
+  "result": "BLOCKED",
+  "stage": "initializing",
+  "message": "column \"customer_phone_snapshot\" does not exist",
+  "stack": [
+    "error: column \"customer_phone_snapshot\" does not exist",
+    "    at H:\\WORK\\jewellery-erp-master\\backend\\node_modules\\pg\\lib\\client.js:652:17",
+    "    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)",
+    "    at async query (H:\\WORK\\jewellery-erp-master\\backend\\scripts\\customer-invoice-snapshot-clone-full-stack-runtime-closeout.js:40:16)",
+    "    at async baseline (H:\\WORK\\jewellery-erp-master\\backend\\scripts\\customer-invoice-snapshot-clone-full-stack-runtime-closeout.js:57:13)",
+    "    at async main (H:\\WORK\\jewellery-erp-master\\backend\\scripts\\customer-invoice-snapshot-clone-full-stack-runtime-closeout.js:84:32)"
+  ],
+  "clone": "darfus_erp_invoice_snapshot_fullstack_1786737443944"
+}

@@ -1,0 +1,5 @@
+{
+  "status": "NOT_RUN",
+  "reason": "The single live click did not produce an observable 201; control requires STOP and forbids retry/replay after an ambiguous result.",
+  "additional_receive_posts": 0
+}

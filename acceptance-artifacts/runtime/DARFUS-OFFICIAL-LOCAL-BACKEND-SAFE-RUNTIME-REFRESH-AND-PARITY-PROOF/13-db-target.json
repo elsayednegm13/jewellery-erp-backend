@@ -1,0 +1,7 @@
+{
+  "currentDatabase": "darfus_erp",
+  "dbHealthStatus": 200,
+  "officialDbTargetAfterRefresh": "PASS",
+  "postgresRestarted": false,
+  "redisRestarted": false
+}

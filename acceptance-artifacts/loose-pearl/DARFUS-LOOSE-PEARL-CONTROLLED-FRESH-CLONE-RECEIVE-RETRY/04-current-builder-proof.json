@@ -1,0 +1,11 @@
+{
+  "source": "app/[locale]/(dashboard)/inventory/loose-pearl/page.tsx",
+  "builder": "receiveItem useMemo",
+  "evidence": "return { ...piece, quantity: 1, perPiece: [piece] }",
+  "currentRealBuilderProducesValidPerPiece": true,
+  "perPieceLength": 1,
+  "itemIndexPreserved": true,
+  "pieceIndexPreserved": true,
+  "productBusinessLogicDefect": "NOT_PROVEN",
+  "sourceChangedThisControl": false
+}

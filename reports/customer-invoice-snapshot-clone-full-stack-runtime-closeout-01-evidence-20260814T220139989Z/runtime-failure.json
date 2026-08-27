@@ -1,0 +1,265 @@
+{
+  "result": "BLOCKED",
+  "stage": "browser_runtime",
+  "message": "locator.click: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button').filter({ hasText: 'CONT39 Pearl sized 9bb695df45404b7d' }).first()\u001b[22m\n\u001b[2m    - locator resolved to <button disabled aria-current=\"true\" aria-disabled=\"true\" class=\"relative flex w-full items-center gap-3 rounded-xl border px-3 py-2 text-start transition border-brand-500 bg-brand-50/70 ring-1 ring-brand-300 dark:bg-brand-500/10\">…</button>\u001b[22m\n\u001b[2m  - attempting click action\u001b[22m\n\u001b[2m    2 × waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m      - element is not enabled\u001b[22m\n\u001b[2m    - retrying click action\u001b[22m\n\u001b[2m    - waiting 20ms\u001b[22m\n\u001b[2m    2 × waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m      - element is not enabled\u001b[22m\n\u001b[2m    - retrying click action\u001b[22m\n\u001b[2m      - waiting 100ms\u001b[22m\n\u001b[2m    57 × waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m       - element is not enabled\u001b[22m\n\u001b[2m     - retrying click action\u001b[22m\n\u001b[2m       - waiting 500ms\u001b[22m\n",
+  "stack": [
+    "locator.click: Timeout 30000ms exceeded.",
+    "Call log:",
+    "\u001b[2m  - waiting for getByRole('button').filter({ hasText: 'CONT39 Pearl sized 9bb695df45404b7d' }).first()\u001b[22m",
+    "\u001b[2m    - locator resolved to <button disabled aria-current=\"true\" aria-disabled=\"true\" class=\"relative flex w-full items-center gap-3 rounded-xl border px-3 py-2 text-start transition border-brand-500 bg-brand-50/70 ring-1 ring-brand-300 dark:bg-brand-500/10\">…</button>\u001b[22m",
+    "\u001b[2m  - attempting click action\u001b[22m",
+    "\u001b[2m    2 × waiting for element to be visible, enabled and stable\u001b[22m",
+    "\u001b[2m      - element is not enabled\u001b[22m",
+    "\u001b[2m    - retrying click action\u001b[22m",
+    "\u001b[2m    - waiting 20ms\u001b[22m",
+    "\u001b[2m    2 × waiting for element to be visible, enabled and stable\u001b[22m"
+  ],
+  "clone": "darfus_erp_invoice_snapshot_fullstack_1786744899989",
+  "network": [
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/auth/accessible-companies",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": false,
+      "hasBranch": false
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/auth/accessible-companies",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/notifications?limit=20",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/notifications/unread-count",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/settings",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/branches",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/events/stream",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/notifications?limit=20",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/notifications/unread-count",
+      "status": 200,
+      "responseKeys": [
+        "count",
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/branches",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/settings",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/customers",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": false
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/customers",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": true
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/readiness/operations",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": true
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/invoices?postingStatus=draft&pageSize=100&sortBy=createdAt&sortDirection=desc",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": true
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/customers",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/invoices?postingStatus=draft&pageSize=100&sortBy=createdAt&sortDirection=desc",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/readiness/operations",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/customers",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "page",
+        "pageSize",
+        "success",
+        "total",
+        "totalPages"
+      ]
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/customers/CUS-SNAPSHOT-FS-1786744906362/pos-summary",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": true
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/customers/CUS-SNAPSHOT-FS-1786744906362/pos-summary",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "success"
+      ]
+    },
+    {
+      "phase": "request",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/pos/search?query=TPRL1ODD00000028&type=all&limit=20&includeUnavailableExact=true",
+      "requestKeys": [],
+      "hasAuthorization": true,
+      "hasCompany": true,
+      "hasBranch": true
+    },
+    {
+      "phase": "response",
+      "method": "GET",
+      "path": "http://127.0.0.1:40968/api/v1/pos/search?query=TPRL1ODD00000028&type=all&limit=20&includeUnavailableExact=true",
+      "status": 200,
+      "responseKeys": [
+        "data",
+        "items",
+        "success"
+      ]
+    }
+  ],
+  "consoleErrors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ],
+  "frontendOutput": null
+}

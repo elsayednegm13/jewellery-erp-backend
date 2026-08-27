@@ -1,0 +1,9 @@
+{
+  "database": "darfus_erp_pearl_clone_20260822_01",
+  "method": "drop-and-recreate-disposable-clone-from-source-dump",
+  "restoreExit": 0,
+  "currentDatabaseAfterRestore": "darfus_erp_pearl_clone_20260822_01",
+  "countsAfterRestore": {"purchase_orders": 12, "assets": 12, "journal_entries": 15, "idempotency_requests": 16, "pearl_jewellery_assets": 0},
+  "rollbackBusinessDelta": 0,
+  "officialDatabaseTouched": false
+}

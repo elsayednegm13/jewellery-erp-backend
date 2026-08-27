@@ -1,0 +1,6 @@
+{
+  "rootCause": "UNVALIDATED_MISSING_PIECE_ORDINAL_METADATA_CAUSING_NAN",
+  "observed": "undefined + 1 = NaN",
+  "classification": "PRODUCT_RUNTIME_DEFECT",
+  "officialAttemptDelta": 0
+}

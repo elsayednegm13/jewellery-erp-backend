@@ -1,0 +1,8 @@
+{
+  "currentFilesystemRoute": "persistReceiptEvidence(... pieceIndex: qtyIndex, ...)",
+  "currentSourceLine": 8736,
+  "currentFilesystemProof": "PASS",
+  "officialAttempt2Stack": "/app/src/routes/erp.routes.js:8736:13",
+  "routeIndexPlumbing": "current filesystem correct; in-memory execution remains stale/not reloaded",
+  "quantityAuthorityChanged": false
+}

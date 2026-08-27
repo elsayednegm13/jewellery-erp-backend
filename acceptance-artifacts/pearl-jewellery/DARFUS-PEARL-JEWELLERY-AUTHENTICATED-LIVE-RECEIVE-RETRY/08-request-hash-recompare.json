@@ -1,0 +1,9 @@
+{
+  "exact_request_saved": true,
+  "canonical_scope": "purchase.receive",
+  "request_hash_recompare": "PASS",
+  "hash_parity": "PASS",
+  "business_field_mismatch_count": 0,
+  "hash_recomputed_after_auth": true,
+  "raw_authorization_recorded": false
+}

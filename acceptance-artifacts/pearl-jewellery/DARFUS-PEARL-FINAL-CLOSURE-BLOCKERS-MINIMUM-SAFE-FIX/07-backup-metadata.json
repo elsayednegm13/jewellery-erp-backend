@@ -1,0 +1,10 @@
+{
+  "target": "darfus_erp",
+  "pgDumpExit": 0,
+  "path": "backend\\backups\\darfus_erp_pearl_minimum_safe_fix_20260822_1040.dump",
+  "bytes": 713064,
+  "sha256": "8d356e197d201d39d001674465edab90f95778224536661bb4bf32222355b92c",
+  "pgRestoreListExit": 0,
+  "tocLines": 1194,
+  "idempotencyKeyRedacted": true
+}

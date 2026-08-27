@@ -1,0 +1,6 @@
+{
+  "commands": ["unified inventory UX", "Pearl minimum safe", "Asset", "Barcode", "Supplier master", "Loose Diamond VAT contract", "Pearl closure/auth/size"],
+  "tests": 55,
+  "passed": 55,
+  "failed": 0
+}

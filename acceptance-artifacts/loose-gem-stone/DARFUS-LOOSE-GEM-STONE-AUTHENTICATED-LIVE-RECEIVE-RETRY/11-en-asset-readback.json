@@ -1,0 +1,19 @@
+{
+  "url": "/en/inventory/AST-PUR-1787347062774-1-1-hjm1",
+  "pageLoad": "PASS",
+  "consoleErrors": 0,
+  "assetId": "AST-PUR-1787347062774-1-1-hjm1",
+  "barcode": "GSLOS00000001",
+  "profile": "Loose Gemstone",
+  "description": "Synthetic Ruby EN",
+  "status": "AVAILABLE",
+  "branch": "Branch-1",
+  "location": "QA-G2C-RECEIVE-LOCATION-01",
+  "purchaseCost": "5200",
+  "purchaseVat": "728",
+  "purchaseTotal": "5928",
+  "currentVat": "868",
+  "currentTotal": "7068",
+  "supplier": "QA-G2C-SUPPLIER-01",
+  "source": "PURCHASE_ORDER / PO-1787347062767"
+}

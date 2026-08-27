@@ -1,0 +1,11 @@
+{
+  "frontendProcess": "next start",
+  "runtimeMode": "NEXT_PRODUCTION_START_LOCALHOST",
+  "diagnostics": "ON",
+  "interception": "OFF",
+  "diagnosticEnv": "true",
+  "interceptionEnv": "false",
+  "runtimePid": 19572,
+  "confirmClicked": false,
+  "receivePostCount": 0
+}

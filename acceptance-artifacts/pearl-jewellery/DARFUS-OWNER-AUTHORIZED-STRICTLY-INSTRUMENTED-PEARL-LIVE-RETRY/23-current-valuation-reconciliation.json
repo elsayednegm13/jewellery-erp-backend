@@ -1,0 +1,15 @@
+{
+  "asset": "AST-PUR-1787391626468-1-1-wf0w",
+  "rateSource": "GOLD_CENTER_GLOBAL_SPOT",
+  "currentGoldRate": 407.62049952,
+  "currentGoldValue": 4402.30139482,
+  "currentMakingValue": 324,
+  "currentPearlValue": 1600,
+  "currentOtherStoneValue": 0,
+  "vatRate": 14,
+  "vatBase": 6326.30139482,
+  "vatAmount": 885.68219527,
+  "currentTotal": 7211.98359009,
+  "historicalCurrentSeparation": "PASS",
+  "status": "PASS"
+}

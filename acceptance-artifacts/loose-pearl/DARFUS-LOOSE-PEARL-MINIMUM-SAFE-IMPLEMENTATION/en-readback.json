@@ -1,0 +1,16 @@
+{
+  "channel": "authenticated clone API/UI read-only",
+  "status": 200,
+  "profile": "LOOSE_PEARL",
+  "asset": "AST-PUR-1787419714017-1-1-78kh",
+  "barcode": "PLLOS00000001",
+  "weight": "1.25 CT",
+  "size": "1.0 mm",
+  "type": "Abalone",
+  "historicalCost": 100,
+  "currentValue": 120,
+  "sellingPrice": 200,
+  "status": "AVAILABLE",
+  "internalMasterIdsVisible": 0,
+  "noNewReceiveForReadback": true
+}

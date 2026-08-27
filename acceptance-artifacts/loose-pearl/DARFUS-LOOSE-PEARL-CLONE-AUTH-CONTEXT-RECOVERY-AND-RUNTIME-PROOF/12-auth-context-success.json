@@ -1,0 +1,8 @@
+{
+  "status": "PASS",
+  "companyId": "COMP-48ab554f-427e-4642-9419-bc8616c2dc36",
+  "branchId": "BR-3241ced9-01ad-4bbf-9de8-7cd26e26767c",
+  "supplierId": "SUP-001",
+  "locationId": "LOC-9a10f58e-4207-4512-8824-7a7b06159151",
+  "guardSatisfied": "SUPER_ADMIN_COMPANY_CONTEXT_REQUIRED_SATISFIED"
+}

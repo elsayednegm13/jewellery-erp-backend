@@ -1,0 +1,5 @@
+{
+  "businessRollbackRoute": "NOT_SUPPORTED",
+  "recoveryAuthority": ["transaction atomicity before commit","idempotency protection","evidence-first stop","future Owner-approved Supplier Receive reversal workflow"],
+  "rollbackMutation": false
+}

@@ -1,0 +1,20 @@
+{
+  "headObserved": "1657b0e9ba580faef69be48f04637835c201b521",
+  "sourceFreeze": "current worktree plus approved handoff authorities",
+  "worktree": "pre-existing dirty worktree preserved; no cleanup/reset/stash",
+  "generatedNextEnv": "owner-accepted Next.js generated drift; not manually edited",
+  "sourceFilesInScope": [
+    "backend/src/services/loose-pearl-profile.service.js",
+    "backend/src/routes/loose-pearl-profile.routes.js",
+    "backend/src/routes/index.js",
+    "backend/src/routes/erp.routes.js",
+    "backend/src/services/inventory-master-policy.service.js",
+    "backend/src/services/barcode-identity.service.js",
+    "backend/src/services/inventory-v2-runtime.service.js",
+    "components/inventory/inventory-intake-chooser.tsx",
+    "app/[locale]/(dashboard)/inventory/loose-pearl/page.tsx",
+    "tests/loose-pearl-minimum-safe-implementation.test.cjs",
+    "tests/unified-inventory-ux-final-closure.test.cjs",
+    "tests/unified-inventory-intake-ux-02-r3.test.cjs"
+  ]
+}

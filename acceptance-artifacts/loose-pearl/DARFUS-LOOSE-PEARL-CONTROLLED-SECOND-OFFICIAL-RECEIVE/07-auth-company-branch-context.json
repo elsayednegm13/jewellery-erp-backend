@@ -1,0 +1,10 @@
+{
+  "locationContext": "PASS",
+  "operationalReadiness": "READY",
+  "rawCredentialsCaptured": false,
+  "supplierContext": "PASS",
+  "companyContext": "PASS",
+  "authenticated": true,
+  "superAdmin": true,
+  "branchContext": "PASS"
+}

@@ -1,0 +1,8 @@
+{
+  "exceptionJournal": "JE-1787090870905",
+  "exceptionPO": "PO-1787090870807",
+  "rootCause": "HISTORICAL_ISOLATED_DATA_DEFECT",
+  "difference": "-0.01000000",
+  "scope": "ONLY_THE_NAMED_JOURNAL",
+  "generalAccountingException": false
+}

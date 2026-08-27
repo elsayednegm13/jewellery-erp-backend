@@ -1,0 +1,25 @@
+{
+  "businessDelta": 0,
+  "countsAfter": {
+    "assets": 13,
+    "asset_origins": 13,
+    "journal_lines": 45,
+    "journal_entries": 16,
+    "purchase_orders": 13,
+    "asset_components": 10,
+    "cash_transactions": 3,
+    "loose_pearl_assets": 0,
+    "idempotency_requests": 17,
+    "purchase_order_items": 13,
+    "asset_barcode_history": 13,
+    "asset_current_valuations": 13,
+    "inventory_asset_movements": 13,
+    "asset_pearl_component_details": 1,
+    "asset_purchase_cost_revisions": 13,
+    "purchase_order_item_asset_links": 13
+  },
+  "reason": "Control stopped on HTTP 500 before post-success proofs",
+  "replay": "NOT_RUN",
+  "conflict": "NOT_RUN",
+  "database": "darfus_erp"
+}

@@ -1,0 +1,9 @@
+{
+  "request": "GET /api/v1/pos/search?query=PLRNG18000001&type=all&limit=20&includeUnavailableExact=true",
+  "backendResponseStatus": 304,
+  "runtimeResultCount": 1,
+  "runtimeResult": {"name":"Pearl Ring","code":"PLRNG18000001","profile":"PEARL_JEWELLERY","grossWeight":12,"karat":18,"topLevelPrice":0,"unavailable":true,"availabilityReason":"ASSET_PRICE_UNAVAILABLE"},
+  "rawItemSourceContract": {"price":5000,"operationalStatus":"AVAILABLE"},
+  "visibleRuntime": "AED 0.00 / Current selling price unavailable / disabled",
+  "safeMetadataOnly": true
+}

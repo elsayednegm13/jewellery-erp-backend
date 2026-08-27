@@ -1,0 +1,11 @@
+{
+  "mode": "isolated_harness",
+  "click_event_count": 1,
+  "handler_entry_count": 1,
+  "all_guards_pass": true,
+  "api_client_entry_count": 1,
+  "fetch_attempt_count": 1,
+  "network_business_write_count": 0,
+  "official_receive_post_count": 0,
+  "double_dispatch": false
+}

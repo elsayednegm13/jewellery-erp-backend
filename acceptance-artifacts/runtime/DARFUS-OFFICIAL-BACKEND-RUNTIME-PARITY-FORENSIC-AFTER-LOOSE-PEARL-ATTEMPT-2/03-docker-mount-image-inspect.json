@@ -1,0 +1,16 @@
+{
+  "composeFile": "docker-compose.yml",
+  "buildContext": "./backend",
+  "dockerfile": "backend/Dockerfile",
+  "bindMount": {
+    "source": "I:\\WORK\\jewellery-erp-master\\backend",
+    "target": "/app",
+    "mode": "rw"
+  },
+  "nodeModulesVolume": "/app/node_modules",
+  "command": "sh -c npm run db:migrate && npm start",
+  "startScript": "node src/server.js",
+  "watcher": false,
+  "imageCreatedUtc": "2026-08-22T17:20:59.540371834Z",
+  "imageBakedCodeAuthority": "not authoritative while /app bind mount is active"
+}

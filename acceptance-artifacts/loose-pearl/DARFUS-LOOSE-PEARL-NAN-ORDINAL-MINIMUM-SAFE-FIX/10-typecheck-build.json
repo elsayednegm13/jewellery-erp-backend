@@ -1,0 +1,5 @@
+{
+  "typecheck": "PASS",
+  "build": "NOT_RUN",
+  "buildReason": "Owner-approved next-env/build guard remains active; backend change is direct JavaScript runtime"
+}

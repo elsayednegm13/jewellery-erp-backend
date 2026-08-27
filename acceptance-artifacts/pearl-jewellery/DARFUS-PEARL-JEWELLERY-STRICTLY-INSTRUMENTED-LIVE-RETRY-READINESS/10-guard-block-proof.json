@@ -1,0 +1,6 @@
+{
+  "auth_refreshed_review_required": {"api_client": 0, "fetch": 0, "official_post": 0},
+  "hash_mismatch": {"api_client": 0, "fetch": 0, "official_post": 0},
+  "prepared_request_missing": {"api_client": 0, "fetch": 0, "official_post": 0},
+  "source": "isolated focused test harness"
+}

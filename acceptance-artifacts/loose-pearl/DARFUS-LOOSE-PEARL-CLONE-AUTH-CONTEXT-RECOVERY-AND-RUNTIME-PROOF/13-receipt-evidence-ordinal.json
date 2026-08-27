@@ -1,0 +1,11 @@
+{
+  "clientPieceIndexPresent": false,
+  "clientItemIndexPresent": false,
+  "runtimeFallback": "validated qtyIndex / deterministic runtime position",
+  "persistedOrdinal": 1,
+  "finite": true,
+  "integer": true,
+  "positive": true,
+  "nanReachedSql": false,
+  "mappingClassification": "V2_RUNTIME_RECEIPT"
+}

@@ -1,0 +1,15 @@
+{
+  "url": "http://localhost:3000/en/pos",
+  "search": "PLRNG18000001",
+  "resultCount": 1,
+  "assetReturned": "Pearl Ring",
+  "profileExpected": "PEARL_JEWELLERY",
+  "barcodeReturned": "not exposed in visible result snapshot",
+  "visiblePrice": 0,
+  "availabilityLabel": "Current selling price unavailable",
+  "resultButtonDisabled": true,
+  "checkoutExecuted": false,
+  "status": "FAIL_POS_PRICE_READBACK",
+  "classification": "PRODUCT_OR_RUNTIME_MAPPING_DEFECT",
+  "evidence": "Asset detail readback exposes Asset.price=5000, while POS search result renders AED 0.00 and disables the result."
+}

@@ -1,0 +1,23 @@
+{
+  "officialReceive": "PASS_ONE_SUCCESSFUL_RECEIVE",
+  "liveHttp": 201,
+  "dispatchChain": "PASS",
+  "dbReconciliation": "PASS",
+  "assetReconciliation": "PASS",
+  "componentReconciliation": "PASS",
+  "barcodeReconciliation": "PASS",
+  "historicalPurchaseReconciliation": "PASS",
+  "currentValuationReconciliation": "PASS",
+  "accountingReconciliation": "PASS",
+  "exactReplay": "BLOCKED",
+  "changedPayload409": "NOT_RUN",
+  "arReadback": "PASS",
+  "enReadback": "PASS",
+  "posReadOnly": "FAIL_POS_PRICE_READBACK",
+  "p0Count": 0,
+  "p1Count": 2,
+  "gate": "BLOCKED_PEARL_IDEMPOTENCY_AND_POS_READ",
+  "moduleStatus": "OPEN",
+  "secondConfirm": "NOT_ALLOWED_AND_NOT_PERFORMED",
+  "nextBatchAllowed": "NO_AUTOMATIC_START"
+}
