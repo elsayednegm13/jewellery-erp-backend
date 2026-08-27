@@ -4,9 +4,11 @@ const fs = require("node:fs");
 
 const {
   ACTIVE_INVOICE_TYPES,
+  ACTIVE_PROJECTION_SOURCE_TYPES,
   PROJECTION_ERROR_CODES,
   SOURCE_REGISTRY,
   assertActiveSourceType,
+  buildCgpProjection,
   buildInvoiceProjection,
   getSourceEntry,
   mapInvoiceSummary,
@@ -54,20 +56,23 @@ function sampleInvoice(overrides = {}) {
   };
 }
 
-test("registry has exactly the five current Invoice adapters and explicit future boundaries", () => {
+test("registry has the five Invoice adapters plus the active read-only CGP adapter", () => {
   assert.deepEqual(ACTIVE_INVOICE_TYPES, ["sale", "return", "exchange", "installment", "deposit"]);
+  assert.deepEqual(ACTIVE_PROJECTION_SOURCE_TYPES, [...ACTIVE_INVOICE_TYPES, "customer_gold_purchase"]);
   for (const sourceType of ACTIVE_INVOICE_TYPES) {
     assert.equal(SOURCE_REGISTRY[sourceType].status, "SUPPORTED_NOW");
     assert.equal(SOURCE_REGISTRY[sourceType].adapter, "invoice");
     assert.equal(getSourceEntry(sourceType).sourceTable, "invoices");
   }
-  assert.equal(SOURCE_REGISTRY.customer_gold_purchase.status, "SUPPORTED_LATER");
-  assert.equal(SOURCE_REGISTRY.customer_gold_purchase.extensionPoint, "CGP_ADAPTER");
+  assert.equal(SOURCE_REGISTRY.customer_gold_purchase.status, "SUPPORTED_NOW");
+  assert.equal(SOURCE_REGISTRY.customer_gold_purchase.adapter, "customer_gold_purchase");
+  assert.equal(SOURCE_REGISTRY.customer_gold_purchase.sourceTable, "customer_gold_purchase_documents");
+  assert.equal(SOURCE_REGISTRY.customer_gold_purchase.displayNumberField, "customer_gold_purchase_documents.draft_number");
   assert.equal(SOURCE_REGISTRY.purchase_order.status, "NOT_AN_INVOICE");
 });
 
 test("unsupported source types fail closed with a stable error code", () => {
-  assert.throws(() => assertActiveSourceType("customer_gold_purchase"), (error) => {
+  assert.throws(() => assertActiveSourceType("gift_voucher"), (error) => {
     assert.equal(error.errorCode, PROJECTION_ERROR_CODES.UNSUPPORTED_SOURCE_TYPE);
     assert.equal(error.statusCode, 422);
     return true;
@@ -76,6 +81,80 @@ test("unsupported source types fail closed with a stable error code", () => {
     assert.equal(error.errorCode, PROJECTION_ERROR_CODES.UNSUPPORTED_SOURCE_TYPE);
     return true;
   });
+});
+
+test("CGP adapter preserves source identity, stored gold evidence, payment source and no-tax semantics", () => {
+  const documentId = "CGPD-D1-001";
+  const itemId = `${documentId}:L1`;
+  const data = buildCgpProjection({
+    document: {
+      id: documentId,
+      companyId: "CMP-1",
+      branchId: "BR-1",
+      draftNumber: "CGPD-000001",
+      customerId: "CUS-1",
+      transactionDate: "2026-08-23",
+      currency: "AED",
+      businessStatus: "POSTED",
+      status: "approved",
+      totalGoldValue: "5432.8910",
+      totalPayableToCustomer: "5432.8910",
+      postingReference: `CGP-POSTED:${documentId}`,
+      createdBy: "USR-1",
+      postedBy: "USR-1",
+      customer: { id: "CUS-1", name: "Customer One" },
+      items: [{
+        id: itemId,
+        goldType: "gold",
+        karat: 24,
+        fineness: "0.999000",
+        purityFactor: "1.000000",
+        grossWeight: "10.000000",
+        stoneWeight: "0.000000",
+        netWeight: "10.000000",
+        pureGoldWeight: "10.000000",
+        proposedRate: "543.2891",
+        referenceMarketRate: "543.2891",
+      }],
+    },
+    snapshots: [{
+      cgpDocumentId: documentId,
+      cgpItemId: itemId,
+      priceSource: "GOLD_MARKET_GOLDAPI_IO",
+      priceVersion: "2026-08-23T15:48:58.000Z",
+      priceTimestamp: "2026-08-23T15:48:58.000Z",
+      approvedKaratRate: "543.2891",
+      finalEffectiveRate: "543.2891",
+      lineGoldValue: "5432.8910",
+      rateBasis: "KARAT_SPECIFIC",
+      pricingMode: "LIVE_PROVIDER",
+      provider: "goldapi.io",
+      marketQuoteId: "QUOTE-1",
+    }],
+    assetLinks: [{ cgpItemId: itemId, assetId: "CGPA-1", barcode: "GWANK24000001", status: "available", operationalStatus: "AVAILABLE", branchId: "BR-1" }],
+    liability: {
+      originalAmount: "5432.8910",
+      settledAmount: "0.0000",
+      outstandingAmount: "5432.8910",
+      journalEntryId: "JE-1",
+    },
+    journals: [{ id: "JE-1", sourceType: "CUSTOMER_GOLD_PURCHASE_ACCOUNTING_RECOGNITION", sourceId: `CGP-POSTED:${documentId}`, status: "posted", totalDebit: "5432.8910", totalCredit: "5432.8910", branchId: "BR-1" }],
+    journalLines: [{ id: "JL-1", journalEntryId: "JE-1", accountCode: "CUSTOMER_GOLD_LIABILITY", debit: "0.0000", credit: "5432.8910" }],
+  });
+
+  assert.equal(data.summary.projectionReference, `invoice:customer_gold_purchase:${documentId}`);
+  assert.equal(data.summary.displayNumber, "CGPD-000001");
+  assert.equal(data.summary.partyType, "CUSTOMER");
+  assert.equal(data.summary.grandTotal, "5432.8910");
+  assert.equal(data.lines[0].goldPurchase.netWeight, "10.000000");
+  assert.equal(data.lines[0].goldPurchase.rate.value, "543.2891");
+  assert.equal(data.lines[0].goldPurchase.lineValue, "5432.8910");
+  assert.equal(data.lines[0].assetLinks[0].barcode, "GWANK24000001");
+  assert.equal(data.taxSummary.tax, null);
+  assert.equal(data.taxSummary.snapshotStatus, "NOT_APPLICABLE_SOURCE");
+  assert.equal(data.paymentSummary.paymentStatus, "UNPAID");
+  assert.equal(data.sourceLinks.accounting[0].sourceId, `CGP-POSTED:${documentId}`);
+  assert.equal(data.audit.readOnly, true);
 });
 
 test("summary preserves source identity and source financial values without recalculation", () => {
@@ -131,14 +210,14 @@ test("repeated projection reads are semantically stable", () => {
   assert.deepEqual(second, first);
 });
 
-test("D1 route is GET-only and is mounted as a separate read-only surface", () => {
+test("projection route keeps reads GET-only and exposes only explicit print authorization", () => {
   const route = fs.readFileSync(require.resolve("../src/routes/invoice-projection.routes.js"), "utf8");
   const index = fs.readFileSync(require.resolve("../src/routes/index.js"), "utf8");
   assert.match(route, /router\.get\("\/sources"/);
   assert.match(route, /router\.get\("\/summaries"/);
   assert.match(route, /router\.get\("\/:sourceType\/:sourceId"/);
-  assert.doesNotMatch(route, /router\.(post|put|patch|delete)\s*\(/i);
+  assert.match(route, /router\.post\(\s*\n\s*"\/:sourceType\/:sourceId\/print-events"/);
+  assert.doesNotMatch(route, /router\.(put|patch|delete)\s*\(/i);
   assert.match(route, /requireBusinessPermission\("sales\.view"\)/);
   assert.match(index, /router\.use\("\/invoice-projection", invoiceProjectionRoutes\)/);
 });
-

@@ -208,6 +208,10 @@ PurchaseOrder.belongsTo(Company, { foreignKey: "companyId", as: "company" });
 
 Company.hasMany(Invoice, { foreignKey: "companyId", as: "invoices" });
 Invoice.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(Invoice, { foreignKey: "branchId", as: "invoices" });
+// Invoice already has a legacy `branch` text snapshot attribute. Keep the
+// normalized Branch association under a collision-free alias.
+Invoice.belongsTo(Branch, { foreignKey: "branchId", as: "branchRecord" });
 
 Company.hasMany(Reservation, { foreignKey: "companyId", as: "reservations" });
 Reservation.belongsTo(Company, { foreignKey: "companyId", as: "company" });

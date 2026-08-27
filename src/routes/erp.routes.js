@@ -61,6 +61,7 @@ const permissionService = require("../services/permission.service");
 const employeeAuthorizationService = require("../services/employee-authorization.service");
 const commandActorContext = require("../services/command-actor-context.service");
 const salesOperatorPolicy = require("../services/sales-operator-policy.service");
+const invoiceProjectionService = require("../services/invoice-projection.service");
 const statementReconciliationService = require("../services/statement-reconciliation.service");
 const sourceAwareStatementService = require("../services/source-aware-statement.service");
 const accountingLockService = require("../services/accounting-lock.service");
@@ -6899,22 +6900,29 @@ setupCrud("customer-gold-pools", models.CustomerGoldPool, ["customerName", "stat
 setupCrud("inventory-gold-pools", models.InventoryGoldPool, ["source", "status"]);
 setupCrud("purchase-orders", models.PurchaseOrder, ["supplierName", "status", "branch"]);
 
-// Phase 31.4-Fix — Unified Invoices Search & Print (read-only GET).
-// This route is intentionally registered before generic /invoices/:id.
++// D2 compatibility adapter — the canonical search authority is the
+// read-only invoice projection service. This legacy URL remains only for
+// clients that have not migrated their route; it performs no separate ORM
+// search and cannot expose inactive/future source types.
 router.get("/invoices/search-print", authMiddleware, requireBusinessPermission("sales.view"), async (req, res, next) => {
   try {
     const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
     const pageSize = Math.min(Math.max(Number.parseInt(req.query.pageSize, 10) || 25, 1), 100);
-    const search = String(req.query.search || "").trim();
-    const customer = String(req.query.customer || "").trim();
-    const customerId = String(req.query.customerId || "").trim();
-    const branch = String(req.query.branch || "").trim();
-    const requestedType = String(req.query.type || "all").trim();
-    const requestedStatus = String(req.query.status || "all").trim();
+    const requestedType = String(req.query.type || req.query.sourceType || "all").trim().toLowerCase();
+    const sourceTypes = requestedType === "all"
+      ? [...invoiceProjectionService.ACTIVE_PROJECTION_SOURCE_TYPES]
+      : [...new Set(requestedType.split(",").map((value) => value.trim()).filter(Boolean))];
+    sourceTypes.forEach((sourceType) => invoiceProjectionService.assertActiveSourceType(sourceType));
+
+    const requestedStatus = String(req.query.status || "all").trim().toLowerCase();
+    const supportedStatuses = new Set(["draft", "posted", "closed", "cancelled", "returned"]);
+    if (requestedStatus !== "all" && !supportedStatuses.has(requestedStatus)) {
+      throw new ValidationError("Unsupported invoice status for Search & Print.");
+    }
+
     const dateFrom = String(req.query.dateFrom || "").trim();
     const dateTo = String(req.query.dateTo || "").trim();
     const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/;
-
     if (dateFrom && !isoDatePattern.test(dateFrom)) {
       throw new ValidationError("dateFrom must use YYYY-MM-DD format.");
     }
@@ -6924,86 +6932,76 @@ router.get("/invoices/search-print", authMiddleware, requireBusinessPermission("
     if (dateFrom && dateTo && dateFrom > dateTo) {
       throw new ValidationError("dateFrom cannot be after dateTo.");
     }
-    if (requestedType !== "all" && !SEARCH_PRINT_INVOICE_TYPES[requestedType]) {
-      throw new ValidationError("Unsupported invoice type for Search & Print.");
-    }
-    if (requestedStatus !== "all" && !SEARCH_PRINT_STATUSES.has(requestedStatus)) {
-      throw new ValidationError("Unsupported invoice status for Search & Print.");
-    }
 
-    const where = {
-      companyId: req.companyId,
-      type: { [Op.in]: Object.values(SEARCH_PRINT_INVOICE_TYPES) },
-    };
-    const conditions = [];
-
-    if (search) {
-      conditions.push({
-        [Op.or]: [
-          { id: { [Op.iLike]: `%${search}%` } },
-          { invoiceNumber: { [Op.iLike]: `%${search}%` } },
-        ],
+    let branchId = req.branchId || null;
+    const requestedBranch = String(req.query.branch || req.query.branchId || "").trim();
+    if (requestedBranch && requestedBranch !== "all") {
+      const branchRecord = await models.Branch.findOne({
+        where: {
+          companyId: req.companyId,
+          isActive: true,
+          [Op.or]: [{ id: requestedBranch }, { name: requestedBranch }, { code: requestedBranch }],
+        },
+        attributes: ["id"],
+        raw: true,
       });
+      if (!branchRecord) throw new ValidationError("Selected branch is invalid or inactive.");
+      if (req.branchId && String(branchRecord.id) !== String(req.branchId)) {
+        const error = new ForbiddenError("Selected branch is outside this account scope.");
+        error.errorCode = "BRANCH_SCOPE_FORBIDDEN";
+        throw error;
+      }
+      branchId = branchRecord.id;
     }
-    if (customer) conditions.push({ customerName: { [Op.iLike]: `%${customer}%` } });
-    if (customerId) conditions.push({ customerId: { [Op.iLike]: `%${customerId}%` } });
-    if (branch && branch !== "all") conditions.push({ branch });
-    if (requestedType !== "all") conditions.push({ type: SEARCH_PRINT_INVOICE_TYPES[requestedType] });
-    if (requestedStatus !== "all") conditions.push(searchPrintStatusWhere(requestedStatus));
-    if (dateFrom || dateTo) {
-      const dateRange = {};
-      if (dateFrom) dateRange[Op.gte] = dateFrom;
-      // `Invoice.date` is a legacy string that may contain either YYYY-MM-DD
-      // or YYYY-MM-DD HH:mm. Use an end-of-day upper bound so both formats are
-      // included without parsing or rewriting stored values.
-      if (dateTo) dateRange[Op.lte] = `${dateTo} 23:59:59.999`;
-      conditions.push({ date: dateRange });
-    }
-    if (conditions.length) where[Op.and] = conditions;
 
-    const total = await models.Invoice.count({ where });
-    const rows = await models.Invoice.findAll({
-      where,
-      include: [{ model: models.InvoiceItem, as: "items" }],
-      order: [["createdAt", "DESC"]],
-      limit: pageSize,
-      offset: (page - 1) * pageSize,
+    const filters = {
+      page,
+      pageSize,
+      sourceTypes,
+      search: String(req.query.search || "").trim(),
+      partyName: String(req.query.customer || req.query.customerName || "").trim(),
+      partyId: String(req.query.customerId || "").trim(),
+      employee: String(req.query.employee || "").trim(),
+      branchId,
+      dateFrom,
+      dateTo,
+      status: requestedStatus === "all" ? "" : requestedStatus,
+    };
+    const data = await invoiceProjectionService.listSummaries({
+      companyId: req.companyId,
+      branchId,
+      filters,
     });
-    const items = rows.map((row) => {
-      const invoice = row.toJSON();
-      return {
-        ...invoice,
-        type: invoice.type || "sale",
-        searchPrintStatus: resolveSearchPrintStatus(invoice),
-        employeeName: null,
-      };
-    });
-    const totalPages = Math.max(Math.ceil(total / pageSize), 1);
+    await auditService.record(req.companyId, commandActorContext.attachAuditActor(req, {
+      action: "invoice_projection.search",
+      description: "Legacy invoice Search & Print compatibility adapter delegated to the canonical projection.",
+      sourceDocument: "INVOICE_SEARCH_PROJECTION",
+      requiredPermission: "sales.view",
+      requestedOperation: "invoice.search",
+      authorizationResult: "allowed",
+      after: JSON.stringify({ filters, resultCount: data.total }),
+    }));
 
     return res.status(200).json({
       success: true,
-      items,
-      page,
-      pageSize,
-      total,
-      totalPages,
+      items: data.items,
+      page: data.page,
+      pageSize: data.pageSize,
+      total: data.total,
+      totalPages: data.totalPages,
       capabilities: {
-        employeeFilter: false,
-        supportedTypes: Object.keys(SEARCH_PRINT_INVOICE_TYPES),
+        employeeFilter: Boolean(data.filterContract?.supportsEmployeeFilter),
+        supportedTypes: data.filterContract?.sourceTypes || sourceTypes,
+        canonicalRoute: "/invoice-projection/summaries",
+        readOnly: true,
       },
-      data: {
-        items,
-        page,
-        pageSize,
-        total,
-        totalPages,
-      },
+      data,
+      readOnly: true,
     });
   } catch (error) {
-    next(error);
+    return next(error);
   }
 });
-// End Phase 31.4-Fix — Unified Invoices Search & Print.
 
 router.post(
   "/invoices/:id/print-events",
@@ -14494,6 +14492,7 @@ router.post("/pricing/calculate", authMiddleware, async (req, res, next) => {
     const dynamicGoldAssetIds = new Set();
     let dynamicGoldSubtotal = 0;
     let dynamicGoldTax = 0;
+    let dynamicGoldMakingTotal = 0;
     products.forEach(p => itemsMap.set(p.id, { price: Number(p.salePrice) || 0, cost: Number(p.unitCost) || 0 }));
     for (const asset of assets) {
       let price = Number(asset.price) || 0;
@@ -14524,6 +14523,7 @@ router.post("/pricing/calculate", authMiddleware, async (req, res, next) => {
         price = Number(pricing?.subtotal || pricing?.goldValue || 0);
         dynamicGoldSubtotal += price;
         dynamicGoldTax += Number(pricing?.vatAmount || 0);
+        dynamicGoldMakingTotal += Number(pricing?.makingTotal || 0);
       }
       itemsMap.set(asset.id, { price, cost: Number(asset.cost) || 0 });
     }
@@ -14544,6 +14544,9 @@ router.post("/pricing/calculate", authMiddleware, async (req, res, next) => {
     const totalMakingCharge = makingChargePerGram !== null && makingChargePerGram !== undefined && makingChargePerGram !== ""
       ? assets.filter((asset) => !dynamicGoldAssetIds.has(asset.id)).reduce((sum, asset) => sum + Number(calculateMakingChargeTotal({ itemWeightGrams: asset.grossWeight, makingChargePerGram })), 0)
       : Number(makingCharge) || 0;
+    // Dynamic gold lines already include their profile-authoritative making
+    // amount in basePrice; expose it without adding it again to the tax base.
+    const reportedTotalMakingCharge = dynamicGoldMakingTotal + totalMakingCharge;
 
     // Gold line VAT is already resolved by the canonical profile calculator:
     // 24K taxes certificate only, while weight jewellery taxes its subtotal.
@@ -14588,8 +14591,8 @@ router.post("/pricing/calculate", authMiddleware, async (req, res, next) => {
       tax: String(tax),
       total: String(total),
       makingChargePerGram: makingChargePerGram === null || makingChargePerGram === undefined || makingChargePerGram === "" ? null : String(makingChargePerGram),
-      makingCharge: String(totalMakingCharge),
-      totalMakingCharge: String(totalMakingCharge),
+      makingCharge: String(reportedTotalMakingCharge),
+      totalMakingCharge: String(reportedTotalMakingCharge),
       vatRate: vatRatePercent,
       items,
       journalPreview
