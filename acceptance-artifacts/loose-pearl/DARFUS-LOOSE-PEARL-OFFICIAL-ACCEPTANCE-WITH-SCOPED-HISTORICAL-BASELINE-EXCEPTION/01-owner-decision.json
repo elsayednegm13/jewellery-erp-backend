@@ -1,7 +1,0 @@
-{
-  "control": "DARFUS-LOOSE-PEARL-OFFICIAL-ACCEPTANCE-WITH-SCOPED-HISTORICAL-BASELINE-EXCEPTION",
-  "authorization": "ONE_DISTINCT_OFFICIAL_LOOSE_PEARL_RECEIVE",
-  "targetDatabase": "darfus_erp",
-  "secondReceiveAuthorized": false,
-  "historicalRemediationAuthorized": false
-}

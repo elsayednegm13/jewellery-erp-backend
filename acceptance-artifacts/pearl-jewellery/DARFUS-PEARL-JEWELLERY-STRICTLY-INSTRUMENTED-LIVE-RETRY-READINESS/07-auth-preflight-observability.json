@@ -1,6 +1,0 @@
-{
-  "ar": {"preflight_start": true, "result": "FRESH", "token_recorded": false},
-  "en": {"preflight_start": true, "result": "FRESH", "token_recorded": false},
-  "refreshed_review_case": "PASS_IN_ISOLATED_TEST",
-  "blocked_auth_case": "PASS_IN_ISOLATED_TEST"
-}

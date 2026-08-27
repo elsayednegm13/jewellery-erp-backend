@@ -1,7 +1,0 @@
-{
-  "lesson": "LL-017",
-  "title": "ACCEPTED PRODUCT STATE MUST REPLACE STALE AUTOMATED TEST CONTRACTS",
-  "equivalentExistingLessonFound": false,
-  "preventionGate": "Review acceptance assertions when an Owner-approved module changes from unavailable to enabled",
-  "regression": "Pearl enabled assertion + Loose Pearl separate-profile assertion"
-}

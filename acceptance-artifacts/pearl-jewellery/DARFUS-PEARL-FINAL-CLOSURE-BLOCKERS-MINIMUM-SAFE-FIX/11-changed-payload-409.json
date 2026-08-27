@@ -1,9 +1,0 @@
-{
-  "requestCount": 1,
-  "http": 409,
-  "state": "CONFLICT",
-  "sameKey": true,
-  "changedField": "notes",
-  "changedHash": "a0ca873b896d16bdc3a3afa84f2087c300ee847d5e26d0202198eda533df87d1",
-  "keyValue": "REDACTED"
-}

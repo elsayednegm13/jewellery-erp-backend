@@ -1,8 +1,0 @@
-{
-  "firstProvenBrokenBoundary":"Historical postEntry balance gate accepted a 0.01 difference after line amounts were rounded to cents; the resulting unbalanced lines were persisted.",
-  "rootCauseClass":"HISTORICAL_ISOLATED_DATA_DEFECT",
-  "basis":["current working-tree guard rejects the same rounded values","only one unbalanced posted journal found","tax snapshot and source total reconcile exactly","old HEAD guard explicitly allowed absolute differences up to and including 0.01"],
-  "affectedRowScope":"JE-1787090870905 and its source PO-1787090870807 only, based on current scan",
-  "baselineExceptionRecommended":false,
-  "confidence":"HIGH"
-}

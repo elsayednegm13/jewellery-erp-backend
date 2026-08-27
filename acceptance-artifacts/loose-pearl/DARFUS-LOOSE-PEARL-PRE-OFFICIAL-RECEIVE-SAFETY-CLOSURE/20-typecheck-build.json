@@ -1,5 +1,0 @@
-{
-  "typecheck": "PASS",
-  "build": "PASS",
-  "buildRoutesInclude": ["/ar/inventory/loose-pearl", "/en/inventory/loose-pearl"]
-}

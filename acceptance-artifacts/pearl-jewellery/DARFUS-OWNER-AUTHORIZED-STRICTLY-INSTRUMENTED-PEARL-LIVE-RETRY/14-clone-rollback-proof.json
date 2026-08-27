@@ -1,9 +1,0 @@
-{
-  "clone": "darfus_erp_pearl_live_clone_20260822_01",
-  "method": "drop-and-recreate-disposable-clone-from-source-dump",
-  "restoreExit": 0,
-  "currentDatabaseAfterRestore": "darfus_erp_pearl_live_clone_20260822_01",
-  "countsAfterRestore": {"purchase_orders": 12, "purchase_order_items": 12, "assets": 12, "pearl_assets": 0, "asset_components": 9, "pearl_details": 0, "barcode_history": 12, "origins": 12, "cost_revisions": 12, "valuations": 12, "movements": 12, "journals": 15, "journal_lines": 42, "idempotency": 16, "cash": 3},
-  "clonePersistentBusinessDeltaAfterRollback": 0,
-  "officialDatabaseTouched": false
-}

@@ -1,8 +1,0 @@
-{
-  "currentDatabase": "darfus_erp",
-  "counts": {"purchase_orders":13,"assets":13,"pearl_assets":1,"journal_entries":16,"idempotency_requests":17,"cash_transactions":3},
-  "frozenTransactionPresent": true,
-  "officialDbBusinessDeltaThisControl": 0,
-  "manualBusinessSql": false,
-  "status": "PASS_READ_ONLY"
-}

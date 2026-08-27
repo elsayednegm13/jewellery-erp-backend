@@ -1,7 +1,0 @@
-{
-  "scope": "purchase.receive",
-  "algorithm": "existing idempotencyService.hashRequest",
-  "hashComputedBeforePost": true,
-  "hashValue": "08748221bf79886609655eabc5b4db90d09678ff0f6f56148ea0f269de043d4a",
-  "idempotencyKeyMetadata": {"present":true,"printed":false}
-}

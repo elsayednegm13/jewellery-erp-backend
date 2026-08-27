@@ -1,9 +1,0 @@
-{
-  "staleAssertionCount": 6,
-  "files": [
-    {"file":"tests/unified-inventory-intake-ux-02-r3.test.cjs","staleAssertions":3,"replaced":"Pearl disabled -> enabled"},
-    {"file":"tests/unified-inventory-ux-final-closure.test.cjs","staleAssertions":3,"replaced":"Pearl disabled -> enabled"}
-  ],
-  "unrelatedAssertionsPreserved": true,
-  "sourceAuthority": "PEARL_JEWELLERY_ENABLED"
-}

@@ -1,1 +1,0 @@
-{"officialEndpoint":"http://localhost:8000/api/v1/purchase-orders/receive","attemptCount":1,"method":"POST","status":401,"classification":"UNAUTHORIZED_SESSION_EXPIRED","businessTransactionCreated":false,"poCreated":false,"assetCreated":false,"journalCreated":false,"idempotencyRowCreated":false,"secondReceive":"NOT_RUN","productionContacted":false}

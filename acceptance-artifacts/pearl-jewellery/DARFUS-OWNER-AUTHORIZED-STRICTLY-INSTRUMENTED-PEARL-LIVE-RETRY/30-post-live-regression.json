@@ -1,9 +1,0 @@
-{
-  "command": "node --test tests/pearl-jewellery-minimum-safe-implementation.test.cjs tests/pearl-confirm-request-dispatch.test.cjs tests/pearl-confirm-auth-freshness.test.cjs tests/pearl-size-ui-binding.test.cjs tests/pearl-live-telemetry-no-intercept.test.cjs tests/authorization-runtime-fix-cont3.test.mjs tests/authorization-runtime-fix-cont4.test.mjs tests/asset-final-closure.test.cjs tests/barcode-final-closure.test.cjs",
-  "tests": 38,
-  "passed": 38,
-  "failed": 0,
-  "typecheck": "PASS_PRELIVE",
-  "build": "PASS_PRELIVE",
-  "status": "PASS_NO_NEW_FAILURES"
-}

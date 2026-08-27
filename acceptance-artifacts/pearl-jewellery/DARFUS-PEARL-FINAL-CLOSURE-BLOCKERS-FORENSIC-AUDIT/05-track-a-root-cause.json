@@ -1,7 +1,0 @@
-{
-  "rootCause": "PROVEN",
-  "summary": "The live page apiClient safely owns the token/session request path, but Pearl page exposes no replay helper and the browser automation evaluation scope cannot access window.fetch or module-scoped apiClient.",
-  "failureLayer": "BROWSER_EVALUATION_SURFACE + API_CLIENT_ACCESS",
-  "whatWasProven": ["actual page runtime used fetch for the original 201", "evaluation window.fetch is undefined", "window.apiClient is undefined", "Pearl page has submit only and no replay function"],
-  "noSecretInspection": true
-}

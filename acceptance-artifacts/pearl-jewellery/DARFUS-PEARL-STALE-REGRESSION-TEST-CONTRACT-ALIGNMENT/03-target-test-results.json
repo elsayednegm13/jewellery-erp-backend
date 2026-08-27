@@ -1,7 +1,0 @@
-{
-  "command": "node --test tests/unified-inventory-intake-ux-02-r3.test.cjs tests/unified-inventory-ux-final-closure.test.cjs",
-  "tests": 13,
-  "passed": 13,
-  "failed": 0,
-  "status": "PASS"
-}

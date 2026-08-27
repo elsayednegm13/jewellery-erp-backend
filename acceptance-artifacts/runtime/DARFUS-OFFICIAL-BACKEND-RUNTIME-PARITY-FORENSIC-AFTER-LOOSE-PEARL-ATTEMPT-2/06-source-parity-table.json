@@ -1,8 +1,0 @@
-{
-  "rows": [
-    {"file":"inventory-v2-runtime.service.js","hostHash":"6932876D0BE62929BA0C300771996188A6FA130711619311213F509FA520C157","runtimeFileHash":"6932876D0BE62929BA0C300771996188A6FA130711619311213F509FA520C157","filesystemParity":"PASS"},
-    {"file":"erp.routes.js","hostHash":"8E53712B0B1CF5B384ADB66E50899C0E39E51820791A9E4621B15AA4F42BE34B","runtimeFileHash":"8E53712B0B1CF5B384ADB66E50899C0E39E51820791A9E4621B15AA4F42BE34B","filesystemParity":"PASS"}
-  ],
-  "executingModuleParity": "FAIL_OR_STALE_EVIDENCE",
-  "reason": "Attempt 2 stack line 353 matches the pre-fix query boundary; current source has the ordinal resolver at lines 348-360 and query after it, while the process started before the fix and has no watcher"
-}

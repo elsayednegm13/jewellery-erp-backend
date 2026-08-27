@@ -1,8 +1,0 @@
-{
-  "auth": "NOT_RUN",
-  "superAdmin": "NOT_RUN",
-  "companyContext": "NOT_RUN",
-  "branchContext": "NOT_RUN",
-  "operationalReadiness": "NOT_RUN",
-  "reason": "stopped at strict refresh identity boundary before authenticated checks; no login or token was created"
-}

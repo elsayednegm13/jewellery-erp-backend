@@ -1,9 +1,0 @@
-{
-  "method": "docker compose restart backend",
-  "target": "backend service only",
-  "postgresRestarted": false,
-  "redisRestarted": false,
-  "reason": "existing architecture uses a host bind mount and plain node process; backend-only restart is the minimum approved reload",
-  "composeStartupContract": "existing command chain is npm run db:migrate && npm start; no migration file was created or changed and no business seed/reset/cleanup was requested",
-  "refreshCountRequired": 1
-}

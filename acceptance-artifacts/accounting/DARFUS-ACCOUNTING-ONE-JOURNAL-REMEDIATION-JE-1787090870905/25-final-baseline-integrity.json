@@ -1,1 +1,0 @@
-{"status":"NOT_RUN_AS_POST_REMEDIATION_GATE","currentReadOnlyState":{"duplicateActiveBarcodes":0,"orphanPearlDetails":0,"orphanOrigins":0,"orphanMovements":0,"unbalancedPostedJournals":1},"baselineIntegrity":"FAIL_UNBALANCED_POSTED_JOURNAL"}

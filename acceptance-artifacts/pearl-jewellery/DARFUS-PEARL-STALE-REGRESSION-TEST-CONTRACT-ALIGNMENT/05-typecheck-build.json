@@ -1,6 +1,0 @@
-{
-  "typecheck": "PASS",
-  "build": "PASS",
-  "backendRebuildRequired": false,
-  "note": "An initial concurrent typecheck/build race reported generated .next validator drift; standalone typecheck after build passed. No generated file was edited."
-}

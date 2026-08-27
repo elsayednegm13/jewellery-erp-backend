@@ -1,9 +1,0 @@
-{
-  "totalUnbalancedPostedJournals":1,
-  "purchaseOrderUnbalancedCount":1,
-  "exact0_01PatternCount":1,
-  "within0_05Count":1,
-  "sameCodePathPatternCount":"1 exact row; broader historical equivalence not proven",
-  "ids":["JE-1787090870905"],
-  "scope":"all posted journal entries in darfus_erp, recalculated from journal_lines"
-}

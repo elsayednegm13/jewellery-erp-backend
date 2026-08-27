@@ -1,6 +1,0 @@
-{
-  "businessRecoveryRequestCaptured": false,
-  "businessRecoveryExecuted": false,
-  "reason": "BUSINESS_ROLLBACK_ROUTE=NOT_SUPPORTED and no successful receive existed",
-  "manualSqlDelete": false
-}

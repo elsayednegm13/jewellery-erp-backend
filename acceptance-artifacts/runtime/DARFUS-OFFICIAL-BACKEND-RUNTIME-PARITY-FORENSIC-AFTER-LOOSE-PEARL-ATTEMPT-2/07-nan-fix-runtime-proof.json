@@ -1,9 +1,0 @@
-{
-  "currentFilesystemFix": "PRESENT",
-  "resolver": "resolveReceiptEvidenceOrdinal",
-  "currentBehavior": "accepts finite non-negative safe integer pieceIndex or digit string; derives ordinal as zeroBased + 1; rejects invalid metadata before SQL",
-  "currentSourceLines": "348-360",
-  "officialAttempt2": "FAIL_AT_SAME_OLD_QUERY_LINE_LAYOUT",
-  "runtimeFixExecutionProof": "FAIL",
-  "classification": "official process loaded stale pre-fix module or did not reload after source change"
-}

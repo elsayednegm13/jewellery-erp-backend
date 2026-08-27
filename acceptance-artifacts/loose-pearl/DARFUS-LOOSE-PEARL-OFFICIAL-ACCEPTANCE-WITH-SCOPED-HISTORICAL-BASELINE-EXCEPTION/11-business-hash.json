@@ -1,6 +1,0 @@
-{
-  "status": "NOT_DURABLY_CAPTURED",
-  "reason": "Receive failed with HTTP 500 before a durable idempotency result was available.",
-  "exactKey": "13e2ac6d-6bae-476f-9cc8-7578bb1889d9",
-  "requestBodyCaptured": true
-}

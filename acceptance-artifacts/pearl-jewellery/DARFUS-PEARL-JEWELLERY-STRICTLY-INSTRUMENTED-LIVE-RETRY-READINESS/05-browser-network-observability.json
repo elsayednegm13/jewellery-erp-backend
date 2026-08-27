@@ -1,8 +1,0 @@
-{
-  "ar": {"request_attempted": true, "request_intercepted": true, "request_canceled": false, "request_blocked": false, "request_absent": false, "method": "POST", "path": "/purchase-orders/receive", "status": 200},
-  "en": {"request_attempted": true, "request_intercepted": true, "request_canceled": false, "request_blocked": false, "request_absent": false, "method": "POST", "path": "/purchase-orders/receive", "status": 200},
-  "headers_recorded": false,
-  "body_recorded": false,
-  "idempotency_key_recorded": false,
-  "canonical_hash_recorded": false
-}

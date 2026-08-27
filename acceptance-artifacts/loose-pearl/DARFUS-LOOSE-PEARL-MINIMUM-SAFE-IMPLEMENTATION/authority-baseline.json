@@ -1,9 +1,0 @@
-{
-  "control": "DARFUS-LOOSE-PEARL-MINIMUM-SAFE-IMPLEMENTATION",
-  "officialDatabase": "darfus_erp",
-  "ownerScope": "LOOSE_PEARL",
-  "onePhysicalPearlOneAsset": true,
-  "canonicalReceive": "SUPPLIER_RECEIVE_V2",
-  "nextBatchAllowed": "NO_AUTOMATIC_START",
-  "secretsIncluded": false
-}

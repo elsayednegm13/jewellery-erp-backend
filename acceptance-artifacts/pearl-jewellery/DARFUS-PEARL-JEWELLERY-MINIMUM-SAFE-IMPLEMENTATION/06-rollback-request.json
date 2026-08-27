@@ -1,8 +1,0 @@
-{
-  "rollbackTarget": "darfus_erp_pearl_clone_20260822_01",
-  "sourceDump": "clone-source.dump",
-  "requestParity": "PASS",
-  "businessMutationAllowed": true,
-  "officialDatabase": "darfus_erp",
-  "officialMutationAllowed": false
-}

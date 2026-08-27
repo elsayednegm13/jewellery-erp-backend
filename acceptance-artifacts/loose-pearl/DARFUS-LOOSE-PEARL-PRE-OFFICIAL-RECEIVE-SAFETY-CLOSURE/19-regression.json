@@ -1,6 +1,0 @@
-{
-  "tests": 93,
-  "passed": 93,
-  "failed": 0,
-  "coverage": ["Loose Pearl label", "Loose Pearl implementation", "Pearl", "Loose Diamond", "Diamond", "Gem/UX", "Supplier", "Asset", "Barcode", "RFID", "POS/read-only", "Idempotency/auth"]
-}

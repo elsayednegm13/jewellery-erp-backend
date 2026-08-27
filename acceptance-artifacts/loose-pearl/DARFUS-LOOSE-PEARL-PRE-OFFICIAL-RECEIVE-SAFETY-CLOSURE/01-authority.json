@@ -1,7 +1,0 @@
-{
-  "control": "DARFUS-LOOSE-PEARL-PRE-OFFICIAL-RECEIVE-SAFETY-CLOSURE",
-  "officialDatabase": "darfus_erp",
-  "priorGate": "PASS_LOOSE_PEARL_MINIMUM_SAFE_IMPLEMENTATION_AND_CLONE_ACCEPTANCE",
-  "officialReceiveAuthorized": false,
-  "secretsIncluded": false
-}

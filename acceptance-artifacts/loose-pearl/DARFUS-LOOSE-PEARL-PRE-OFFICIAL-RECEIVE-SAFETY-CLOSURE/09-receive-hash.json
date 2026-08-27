@@ -1,6 +1,0 @@
-{
-  "businessHash": "not_claimed; request rejected before idempotency claim",
-  "idempotencyKey": "not printed",
-  "idempotencyState": "no new durable claim observed",
-  "secretsIncluded": false
-}

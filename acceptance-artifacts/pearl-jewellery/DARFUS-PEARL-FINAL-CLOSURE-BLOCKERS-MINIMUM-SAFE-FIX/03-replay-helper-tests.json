@@ -1,5 +1,0 @@
-{
-  "testFile": "tests/pearl-final-closure-minimum-safe-fix.test.cjs",
-  "status": "PASS",
-  "cases": ["local/query gate", "existing apiClient", "no auth material", "saved key/body", "one-shot exact/changed controls"]
-}

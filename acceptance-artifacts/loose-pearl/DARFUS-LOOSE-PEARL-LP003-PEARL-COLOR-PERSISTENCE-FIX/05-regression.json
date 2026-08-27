@@ -1,8 +1,0 @@
-{
-  "commands": "affected Loose Pearl, Pearl, Diamond, Gemstone, Supplier Receive, Asset, Barcode, POS, Auth/Idempotency suites",
-  "tests": 59,
-  "passed": 59,
-  "failed": 0,
-  "skippedMissingFiles": 0,
-  "result": "PASS"
-}

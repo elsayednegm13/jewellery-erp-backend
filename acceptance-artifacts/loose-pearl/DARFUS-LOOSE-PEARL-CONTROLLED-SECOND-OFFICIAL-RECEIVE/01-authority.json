@@ -1,8 +1,0 @@
-{
-  "ownerAuthorization": "ONE_CONTROLLED_SECOND_OFFICIAL_LOOSE_PEARL_RECEIVE",
-  "control": "DARFUS-LOOSE-PEARL-CONTROLLED-SECOND-OFFICIAL-RECEIVE",
-  "officialAttempt": 2,
-  "automaticRetry": 0,
-  "thirdAttemptAuthorized": false,
-  "targetDatabase": "darfus_erp"
-}

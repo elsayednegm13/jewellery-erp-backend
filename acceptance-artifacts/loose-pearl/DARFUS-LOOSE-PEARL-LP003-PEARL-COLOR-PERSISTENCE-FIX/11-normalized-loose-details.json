@@ -1,9 +1,0 @@
-{
-  "normalizer": "inventory-master-policy.normalizeLooseDetails",
-  "profile": "LOOSE_PEARL",
-  "input": {"totalPearlWeight": "1.25", "pearlColor": "Black"},
-  "normalized": {"kind": "PEARL", "totalPearlWeight": "1.25000000", "pearlColor": "Black", "color": []},
-  "noFallback": true,
-  "missingPearlColor": null,
-  "masterIdExposedAsLabel": false
-}

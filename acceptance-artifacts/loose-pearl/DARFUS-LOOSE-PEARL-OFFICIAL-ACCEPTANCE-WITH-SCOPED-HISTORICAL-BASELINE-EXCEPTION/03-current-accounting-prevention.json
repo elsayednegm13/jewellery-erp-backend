@@ -1,6 +1,0 @@
-{
-  "gate": "PASS",
-  "sourceGuard": "exact stored-line cent balance guard before persistence",
-  "focusedReadOnlyTests": "17 passed, 0 failed",
-  "evidence": "backend/src/services/posting.service.js and prior focused test run"
-}

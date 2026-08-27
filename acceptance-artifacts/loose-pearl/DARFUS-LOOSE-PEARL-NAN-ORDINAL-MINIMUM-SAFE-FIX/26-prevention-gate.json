@@ -1,7 +1,0 @@
-{
-  "sourceGate": "PASS",
-  "focusedGate": "PASS",
-  "cloneGate": "BLOCKED_AUTH_CONTEXT",
-  "sqlBoundary": "FAIL_CLOSED",
-  "overall": "BLOCKED"
-}

@@ -1,9 +1,0 @@
-{
-  "newLessonId": "LP003",
-  "status": "CLOSED_BY_THIS_CONTROL",
-  "rootCause": "canonical Loose Pearl pearlColor key was not preserved by shared normalization",
-  "minimumFix": "preserve canonical pearlColor through normalization/persistence mapping",
-  "preventionGate": "assert every supported Loose Pearl categorical field request-to-persistence-to-AR/EN readback",
-  "test": "pearlColor=Black end-to-end persistence/readback proof",
-  "duplicateLessonCreated": false
-}

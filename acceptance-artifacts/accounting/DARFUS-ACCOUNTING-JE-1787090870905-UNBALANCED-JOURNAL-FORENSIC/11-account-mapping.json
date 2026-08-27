@@ -1,7 +1,0 @@
-{
-  "inventory":"SYS-INVENTORY",
-  "recoverableVat":"1400",
-  "supplierPayable":"SYS-AP",
-  "standardTaxableShapeObserved":true,
-  "mappingEvidence":"JE-1787090870905 journal lines and current posting.service.js postPurchaseEntry"
-}

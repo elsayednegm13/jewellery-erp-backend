@@ -1,8 +1,0 @@
-{
-  "backendHealth": "GET /api/v1/health = 200",
-  "frontend": "localhost:3000",
-  "requestId": "70e0c2c4-f4e1-48f8-94da-f5e5c5b5",
-  "diagnostics": "ON",
-  "consoleErrors": [],
-  "requestInterception": "OFF"
-}

@@ -1,6 +1,0 @@
-{
-  "profilePreview": "NOT_RUN",
-  "sharedPreview": "NOT_RUN",
-  "reason": "optional preview was not reached after strict PID gate failure",
-  "receiveConfirm": "NOT_RUN"
-}

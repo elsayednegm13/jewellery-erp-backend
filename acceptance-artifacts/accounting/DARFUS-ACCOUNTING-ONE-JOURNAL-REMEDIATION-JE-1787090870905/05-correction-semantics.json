@@ -1,1 +1,0 @@
-{"correctionSemantics":"UNRESOLVED_WITHOUT_A_CANONICAL_CORRECTION_WORKFLOW","historicalResidual":"0.01000000","blindRoundingPlug":"FORBIDDEN","sourcePoTaxAssetAuthorities":"IMMUTABLE","reason":"A balanced journal added through the existing manual path cannot remove the global imbalance; an unbalanced correction would violate the posting invariant."}

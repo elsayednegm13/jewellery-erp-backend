@@ -1,6 +1,0 @@
-{
-  "authPreflightTelemetryAvailable": "PASS",
-  "isolatedStatesTested": ["FRESH", "REFRESHED", "BLOCKED"],
-  "liveBusinessConfirmUsed": false,
-  "tokenRecorded": false
-}

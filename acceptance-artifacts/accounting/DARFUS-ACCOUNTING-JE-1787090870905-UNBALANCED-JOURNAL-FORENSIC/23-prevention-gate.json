@@ -1,7 +1,0 @@
-{
-  "requiredInvariant":"ABS(totalDebit-totalCredit)=0 at canonical stored precision",
-  "minimumPrevention":"Reject after rounding the exact values that will be persisted; do not use a tolerance that admits an unbalanced journal.",
-  "additionalTests":["rounding-edge receive","VAT snapshot/header parity","purchase posting balance invariant","source total and AP equality","idempotent receive does not create a second source journal"],
-  "currentWorkingTreeEvidence":"Exact rounded-line equality guard is present; this control did not change it.",
-  "preventionImplementation":"NOT_PERFORMED_IN_THIS_CONTROL"
-}

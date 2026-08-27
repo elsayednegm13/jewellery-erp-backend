@@ -1,8 +1,0 @@
-{
-  "LL011_PREVENTION_WORKED": "YES",
-  "LL012_LABEL_PREVENTION_WORKED": "YES",
-  "LL013_DISPATCH_PROOF_WORKED": "YES",
-  "LL014_DIAGNOSTICS_INTERCEPTION_INDEPENDENCE_WORKED": "YES",
-  "historicalAmbiguity": "not rewritten; current dispatch chain was fully correlated",
-  "newLesson": {"id": "LL-015", "rootCause": "POS search result did not map the readback selling price for the newly created Pearl Asset", "allowedIt": "POS result mapping exposed zero/unavailable price despite Asset.price", "minimumFix": "separate owner-approved POS readback correction", "preventionGate": "POS barcode/profile-aware price authority proof before closure"}
-}

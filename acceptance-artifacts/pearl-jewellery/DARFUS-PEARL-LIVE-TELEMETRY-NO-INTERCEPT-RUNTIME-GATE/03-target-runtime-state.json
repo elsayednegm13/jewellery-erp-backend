@@ -1,9 +1,0 @@
-{
-  "diagnosticsEnabled": true,
-  "interceptionEnabled": false,
-  "diagnosticEnv": "true",
-  "interceptionEnv": "false",
-  "hostnameGuard": "localhost",
-  "officialConfirmInvoked": false,
-  "receivePostInvoked": false
-}

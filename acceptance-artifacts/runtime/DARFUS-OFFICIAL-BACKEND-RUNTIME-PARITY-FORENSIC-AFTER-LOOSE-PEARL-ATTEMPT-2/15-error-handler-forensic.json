@@ -1,8 +1,0 @@
-{
-  "databaseFailureNames": ["SequelizeDatabaseError","SequelizeConnectionError","SequelizeConnectionRefusedError","SequelizeHostNotFoundError","SequelizeHostNotReachableError","SequelizeTimeoutError"],
-  "officialResponse": {"httpStatus":500,"code":"INTERNAL_SERVER_ERROR","message":"An unexpected server error occurred."},
-  "sourceEvidence": "backend/src/middleware/error.middleware.js:54-59 masks DB failures; logger fields at lines 61-70 retain stack but set errorMessage to the generic message",
-  "lowLevelSqlVisible": false,
-  "exactCurrentSqlException": "NOT_EXPOSED",
-  "rootCauseImpact": "the stack boundary is provable; exact SQL detail for Attempt 2 is not directly provable from current logs"
-}
