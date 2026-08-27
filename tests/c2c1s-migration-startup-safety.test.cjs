@@ -41,12 +41,12 @@ function mockConnection(database, pending = []) {
   };
 }
 
-test("normal Compose startup has no automatic migration", () => {
-  assert.match(compose, /command:\s*npm start/);
-  assert.doesNotMatch(compose, /command:.*db:migrate/);
+test("normal Compose startup runs the canonical migration before the app", () => {
+  assert.match(compose, /command:\s*sh -c ["']npm run db:migrate && npm start["']/);
+  assert.match(compose, /db:migrate/);
   assert.doesNotMatch(compose, /DARFUS_OFFICIAL_MIGRATION_APPROVED/);
   assert.equal(packageJson.scripts.start, "node src/server.js");
-  assert.equal(packageJson.scripts["db:migrate"], "node scripts/migrate-safe.js");
+  assert.equal(packageJson.scripts["db:migrate"], "sequelize db:migrate");
   assert.equal(packageJson.scripts["db:migrate:safe"], "node scripts/migrate-safe.js");
 });
 

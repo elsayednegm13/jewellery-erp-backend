@@ -69,9 +69,9 @@ test("GV-FOUNDATION-06: payment and invoice posting use the liability adapter, n
 test("GV-FOUNDATION-07: direct redemption remains forbidden and the POS UI only sends a verified full-value split leg", () => {
   assert.match(route, /GIFT_VOUCHER_DIRECT_REDEEM_DISABLED_USE_POS/);
   assert.match(pos, /verifyGiftVoucher/);
-  assert.match(pos, /splitGiftVoucher\?\.faceValue/);
+  assert.match(pos, /giftVoucherAmount\s*=\s*Number\(giftVoucher\?\.faceValue/);
   assert.match(pos, /method: "gift_voucher"/);
-  assert.match(pos, /Verify the Gift Voucher before completing the sale/);
+  assert.match(pos, /setGiftVoucherError\(t\(/);
 });
 
 test("GV-FOUNDATION-08: lifecycle, branch eligibility, idempotency, and print/reprint events are explicit", () => {

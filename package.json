@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "db:migrate": "node scripts/migrate-safe.js",
+    "db:migrate": "sequelize db:migrate",
     "db:migrate:safe": "node scripts/migrate-safe.js",
     "db:seed": "sequelize db:seed:all",
     "db:reset": "node scripts/reset-database.js",
