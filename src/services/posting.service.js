@@ -103,6 +103,7 @@ function karatAccounts(karat) {
 }
 
 const round = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const round4 = (n) => Math.round((Number(n) || 0) * 10000) / 10000;
 const MONEY_SCALE_4 = 10000n;
 
 function moneyToUnits4(value) {
@@ -397,10 +398,20 @@ class PostingService {
    */
   async postInvoiceEntry(invoice, items = [], postedBy = "System", opts = {}) {
     const companyId = invoice.companyId;
-    const total = round(invoice.total);
-    const tax = round(invoice.tax);
-    const subtotal = round(invoice.subtotal != null ? invoice.subtotal : total - tax);
-    const cost = round(items.reduce((s, it) => s + (Number(it.cost) || 0) * (Number(it.quantity) || 1), 0));
+    // An Invoice/Tax total may legitimately carry four decimal places. In
+    // that case, every posting leg must retain the same precision; rounding
+    // each leg to cents independently can create a 0.01 imbalance.
+    const hasSubCentAmount = [
+      invoice.total,
+      invoice.tax,
+      invoice.subtotal,
+      ...(Array.isArray(invoice.paymentSplits) ? invoice.paymentSplits.map((split) => split?.amount) : []),
+    ].some((value) => Math.abs(round4(value) - round(value)) > 0);
+    const moneyRound = hasSubCentAmount ? round4 : round;
+    const total = moneyRound(invoice.total);
+    const tax = moneyRound(invoice.tax);
+    const subtotal = moneyRound(invoice.subtotal != null ? invoice.subtotal : total - tax);
+    const cost = moneyRound(items.reduce((s, it) => s + (Number(it.cost) || 0) * (Number(it.quantity) || 1), 0));
 
     // Reservation Complete-sale supplies all roles from the strict branch
     // resolver. It therefore cannot reach a company-code fallback while
@@ -428,6 +439,7 @@ class PostingService {
         postedBy,
         transaction: opts.transaction,
         branchId: invoice.branchId || opts.branchId,
+        ...(hasSubCentAmount ? { precision: 4 } : {}),
       }, lines);
     }
 
@@ -440,17 +452,32 @@ class PostingService {
 
     // Installment sale: split the debit between the down-payment (cash/bank)
     // and the financed remainder (Accounts Receivable).
-    const downPayment = round(invoice.downPayment);
+    const downPayment = moneyRound(invoice.downPayment);
     if (invoice.type === "installment" && downPayment > 0 && downPayment < total) {
       lines.push({ mappingRole: treasuryMappingRole(method), debit: downPayment, credit: 0, description: `مقدّم فاتورة ${invoice.id}` });
-      lines.push({ mappingRole: "ACCOUNTS_RECEIVABLE", debit: round(total - downPayment), credit: 0, description: `أقساط مستحقة ${invoice.id}` });
+      lines.push({ mappingRole: "ACCOUNTS_RECEIVABLE", debit: moneyRound(total - downPayment), credit: 0, description: `أقساط مستحقة ${invoice.id}` });
     } else if (method === "split" && Array.isArray(invoice.paymentSplits) && invoice.paymentSplits.length > 0) {
+      const voucherSettlements = new Map(
+        (Array.isArray(opts.giftVoucherSettlements) ? opts.giftVoucherSettlements : [])
+          .map((settlement) => [String(settlement.voucherId), settlement])
+      );
       for (const split of invoice.paymentSplits) {
         const splitMethod = String(split.method || "").toLowerCase();
-        const splitAmt = round(split.amount);
-        lines.push({ mappingRole: treasuryMappingRole(splitMethod), debit: splitAmt, credit: 0, description: `دفع مجزأ ${splitMethod} - فاتورة ${invoice.id}` });
+        const splitAmt = moneyRound(split.amount);
+        if (splitMethod === "gift_voucher") {
+          const settlement = voucherSettlements.get(String(split.giftVoucherId || ""));
+          if (!settlement || !settlement.liabilityAccountId || moneyRound(settlement.amount) !== splitAmt) {
+            throw new Error("Gift Voucher settlement must supply an exact semantic liability account.");
+          }
+          lines.push({ accountId: settlement.liabilityAccountId, debit: splitAmt, credit: 0, description: `تسوية التزام قسيمة هدية ${settlement.voucherCode || ""}`.trim() });
+        } else {
+          lines.push({ mappingRole: treasuryMappingRole(splitMethod), debit: splitAmt, credit: 0, description: `دفع مجزأ ${splitMethod} - فاتورة ${invoice.id}` });
+        }
       }
     } else {
+      if (method === "gift_voucher") {
+        throw new Error("Gift Voucher settlement requires canonical split payment handling.");
+      }
       lines.push({ mappingRole: debitMappingRole, debit: total, credit: 0, description: `فاتورة ${invoice.id}` });
     }
 
@@ -481,7 +508,8 @@ class PostingService {
         sourceId: invoice.id,
         postedBy,
         transaction: opts.transaction,
-        branchId: invoice.branchId || opts.branchId
+        branchId: invoice.branchId || opts.branchId,
+        ...(hasSubCentAmount ? { precision: 4 } : {})
       },
       lines
     );

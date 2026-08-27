@@ -39,6 +39,10 @@ const ACCOUNT_ROLE_CATALOG = Object.freeze({
 // posting flow fail its readiness gate.
 const OPTIONAL_SEMANTIC_ACCOUNT_ROLE_CATALOG = Object.freeze({
   CUSTOMER_CREDITOR: accountRole("2500", "Customer Creditors", "ذمم دائنة للعملاء", "liability", "credit", "liability"),
+  // Gift Voucher is optional until the dedicated purchased-voucher workflow is
+  // configured.  Its command resolves this role explicitly and fails closed;
+  // it is intentionally not added to global readiness for unrelated flows.
+  GIFT_VOUCHER_LIABILITY: accountRole("SYS-GIFT-VOUCHER-LIABILITY", "Gift Voucher Liability", "التزامات قسائم الهدايا", "liability", "credit", "liability"),
 });
 
 // CGP recognition requests this optional role explicitly. It stays out of

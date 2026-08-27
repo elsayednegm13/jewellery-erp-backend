@@ -76,6 +76,7 @@ const financialAccountService = require("../services/financial-account.service")
 const financialAccountResolver = require("../services/financial-account-resolver.service");
 const financialReportingService = require("../services/financial-reporting.service");
 const financialMappingCompatibility = require("../services/financial-mapping-compatibility.service");
+const giftVoucherService = require("../services/gift-voucher.service");
 const { BRANCH_MAPPING_CATALOG } = require("../services/financial-account-catalog.service");
 const { requireBranchCustomerResource } = require("../services/branch-isolation.service");
 const logger = require("../utils/logger");
@@ -714,7 +715,7 @@ function assertPositiveSaleAmount(value, subject) {
 async function executeCanonicalSale(req, res, next, { operation = "pos.checkout", requiredPermission = "pos.sell" } = {}) {
   const t = await models.sequelize.transaction();
   try {
-    const body = req.body || {};
+    let body = req.body || {};
     const makingChargePerGram = body.makingChargePerGram !== undefined && body.makingChargePerGram !== null && body.makingChargePerGram !== ""
       ? Number(body.makingChargePerGram)
       : null;
@@ -1030,8 +1031,27 @@ async function executeCanonicalSale(req, res, next, { operation = "pos.checkout"
    const total = totals.total;
     assertPositiveSaleAmount(total, "invoice");
 
-    // 7. Resolve payment outcome + installment schedule (shared rules/validation)
+    // 7. A Gift Voucher is a strict adapter inside this same canonical sale
+    // transaction. It locks and validates the active purchased Voucher before
+    // any Invoice/Asset/Payment/Journal mutation, then supplies its exact face
+    // value as one split leg. Generic payment behavior remains untouched.
     const paymentMethod = body.paymentMethod || "cash";
+    const giftVoucherSettlement = await giftVoucherService.prepareGiftVoucherSettlement({
+      models,
+      companyId: req.companyId,
+      branchId,
+      currency: settings.currency,
+      paymentMethod,
+      paymentSplits: body.paymentSplits,
+      invoiceTotal: total,
+      transaction: t,
+    });
+    if (giftVoucherSettlement.voucherSettlements.length) {
+      body = { ...body, paymentSplits: giftVoucherSettlement.paymentSplits };
+    }
+
+    // Resolve the shared payment outcome only after the strict adapter has
+    // replaced client-supplied Voucher amounts with locked server authority.
     const payment = salesService.resolvePayment({
       paymentMethod,
       total,
@@ -1191,9 +1211,12 @@ async function executeCanonicalSale(req, res, next, { operation = "pos.checkout"
           invoiceId,
           paymentMethod: split.method,
           amount: split.amount,
-          reference: split.reference || "",
+          reference: split.reference || split.voucherCode || "",
+          giftVoucherId: split.giftVoucherId || null,
           date: body.date || nowStr.slice(0, 10),
-          notes: `دفع مجزأ للفاتورة ${invoiceNumber}`,
+          notes: split.method === giftVoucherService.GIFT_VOUCHER_PAYMENT_METHOD
+            ? `Gift Voucher payment for invoice ${invoiceNumber}`
+            : `دفع مجزأ للفاتورة ${invoiceNumber}`,
           receivedByEmployeeId: commandActor.employeeId || null
         }, { transaction: t });
         paymentsCreated.push(payment.toJSON());
@@ -1264,15 +1287,30 @@ async function executeCanonicalSale(req, res, next, { operation = "pos.checkout"
           receivedAmount: paidAmount,
         });
       } else {
-        journalEntry = await postingService.postInvoiceEntry(invPlain, invoiceItems, actor, { transaction: t });
+        journalEntry = await postingService.postInvoiceEntry(invPlain, invoiceItems, actor, {
+          transaction: t,
+          giftVoucherSettlements: giftVoucherSettlement.voucherSettlements,
+        });
       }
     } catch (postErr) {
       logger.error(`[Posting] Failed to post journal entry: ${postErr.message}`);
       throw new Error(`خطأ في إنشاء القيد المحاسبي: ${postErr.message}`);
     }
 
-    // Now record the treasury cash transactions
+    const redeemedGiftVouchers = await giftVoucherService.completeGiftVoucherSettlement({
+      companyId: req.companyId,
+      branch: branchRecord,
+      actor: commandActor,
+      voucherSettlements: giftVoucherSettlement.voucherSettlements,
+      payments: paymentsCreated,
+      invoice,
+      transaction: t,
+    });
+
+    // Now record treasury cash transactions for actual money legs only. A
+    // Gift Voucher settles a pre-existing liability and is never cash-in.
     for (const pay of paymentsCreated) {
+      if (String(pay.paymentMethod).toLowerCase() === giftVoucherService.GIFT_VOUCHER_PAYMENT_METHOD) continue;
       const methodLower = pay.paymentMethod.toLowerCase();
       const account = (methodLower.includes("card") || methodLower.includes("bank") || methodLower.includes("transfer") || methodLower.includes("شبكة") || methodLower.includes("تحويل")) ? "bank" : "cash";
 
@@ -1333,6 +1371,7 @@ async function executeCanonicalSale(req, res, next, { operation = "pos.checkout"
     out.journalEntry = journalEntry;
     out.installments = createdInstallmentRecords;
     out.payments = paymentsCreated;
+    out.redeemedGiftVouchers = redeemedGiftVouchers;
     out.loyalty = loyalty;
     out.items = invoiceItems;
     const idemResponseBody = { success: true, ...out, data: out };
@@ -14497,21 +14536,27 @@ router.post("/pricing/calculate", authMiddleware, async (req, res, next) => {
     for (const asset of assets) {
       let price = Number(asset.price) || 0;
       const profile = asset.inventoryProfile || asset.profile;
-      if (["CGP_CUSTOMER_GOLD_PURCHASE", "GOLD_BY_WEIGHT_JEWELLERY", "GOLD_BAR_24K"].includes(profile)) {
-        const sellingGoldRate = await goldSalePricingService.resolveCanonicalSellingGoldRate({
-          models,
-          companyId: req.companyId,
-          currency: settings.currency || "AED",
-          karat: asset.karat,
-          cache: canonicalGoldRateCache,
-        });
+      // The read-only POS preview must select profile pricing through the
+      // same canonical registry as checkout. A narrower literal list here
+      // previously treated Gold By Piece as a persisted-price item while the
+      // commit path calculated it from its server-authoritative profile data.
+      if (goldSalePricingService.isSalePricingProfile(profile)) {
+        const pricingItem = {};
+        if (["CGP_CUSTOMER_GOLD_PURCHASE", "GOLD_BY_WEIGHT_JEWELLERY", "GOLD_BAR_24K"].includes(profile)) {
+          pricingItem.sellingGoldRate = await goldSalePricingService.resolveCanonicalSellingGoldRate({
+            models,
+            companyId: req.companyId,
+            currency: settings.currency || "AED",
+            karat: asset.karat,
+            cache: canonicalGoldRateCache,
+          });
+        }
         const pricing = await goldSalePricingService.calculateGoldSalePriceForAsset({
           asset,
           models,
           companyId: req.companyId,
           itemInput: {
-            ...((profile === "GOLD_BY_WEIGHT_JEWELLERY" || profile === "GOLD_BAR_24K") ? { sellingGoldRate } : {}),
-            sellingGoldRate,
+            ...pricingItem,
             makingChargePerGram: makingChargePerGram === null || makingChargePerGram === "" ? 0 : makingChargePerGram,
           },
           configuredVatRate: settings.vatRate,
@@ -16373,12 +16418,41 @@ router.post(
 // GIFT VOUCHERS (قسائم الهدايا) — issue, lookup & redeem
 // ─────────────────────────────────────────────────────────────────────────────
 
+async function runGiftVoucherIdempotentCommand(req, { scope, statusCode = 201, work }) {
+  const key = String(req.headers["idempotency-key"] || req.body?.idempotencyKey || "").trim();
+  if (!key) throw new ValidationError("Idempotency-Key is required for Gift Voucher commands.");
+  const requestHash = idempotencyService.hashRequest(scope, req.body || {});
+  let responseBody = null;
+  try {
+    await models.sequelize.transaction(async (transaction) => {
+      const claim = await idempotencyService.claim({ models, companyId: req.companyId, scope, key, requestHash, transaction });
+      if (!claim.claimed) {
+        const duplicate = new Error("Gift Voucher idempotency duplicate");
+        duplicate.__giftVoucherIdempotencyDuplicate = true;
+        throw duplicate;
+      }
+      const data = await work({ transaction, idempotencyKey: key });
+      responseBody = { success: true, data, ...data };
+      await idempotencyService.succeed({ request: claim.request, statusCode, responseBody, transaction });
+    });
+  } catch (error) {
+    if (error?.__giftVoucherIdempotencyDuplicate) {
+      const prior = await idempotencyService.resolveExisting({ models, companyId: req.companyId, scope, key, requestHash });
+      if (prior.state === "replay") return { statusCode: prior.statusCode || 200, responseBody: prior.responseBody };
+      return { statusCode: prior.statusCode || 409, responseBody: { success: false, message: prior.message } };
+    }
+    throw error;
+  }
+  return { statusCode, responseBody };
+}
+
 router.get("/gift-vouchers", authMiddleware, async (req, res, next) => {
   try {
     const where = { companyId: req.companyId };
     if (req.query.status) where.status = req.query.status;
     const rows = await models.GiftVoucher.findAll({
       where,
+      include: [{ model: models.GiftVoucherBranchEligibility, as: "branchEligibilities", attributes: ["branchId"] }],
       order: [["created_at", "DESC"]],
       limit: parseInt(req.query.pageSize) || 200
     });
@@ -16391,7 +16465,11 @@ router.get("/gift-vouchers", authMiddleware, async (req, res, next) => {
 router.get("/gift-vouchers/:code", authMiddleware, async (req, res, next) => {
   try {
     const v = await models.GiftVoucher.findOne({
-      where: { code: req.params.code, companyId: req.companyId }
+      where: { voucherCode: giftVoucherService.normalizeVoucherCode(req.params.code), companyId: req.companyId },
+      include: [
+        { model: models.GiftVoucherBranchEligibility, as: "branchEligibilities", attributes: ["branchId"] },
+        { model: models.GiftVoucherPrintEvent, as: "printEvents", attributes: ["id", "printKind", "printedAt", "branchId"], required: false },
+      ],
     });
     if (!v) return res.status(404).json({ success: false, message: "القسيمة غير موجودة" });
     return res.status(200).json({ success: true, ...v.toJSON(), data: v.toJSON() });
@@ -16400,22 +16478,81 @@ router.get("/gift-vouchers/:code", authMiddleware, async (req, res, next) => {
   }
 });
 
-// Gift voucher write workflows are read-compatible only for launch. Issue/redeem
-// needs a final approved liability/revenue policy, so deny before any mutation.
-router.post("/gift-vouchers/issue", authMiddleware, (req, res) =>
-  stableForbidden(
-    res,
-    "GIFT_VOUCHER_FINANCIAL_WORKFLOW_DISABLED",
-    "Gift voucher issue/redeem financial workflows are disabled until liability accounting is approved."
-  )
+// Purchased issue is a real-money event and therefore requires both the sales
+// business command and treasury authority. Account selection is always
+// resolved from the effective Branch, never from a request account code.
+router.post("/gift-vouchers/issue",
+  authMiddleware,
+  requireBusinessPermission("sales.create", { touch: true, operation: "gift_voucher.issue" }),
+  requireBusinessPermission("treasury.update", { touch: true, operation: "gift_voucher.issue" }),
+  async (req, res, next) => {
+    try {
+      const result = await runGiftVoucherIdempotentCommand(req, {
+        scope: "gift_voucher.issue",
+        work: async ({ transaction, idempotencyKey }) => {
+          const branch = await resolveAuthorizedBranch(req, req.body?.branchId || req.headers["x-branch-id"] || req.branchId, { required: true, transaction });
+          const settings = await settingsService.getCompanySettings(req.companyId, { transaction });
+          const actor = commandActorContext.fromRequest(req, { requiredPermission: "treasury.update + sales.create", requestedOperation: "gift_voucher.issue", authorizationResult: "allowed" });
+          return giftVoucherService.issuePurchasedVoucher({
+            models,
+            companyId: req.companyId,
+            branch,
+            actor,
+            input: req.body || {},
+            currency: settings.currency,
+            idempotencyKey,
+            transaction,
+          });
+        },
+      });
+      return res.status(result.statusCode).json(result.responseBody);
+    } catch (error) { return next(error); }
+  }
 );
 
+router.post("/gift-vouchers/:code/activate",
+  authMiddleware,
+  requireBusinessPermission("sales.create", { touch: true, operation: "gift_voucher.activate" }),
+  async (req, res, next) => {
+    try {
+      const result = await runGiftVoucherIdempotentCommand(req, {
+        scope: "gift_voucher.activate",
+        statusCode: 200,
+        work: async ({ transaction }) => {
+          const branch = await resolveAuthorizedBranch(req, req.body?.branchId || req.headers["x-branch-id"] || req.branchId, { required: true, transaction });
+          const actor = commandActorContext.fromRequest(req, { requiredPermission: "sales.create", requestedOperation: "gift_voucher.activate", authorizationResult: "allowed" });
+          const voucher = await giftVoucherService.activateVoucher({ models, companyId: req.companyId, branch, actor, voucherCode: req.params.code, transaction });
+          return { voucher };
+        },
+      });
+      return res.status(result.statusCode).json(result.responseBody);
+    } catch (error) { return next(error); }
+  }
+);
+
+router.post("/gift-vouchers/:code/print-events",
+  authMiddleware,
+  requireBusinessPermission("sales.print", { touch: true, operation: "gift_voucher.print" }),
+  async (req, res, next) => {
+    try {
+      const result = await runGiftVoucherIdempotentCommand(req, {
+        scope: "gift_voucher.print",
+        statusCode: 201,
+        work: async ({ transaction }) => {
+          const branch = await resolveAuthorizedBranch(req, req.body?.branchId || req.headers["x-branch-id"] || req.branchId, { required: true, transaction });
+          const actor = commandActorContext.fromRequest(req, { requiredPermission: "sales.print", requestedOperation: "gift_voucher.print", authorizationResult: "allowed" });
+          return giftVoucherService.recordPrintEvent({ models, companyId: req.companyId, branch, actor, voucherCode: req.params.code, transaction });
+        },
+      });
+      return res.status(result.statusCode).json(result.responseBody);
+    } catch (error) { return next(error); }
+  }
+);
+
+// A Voucher cannot be redeemed by a standalone endpoint: a redemption is an
+// exact settlement against one canonical Sales Invoice through POS checkout.
 router.post("/gift-vouchers/redeem", authMiddleware, (req, res) =>
-  stableForbidden(
-    res,
-    "GIFT_VOUCHER_FINANCIAL_WORKFLOW_DISABLED",
-    "Gift voucher issue/redeem financial workflows are disabled until liability accounting is approved."
-  )
+  stableForbidden(res, "GIFT_VOUCHER_DIRECT_REDEEM_DISABLED_USE_POS", "Redeem Gift Vouchers only through canonical POS checkout.")
 );
 
 // ─────────────────────────────────────────────────────────────────────────────

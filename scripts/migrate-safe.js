@@ -25,10 +25,12 @@ function nonEmpty(value) {
 }
 
 function parseArguments(argv = process.argv.slice(2)) {
-  const result = { execute: false, migrations: null, help: false };
+  const result = { execute: false, migrations: null, help: false, revert: false };
   for (const argument of argv) {
     if (argument === "--execute") {
       result.execute = true;
+    } else if (argument === "--revert") {
+      result.revert = true;
     } else if (argument === "--dry-run") {
       result.execute = false;
     } else if (argument === "--help" || argument === "-h") {
@@ -121,7 +123,7 @@ function migrationNamesEqual(actual, expected) {
 async function runSafeMigration({ env = process.env, argv = process.argv.slice(2), makeConnection = createSequelize, makeMigrator = createMigrationRunner, log = console.log } = {}) {
   const args = parseArguments(argv);
   if (args.help) {
-    log("Usage: DARFUS_MIGRATION_TARGET_MODE=disposable DB_NAME=<db> npm run db:migrate:safe -- --migrations=<file[,file]> [--execute]");
+    log("Usage: DARFUS_MIGRATION_TARGET_MODE=disposable DB_NAME=<db> npm run db:migrate:safe -- --migrations=<file[,file]> [--execute] [--revert]");
     return { help: true };
   }
 
@@ -142,6 +144,30 @@ async function runSafeMigration({ env = process.env, argv = process.argv.slice(2
     // This is intentionally after the actual-database guard. The migrator is
     // never constructed for a protected target without explicit approval.
     const migrator = makeMigrator(sequelize);
+    if (args.revert) {
+      // Reversion is a clone-only rehearsal operation. It is never a route to
+      // alter the official database, including one that has an approval flag.
+      if (target.targetMode !== "disposable" || actualDatabase === PROTECTED_DB_NAME) {
+        throw new MigrationSafetyError("OFFICIAL_DB_REVERT_NOT_AUTHORIZED");
+      }
+      if (!args.migrations?.length) {
+        throw new MigrationSafetyError("APPROVED_MIGRATION_LIST_REQUIRED");
+      }
+      const executedNames = (await migrator.executed()).map((migration) => path.basename(migration.file));
+      const trailingNames = executedNames.slice(-args.migrations.length);
+      log(`MIGRATION_EXECUTED_COUNT=${executedNames.length}`);
+      if (!migrationNamesEqual(trailingNames, args.migrations)) {
+        throw new MigrationSafetyError("UNEXPECTED_MIGRATION_REVERT_SET");
+      }
+      if (!args.execute) {
+        log("SAFE_MIGRATION_REVERT_DRY_RUN=YES");
+        return { database: actualDatabase, reverted: [], executed: false, dryRun: true };
+      }
+      await migrator.down({ migrations: args.migrations });
+      log(`SAFE_MIGRATION_REVERTED_COUNT=${args.migrations.length}`);
+      return { database: actualDatabase, reverted: args.migrations, executed: true, dryRun: false };
+    }
+
     const pendingNames = (await migrator.pending()).map((migration) => path.basename(migration.file));
     log(`MIGRATION_PENDING_COUNT=${pendingNames.length}`);
 
@@ -189,4 +215,3 @@ module.exports = {
   createMigrationRunner,
   runSafeMigration,
 };
-

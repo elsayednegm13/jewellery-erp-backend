@@ -36,9 +36,13 @@ test("GV-CONTRACT-03: one-time redemption forbids multi-transaction consumption"
   assert.match(rules, /One successful eligible redemption consumes the voucher once/);
 });
 
-test("GV-CONTRACT-04: code safety is recorded as a later requirement, not a migration", () => {
-  assert.match(authority, /globally unique, immutable, never reused/);
-  assert.match(authority, /no migration is created here/);
+test("GV-CONTRACT-04: code safety now has a dedicated, empty-legacy-data migration boundary", () => {
+  assert.match(authority, /Code identity \| Globally unique, immutable, never reused/);
+  const migration = read("backend/migrations/20260827010000-gift-voucher-purchased-foundation.js");
+  assert.match(migration, /GIFT_VOUCHER_LEGACY_DATA_MIGRATION_REQUIRED/);
+  assert.match(migration, /gift_vouchers_voucher_code_uq/);
+  assert.match(migration, /gift_vouchers_voucher_number_uq/);
+  assert.match(migration, /gift_vouchers_identity_immutable_trg/);
   assert.match(matrix, /GV-CONTRACT-04/);
 });
 
@@ -62,14 +66,14 @@ test("GV-CONTRACT-07: central allocation, atomicity, concurrency, and idempotenc
 });
 
 test("GV-CONTRACT-08: purchased issue has liability boundary without revenue or output VAT", () => {
-  assert.match(finance, /Dr resolved treasury; Cr resolved Gift Voucher Liability/);
+  assert.match(finance, /REAL_MONEY_PURCHASED_VOUCHER_ISSUE = DR_RESOLVED_TREASURY \+ CR_RESOLVED_GIFT_VOUCHER_LIABILITY/);
   assert.match(finance, /No Sales Revenue at issue/);
   assert.match(finance, /No Output VAT at issue/);
   assert.match(policy, /PURCHASED_VOUCHER_ISSUE_OUTPUT_VAT = NO/);
 });
 
 test("GV-CONTRACT-09: actual Sales Invoice and Tax Engine own redemption revenue and VAT", () => {
-  assert.match(finance, /actual Sales Invoice owns taxable base, revenue, and Output VAT/);
+  assert.match(finance, /Taxable base and Output VAT \| Tax Engine through the actual invoice/);
   assert.match(finance, /Voucher service does not calculate a second VAT/);
   assert.match(policy, /Payment Engine allocates the voucher amount against that invoice/);
 });
@@ -84,7 +88,7 @@ test("GV-CONTRACT-11: unresolved lifecycle financial actions fail closed", () =>
   assert.match(rules, /Expiry policy must be explicit/);
   assert.match(rules, /Cancellation policy must be explicit/);
   assert.match(rules, /No automatic breakage revenue/);
-  assert.match(finance, /Expiry, cancellation, breakage, refund, and write-off require separate approved policies/);
+  assert.match(finance, /Expiry, cancellation, breakage, refund, and write-off require separate approved\s+policies/);
 });
 
 test("GV-CONTRACT-12: print/reprint identity and read-only projection boundaries are explicit", () => {
@@ -93,21 +97,27 @@ test("GV-CONTRACT-12: print/reprint identity and read-only projection boundaries
   assert.match(projection, /gift_voucher:[\s\S]*?status: "SUPPORTED_LATER"[\s\S]*?adapter: null[\s\S]*?canPrint: false/);
 });
 
-test("GV-CONTRACT-13: security and scope remain fail-closed", () => {
+test("GV-CONTRACT-13: security, scope, and command idempotency remain fail-closed", () => {
   assert.match(authority, /Existing User\/Auth\/RBAC, company, branch, and audit controls/);
   const giftRoutes = route.slice(route.indexOf('router.get("/gift-vouchers"'), route.indexOf('// ─────────────────────────────────────────────────────────────────────────────\n// TREASURY', route.indexOf('router.get("/gift-vouchers"')));
-  assert.match(giftRoutes, /GIFT_VOUCHER_FINANCIAL_WORKFLOW_DISABLED/);
+  assert.match(giftRoutes, /requireBusinessPermission\("sales\.create"/);
+  assert.match(giftRoutes, /requireBusinessPermission\("treasury\.update"/);
+  assert.match(route, /Idempotency-Key is required/);
+  assert.match(giftRoutes, /resolveAuthorizedBranch/);
   assert.doesNotMatch(giftRoutes, /models\.GiftVoucher\.(create|update|destroy|bulkCreate)/);
 });
 
-test("GV-CONTRACT-14: issue and redeem routes deny before mutation", () => {
-  const issue = route.slice(route.indexOf('router.post("/gift-vouchers/issue"'), route.indexOf('router.post("/gift-vouchers/redeem"')));
-  const redeem = route.slice(route.indexOf('router.post("/gift-vouchers/redeem"'), route.indexOf('// ─────────────────────────────────────────────────────────────────────────────\n// TREASURY', route.indexOf('router.post("/gift-vouchers/redeem"')));
-  for (const snippet of [issue, redeem]) {
-    assert.match(snippet, /stableForbidden/);
-    assert.match(snippet, /GIFT_VOUCHER_FINANCIAL_WORKFLOW_DISABLED/);
-    assert.doesNotMatch(snippet, /models\.GiftVoucher\.(create|update|destroy|bulkCreate)/);
-  }
+test("GV-CONTRACT-14: issue is a guarded command and direct redemption stays disabled", () => {
+  const issueStart = route.indexOf('router.post("/gift-vouchers/issue"');
+  const redeemStart = route.indexOf('router.post("/gift-vouchers/redeem"');
+  const treasuryStart = route.indexOf('// ─────────────────────────────────────────────────────────────────────────────\n// TREASURY', redeemStart);
+  const issue = route.slice(issueStart, redeemStart);
+  const redeem = route.slice(redeemStart, treasuryStart);
+  assert.match(issue, /runGiftVoucherIdempotentCommand/);
+  assert.match(issue, /giftVoucherService\.issuePurchasedVoucher/);
+  assert.doesNotMatch(issue, /models\.GiftVoucher\.(create|update|destroy|bulkCreate)/);
+  assert.match(redeem, /stableForbidden/);
+  assert.match(redeem, /GIFT_VOUCHER_DIRECT_REDEEM_DISABLED_USE_POS/);
 });
 
 test("GV-CONTRACT-15: legacy direct account helpers are retained but not reachable authority", () => {

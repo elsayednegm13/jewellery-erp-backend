@@ -21,6 +21,11 @@ const Payment = sequelize.define("Payment", {
     allowNull: false,
     field: "invoice_id"
   },
+  giftVoucherId: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    field: "gift_voucher_id",
+  },
   paymentMethod: {
     type: DataTypes.STRING,
     allowNull: false,

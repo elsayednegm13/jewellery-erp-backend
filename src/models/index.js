@@ -71,6 +71,8 @@ const AccountingLock = require("./accountingLock.model");
 const CashRegisterSession = require("./cashRegisterSession.model");
 const Installment = require("./installment.model");
 const GiftVoucher = require("./giftVoucher.model");
+const GiftVoucherBranchEligibility = require("./giftVoucherBranchEligibility.model");
+const GiftVoucherPrintEvent = require("./giftVoucherPrintEvent.model");
 const GoldFixing = require("./goldFixing.model");
 const LoyaltyTransaction = require("./loyaltyTransaction.model");
 const Attendance = require("./attendance.model");
@@ -301,6 +303,26 @@ InvoicePrintEvent.belongsTo(EmployeeOperationalSession, { foreignKey: "operatorS
 
 Company.hasMany(GiftVoucher, { foreignKey: "companyId", as: "giftVouchers" });
 GiftVoucher.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(GiftVoucher, { foreignKey: "issueBranchId", as: "issuedGiftVouchers" });
+GiftVoucher.belongsTo(Branch, { foreignKey: "issueBranchId", as: "issueBranch" });
+Customer.hasMany(GiftVoucher, { foreignKey: "customerId", as: "giftVouchers" });
+GiftVoucher.belongsTo(Customer, { foreignKey: "customerId", as: "customer" });
+GiftVoucher.hasMany(GiftVoucherBranchEligibility, { foreignKey: "voucherId", as: "branchEligibilities" });
+GiftVoucherBranchEligibility.belongsTo(GiftVoucher, { foreignKey: "voucherId", as: "voucher" });
+Branch.hasMany(GiftVoucherBranchEligibility, { foreignKey: "branchId", as: "giftVoucherEligibilities" });
+GiftVoucherBranchEligibility.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+GiftVoucher.hasMany(GiftVoucherPrintEvent, { foreignKey: "voucherId", as: "printEvents" });
+GiftVoucherPrintEvent.belongsTo(GiftVoucher, { foreignKey: "voucherId", as: "voucher" });
+Company.hasMany(GiftVoucherPrintEvent, { foreignKey: "companyId", as: "giftVoucherPrintEvents" });
+GiftVoucherPrintEvent.belongsTo(Company, { foreignKey: "companyId", as: "company" });
+Branch.hasMany(GiftVoucherPrintEvent, { foreignKey: "branchId", as: "giftVoucherPrintEvents" });
+GiftVoucherPrintEvent.belongsTo(Branch, { foreignKey: "branchId", as: "branch" });
+User.hasMany(GiftVoucherPrintEvent, { foreignKey: "technicalUserId", as: "giftVoucherPrintEvents" });
+GiftVoucherPrintEvent.belongsTo(User, { foreignKey: "technicalUserId", as: "technicalUser" });
+Employee.hasMany(GiftVoucherPrintEvent, { foreignKey: "employeeId", as: "giftVoucherPrintEvents" });
+GiftVoucherPrintEvent.belongsTo(Employee, { foreignKey: "employeeId", as: "employee" });
+GiftVoucher.hasOne(Payment, { foreignKey: "giftVoucherId", as: "redemptionPayment" });
+Payment.belongsTo(GiftVoucher, { foreignKey: "giftVoucherId", as: "giftVoucher" });
 
 Company.hasMany(GoldFixing, { foreignKey: "companyId", as: "goldFixings" });
 GoldFixing.belongsTo(Company, { foreignKey: "companyId", as: "company" });
@@ -737,6 +759,8 @@ module.exports = {
   CashRegisterSession,
   Installment,
   GiftVoucher,
+  GiftVoucherBranchEligibility,
+  GiftVoucherPrintEvent,
   GoldFixing,
   LoyaltyTransaction,
   Attendance,
