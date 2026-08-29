@@ -94,7 +94,7 @@ test("GV-CONTRACT-11: unresolved lifecycle financial actions fail closed", () =>
 test("GV-CONTRACT-12: print/reprint identity and read-only projection boundaries are explicit", () => {
   assert.match(authority, /Print\/reprint \| Same voucher identity/);
   assert.match(authority, /Projection \| Read-only adapter\/projection only/);
-  assert.match(projection, /gift_voucher:[\s\S]*?status: "SUPPORTED_LATER"[\s\S]*?adapter: null[\s\S]*?canPrint: false/);
+  assert.match(projection, /gift_voucher:[\s\S]*?status: "SUPPORTED_NOW"[\s\S]*?adapter: "gift_voucher"[\s\S]*?canPrint: true/);
 });
 
 test("GV-CONTRACT-13: security, scope, and command idempotency remain fail-closed", () => {

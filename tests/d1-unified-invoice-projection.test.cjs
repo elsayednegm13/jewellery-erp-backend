@@ -58,7 +58,7 @@ function sampleInvoice(overrides = {}) {
 
 test("registry has the five Invoice adapters plus the active read-only CGP adapter", () => {
   assert.deepEqual(ACTIVE_INVOICE_TYPES, ["sale", "return", "exchange", "installment", "deposit"]);
-  assert.deepEqual(ACTIVE_PROJECTION_SOURCE_TYPES, [...ACTIVE_INVOICE_TYPES, "customer_gold_purchase"]);
+  assert.deepEqual(ACTIVE_PROJECTION_SOURCE_TYPES, [...ACTIVE_INVOICE_TYPES, "customer_gold_purchase", "gift_voucher"]);
   for (const sourceType of ACTIVE_INVOICE_TYPES) {
     assert.equal(SOURCE_REGISTRY[sourceType].status, "SUPPORTED_NOW");
     assert.equal(SOURCE_REGISTRY[sourceType].adapter, "invoice");
@@ -71,12 +71,8 @@ test("registry has the five Invoice adapters plus the active read-only CGP adapt
   assert.equal(SOURCE_REGISTRY.purchase_order.status, "NOT_AN_INVOICE");
 });
 
-test("unsupported source types fail closed with a stable error code", () => {
-  assert.throws(() => assertActiveSourceType("gift_voucher"), (error) => {
-    assert.equal(error.errorCode, PROJECTION_ERROR_CODES.UNSUPPORTED_SOURCE_TYPE);
-    assert.equal(error.statusCode, 422);
-    return true;
-  });
+test("unknown source types fail closed with a stable error code", () => {
+  assert.equal(assertActiveSourceType("gift_voucher").sourceType, "gift_voucher");
   assert.throws(() => assertActiveSourceType("unknown"), (error) => {
     assert.equal(error.errorCode, PROJECTION_ERROR_CODES.UNSUPPORTED_SOURCE_TYPE);
     return true;

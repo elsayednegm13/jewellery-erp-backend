@@ -13,7 +13,8 @@ const ACTIVE_INVOICE_TYPES = Object.freeze([
   "deposit",
 ]);
 const CGP_SOURCE_TYPE = "customer_gold_purchase";
-const ACTIVE_PROJECTION_SOURCE_TYPES = Object.freeze([...ACTIVE_INVOICE_TYPES, CGP_SOURCE_TYPE]);
+const GIFT_VOUCHER_SOURCE_TYPE = "gift_voucher";
+const ACTIVE_PROJECTION_SOURCE_TYPES = Object.freeze([...ACTIVE_INVOICE_TYPES, CGP_SOURCE_TYPE, GIFT_VOUCHER_SOURCE_TYPE]);
 
 const PROJECTION_ERROR_CODES = Object.freeze({
   UNSUPPORTED_SOURCE_TYPE: "PROJECTION_UNSUPPORTED_SOURCE_TYPE",
@@ -88,14 +89,13 @@ const SOURCE_REGISTRY = Object.freeze({
     sourceType: "gift_voucher",
     sourceTable: "gift_vouchers",
     sourceIdField: "gift_vouchers.id",
-    displayNumberField: "gift_vouchers.code",
+    displayNumberField: "gift_vouchers.voucher_number",
     businessModule: "gift_vouchers",
     partyType: "CUSTOMER",
-    status: "SUPPORTED_LATER",
-    adapter: null,
-    reason: "Gift Voucher is a separate liability source and has no proven invoice projection adapter in D1.",
-    canViewDetail: false,
-    canPrint: false,
+    status: "SUPPORTED_NOW",
+    adapter: "gift_voucher",
+    canViewDetail: true,
+    canPrint: true,
   }),
   customer_gold_purchase: Object.freeze({
     sourceType: "customer_gold_purchase",
@@ -218,6 +218,198 @@ function cgpDisplayStatus(document, payment = null) {
   if (businessStatus === "DRAFT") return "draft";
   if (payment?.paymentStatus === "PAID") return "closed";
   return "posted";
+}
+
+function giftVoucherDisplayStatus(voucher) {
+  const status = String(voucher?.status || "").trim().toLowerCase();
+  if (status === "cancelled") return "cancelled";
+  if (status === "redeemed" || status === "expired") return "closed";
+  return "posted";
+}
+
+function assertGiftVoucherShape(voucher) {
+  const row = plain(voucher);
+  if (!row.id || !row.companyId || !row.voucherNumber || !row.voucherCode || !row.issueBranchId
+      || row.faceValue === undefined || row.faceValue === null || !row.currency || !row.status || !row.issuedAt) {
+    throw projectionError(
+      PROJECTION_ERROR_CODES.SOURCE_MALFORMED,
+      422,
+      "The Gift Voucher source is incomplete for the read-only projection contract.",
+      { required: ["id", "companyId", "voucherNumber", "voucherCode", "issueBranchId", "faceValue", "currency", "status", "issuedAt"], sourceId: row.id || null },
+    );
+  }
+  return row;
+}
+
+function giftVoucherIsInBranchScope(voucher, branchId) {
+  if (!branchId) return true;
+  const row = plain(voucher);
+  if (String(row.issueBranchId) === String(branchId)) return true;
+  if (String(row.branchEligibilityMode || "").toUpperCase() === "ALL_BRANCHES") return true;
+  return (Array.isArray(row.branchEligibilities) ? row.branchEligibilities : [])
+    .some((eligibility) => String(plain(eligibility).branchId) === String(branchId));
+}
+
+function mapGiftVoucherPayment(payment) {
+  const row = plain(payment);
+  return {
+    id: asText(row.id),
+    invoiceId: asText(row.invoiceId),
+    giftVoucherId: asText(row.giftVoucherId),
+    method: asText(row.paymentMethod),
+    amount: asText(row.amount),
+    reference: asText(row.reference),
+    date: asText(row.date),
+    receivedByEmployeeId: asText(row.receivedByEmployeeId),
+  };
+}
+
+function mapGiftVoucherSummary(voucher) {
+  const row = assertGiftVoucherShape(voucher);
+  const customer = plain(row.customer);
+  const branch = plain(row.issueBranch);
+  const entry = SOURCE_REGISTRY[GIFT_VOUCHER_SOURCE_TYPE];
+  const faceValue = asText(row.faceValue);
+  return {
+    projectionReference: projectionReference(entry, row.id),
+    sourceType: GIFT_VOUCHER_SOURCE_TYPE,
+    sourceId: asText(row.id),
+    displayNumber: asText(row.voucherNumber),
+    voucherCode: asText(row.voucherCode),
+    documentDate: row.issuedAt || null,
+    companyId: asText(row.companyId),
+    branchId: asText(row.issueBranchId),
+    partyType: "CUSTOMER",
+    partyId: asText(row.customerId),
+    partyDisplayName: asText(customer.name),
+    branchName: asText(branch.name) || asText(row.issueBranchId),
+    currency: asText(row.currency),
+    subtotal: faceValue,
+    discountTotal: null,
+    taxTotal: null,
+    grandTotal: faceValue,
+    paymentStatus: asText(row.status),
+    businessStatus: asText(row.status),
+    displayStatus: giftVoucherDisplayStatus(row),
+    createdBy: asText(row.issuedByUserId),
+    createdAt: row.createdAt || row.issuedAt || null,
+    sourceModule: entry.businessModule,
+    operatorAttribution: {
+      createdByEmployeeId: asText(row.issuedByEmployeeId),
+      createdByEmployeeName: null,
+      finalizedByEmployeeId: null,
+      finalizedByEmployeeName: null,
+      createdByUserId: asText(row.issuedByUserId),
+    },
+    employeeName: null,
+    voucherStatus: asText(row.status),
+    issuedAt: row.issuedAt || null,
+    activatedAt: row.activatedAt || null,
+    redeemedAt: row.redeemedAt || null,
+    branchEligibilityMode: asText(row.branchEligibilityMode),
+    canViewDetail: entry.canViewDetail,
+    canPrint: entry.canPrint,
+  };
+}
+
+function mapGiftVoucherLine(voucher) {
+  const row = assertGiftVoucherShape(voucher);
+  return {
+    lineReference: asText(row.id),
+    itemReference: null,
+    assetReference: null,
+    description: "Gift Voucher",
+    quantity: 1,
+    unit: null,
+    unitPrice: asText(row.faceValue),
+    discount: null,
+    tax: null,
+    lineTotal: asText(row.faceValue),
+    weight: null,
+    karat: null,
+    makingCharge: null,
+    stoneValue: null,
+    assetLinks: [],
+  };
+}
+
+function buildGiftVoucherProjection({ voucher, payments = [], cashTransactions = [], journals = [], journalLines = [] }) {
+  const row = assertGiftVoucherShape(voucher);
+  const summary = mapGiftVoucherSummary(row);
+  const faceValue = asText(row.faceValue);
+  return {
+    summary,
+    lines: [mapGiftVoucherLine(row)],
+    taxSummary: {
+      subtotal: faceValue,
+      discount: null,
+      taxableBase: null,
+      tax: null,
+      vatRate: null,
+      grandTotal: faceValue,
+      source: "gift_vouchers.face_value",
+      snapshotStatus: "NOT_APPLICABLE_SOURCE",
+    },
+    paymentSummary: {
+      status: asText(row.status),
+      statusSource: "gift_vouchers.status",
+      rows: payments.map(mapGiftVoucherPayment),
+      cashTransactions: cashTransactions.map((transaction) => {
+        const item = plain(transaction);
+        return {
+          id: asText(item.id),
+          type: asText(item.type),
+          amount: asText(item.amount),
+          reference: asText(item.reference),
+          journalEntryId: asText(item.journalEntryId),
+          status: asText(item.status),
+          date: asText(item.date),
+        };
+      }),
+      installments: [],
+    },
+    sourceLinks: {
+      source: {
+        sourceTable: "gift_vouchers",
+        sourceType: GIFT_VOUCHER_SOURCE_TYPE,
+        sourceId: summary.sourceId,
+      },
+      accounting: mapAccountingLinks(journals, journalLines),
+      printEvents: (Array.isArray(row.printEvents) ? row.printEvents : []).map((event) => {
+        const item = plain(event);
+        return { id: asText(item.id), printKind: asText(item.printKind), printedAt: item.printedAt || null, branchId: asText(item.branchId) };
+      }),
+    },
+    voucher: {
+      id: summary.sourceId,
+      voucherNumber: summary.displayNumber,
+      voucherCode: summary.voucherCode,
+      faceValue,
+      currency: summary.currency,
+      status: summary.voucherStatus,
+      companyId: summary.companyId,
+      customerId: summary.partyId,
+      customerName: summary.partyDisplayName,
+      issueBranchId: summary.branchId,
+      branchName: summary.branchName,
+      branchEligibilityMode: summary.branchEligibilityMode,
+      issuedAt: summary.issuedAt,
+      activatedAt: summary.activatedAt,
+      redeemedAt: summary.redeemedAt,
+      printEvents: (Array.isArray(row.printEvents) ? row.printEvents : []).map((event) => {
+        const item = plain(event);
+        return { id: asText(item.id), printKind: asText(item.printKind), printedAt: item.printedAt || null, branchId: asText(item.branchId) };
+      }),
+    },
+    audit: {
+      sourceCreatedAt: row.createdAt || row.issuedAt || null,
+      sourceUpdatedAt: row.updatedAt || null,
+      createdByEmployeeId: asText(row.issuedByEmployeeId),
+      createdByUserId: asText(row.issuedByUserId),
+      taxSnapshotStatus: "NOT_APPLICABLE_SOURCE",
+      readOnly: true,
+    },
+  };
 }
 
 function assertInvoiceShape(invoice) {
@@ -425,6 +617,149 @@ function invoiceInclude() {
   ];
 }
 
+function giftVoucherInclude({ customerName } = {}) {
+  return [
+    {
+      model: models.Customer,
+      as: "customer",
+      attributes: ["id", "name"],
+      required: Boolean(customerName),
+      ...(customerName ? { where: { name: { [Op.iLike]: `%${customerName}%` } } } : {}),
+    },
+    { model: models.Branch, as: "issueBranch", attributes: ["id", "name"], required: false },
+    { model: models.GiftVoucherBranchEligibility, as: "branchEligibilities", attributes: ["branchId"], required: false },
+    { model: models.GiftVoucherPrintEvent, as: "printEvents", attributes: ["id", "printKind", "printedAt", "branchId"], required: false },
+  ];
+}
+
+async function giftVoucherBranchScopeIds({ companyId, branchId }) {
+  if (!branchId) return [];
+  const rows = await models.GiftVoucherBranchEligibility.findAll({
+    where: { branchId },
+    attributes: ["voucherId"],
+    raw: true,
+  });
+  return rows.map((row) => row.voucherId).filter(Boolean);
+}
+
+function applyGiftVoucherStatusFilter(where, status) {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "draft" || normalized === "returned") {
+    where.id = { [Op.in]: [] };
+  } else if (normalized === "cancelled") {
+    where.status = "cancelled";
+  } else if (normalized === "closed") {
+    where.status = { [Op.in]: ["redeemed", "expired"] };
+  } else if (normalized === "posted") {
+    where.status = { [Op.in]: ["issued", "active", "distributed"] };
+  }
+}
+
+async function listGiftVoucherSummaries({ companyId, branchId, filters = {} }) {
+  const page = Math.max(Number.parseInt(filters.page, 10) || 1, 1);
+  const pageSize = Math.min(Math.max(Number.parseInt(filters.pageSize, 10) || 25, 1), 100);
+  const requestedBranchId = String(filters.branchId || "").trim();
+  if (requestedBranchId && requestedBranchId !== "all" && branchId && requestedBranchId !== String(branchId)) {
+    throw projectionError(PROJECTION_ERROR_CODES.SOURCE_FORBIDDEN, 403, "The requested branch is outside the authorized branch scope.");
+  }
+
+  const where = { companyId };
+  if (branchId) {
+    const eligibleIds = await giftVoucherBranchScopeIds({ companyId, branchId });
+    const scope = [
+      { issueBranchId: branchId },
+      { branchEligibilityMode: "ALL_BRANCHES" },
+    ];
+    if (eligibleIds.length) scope.push({ id: { [Op.in]: eligibleIds } });
+    where[Op.or] = scope;
+  }
+  const search = String(filters.search || "").trim();
+  const conditions = [];
+  if (search) {
+    conditions.push({ [Op.or]: [
+      { id: { [Op.iLike]: `%${search}%` } },
+      { voucherNumber: { [Op.iLike]: `%${search}%` } },
+      { voucherCode: { [Op.iLike]: `%${search}%` } },
+    ] });
+  }
+  if (filters.partyId) conditions.push({ customerId: String(filters.partyId).trim() });
+  if (filters.employeeId) conditions.push({ issuedByEmployeeId: String(filters.employeeId).trim() });
+  if (filters.employee) {
+    const employeeSearch = String(filters.employee).trim();
+    const employees = await models.Employee.findAll({
+      where: { companyId, [Op.or]: [
+        { name: { [Op.iLike]: `%${employeeSearch}%` } },
+        { employeeCode: { [Op.iLike]: `%${employeeSearch}%` } },
+      ] },
+      attributes: ["id"],
+      raw: true,
+    });
+    conditions.push({ issuedByEmployeeId: { [Op.in]: employees.map((row) => row.id) } });
+  }
+  if (filters.status) applyGiftVoucherStatusFilter(where, filters.status);
+  const dateFrom = String(filters.dateFrom || "").trim();
+  const dateTo = String(filters.dateTo || "").trim();
+  if (dateFrom || dateTo) {
+    const range = {};
+    if (dateFrom) range[Op.gte] = dateFrom;
+    if (dateTo) range[Op.lte] = `${dateTo} 23:59:59.999`;
+    conditions.push({ issuedAt: range });
+  }
+  if (conditions.length) where[Op.and] = conditions;
+
+  const result = await models.GiftVoucher.findAndCountAll({
+    where,
+    include: giftVoucherInclude({ customerName: filters.partyName ? String(filters.partyName).trim() : "" }),
+    distinct: true,
+    order: [["createdAt", "DESC"], ["id", "DESC"]],
+    limit: pageSize,
+    offset: (page - 1) * pageSize,
+  });
+  return {
+    items: result.rows.map(mapGiftVoucherSummary),
+    page,
+    pageSize,
+    total: result.count,
+    totalPages: Math.max(Math.ceil(result.count / pageSize), 1),
+    filterContract: { sourceTypes: [GIFT_VOUCHER_SOURCE_TYPE], supportsEmployeeFilter: true, readOnly: true },
+  };
+}
+
+async function getGiftVoucherDetail({ sourceId, companyId, branchId }) {
+  const voucher = await models.GiftVoucher.findOne({
+    where: { id: sourceId, companyId },
+    include: giftVoucherInclude(),
+  });
+  if (!voucher) {
+    const existing = await models.GiftVoucher.findOne({ where: { id: sourceId }, attributes: ["id", "companyId"], raw: true });
+    if (existing && String(existing.companyId) !== String(companyId)) {
+      throw projectionError(PROJECTION_ERROR_CODES.SOURCE_FORBIDDEN, 403, "The Gift Voucher is outside the authorized company scope.");
+    }
+    throw projectionError(PROJECTION_ERROR_CODES.SOURCE_NOT_FOUND, 404, "The Gift Voucher was not found.");
+  }
+  if (!giftVoucherIsInBranchScope(voucher, branchId)) {
+    throw projectionError(PROJECTION_ERROR_CODES.SOURCE_FORBIDDEN, 403, "The Gift Voucher is outside the authorized branch scope.");
+  }
+  const [payments, cashTransactions, journals] = await Promise.all([
+    models.Payment.findAll({ where: { companyId, giftVoucherId: voucher.id }, raw: true }),
+    models.CashTransaction.findAll({ where: { companyId, reference: voucher.id }, raw: true }),
+    models.JournalEntry.findAll({
+      where: { companyId, sourceType: "gift_voucher_issue", sourceId: voucher.id },
+      attributes: ["id", "companyId", "branchId", "sourceType", "sourceId", "status", "totalDebit", "totalCredit"],
+      raw: true,
+    }),
+  ]);
+  const journalIds = journals.map((journal) => journal.id);
+  const journalLines = journalIds.length
+    ? await models.JournalLine.findAll({
+      where: { journalEntryId: { [Op.in]: journalIds } },
+      attributes: ["id", "journalEntryId", "accountCode", "debit", "credit"],
+      raw: true,
+    })
+    : [];
+  return buildGiftVoucherProjection({ voucher, payments, cashTransactions, journals, journalLines });
+}
+
 async function loadRelatedReadModel(invoice, companyId) {
   const items = Array.isArray(invoice.items) ? invoice.items : [];
   const itemIds = items.map((item) => item.id).filter((id) => id !== undefined && id !== null);
@@ -483,6 +818,9 @@ async function getDetail({ sourceType, sourceId, companyId, branchId }) {
   const entry = assertActiveSourceType(sourceType);
   if (entry.adapter === "customer_gold_purchase") {
     return getCgpDetail({ sourceId, companyId, branchId });
+  }
+  if (entry.adapter === "gift_voucher") {
+    return getGiftVoucherDetail({ sourceId, companyId, branchId });
   }
   const invoice = await findInvoiceForScope({ sourceType, sourceId, companyId, branchId });
   try {
@@ -998,30 +1336,46 @@ async function listSummaries({ companyId, branchId, filters = {} }) {
   const pageSize = Math.min(Math.max(Number.parseInt(filters.pageSize, 10) || 25, 1), 100);
   const types = normalizeTypeList(filters);
   const hasCgp = types.includes(CGP_SOURCE_TYPE);
+  const hasGiftVoucher = types.includes(GIFT_VOUCHER_SOURCE_TYPE);
   const invoiceTypes = types.filter((type) => ACTIVE_INVOICE_TYPES.includes(type));
 
-  if (hasCgp && invoiceTypes.length === 0) {
+  if (hasGiftVoucher && !hasCgp && invoiceTypes.length === 0) {
+    return listGiftVoucherSummaries({ companyId, branchId, filters: { ...filters, page, pageSize } });
+  }
+
+  if (hasCgp && !hasGiftVoucher && invoiceTypes.length === 0) {
     return listCgpSummaries({ companyId, branchId, filters: { ...filters, page, pageSize } });
   }
 
-  if (!hasCgp) {
+  if (!hasCgp && !hasGiftVoucher) {
     return listInvoiceSummaries({ companyId, branchId, filters: { ...filters, sourceTypes: invoiceTypes, page, pageSize } });
   }
 
   // Mixed reads are a compatibility surface for the future D2 search. Keep
   // both adapters read-only and paginate only after merging their stable
   // source projections; no source is copied into the other domain.
-  const invoiceData = await listInvoiceSummaries({
-    companyId,
-    branchId,
-    filters: { ...filters, sourceTypes: invoiceTypes, page: 1, pageSize: 100 },
-  });
-  const cgpData = await listCgpSummaries({
-    companyId,
-    branchId,
-    filters: { ...filters, page: 1, pageSize: 100 },
-  });
-  const items = [...invoiceData.items, ...cgpData.items]
+  const invoiceData = invoiceTypes.length
+    ? await listInvoiceSummaries({
+      companyId,
+      branchId,
+      filters: { ...filters, sourceTypes: invoiceTypes, page: 1, pageSize: 100 },
+    })
+    : { items: [], total: 0 };
+  const cgpData = hasCgp
+    ? await listCgpSummaries({
+      companyId,
+      branchId,
+      filters: { ...filters, page: 1, pageSize: 100 },
+    })
+    : { items: [], total: 0 };
+  const giftVoucherData = hasGiftVoucher
+    ? await listGiftVoucherSummaries({
+      companyId,
+      branchId,
+      filters: { ...filters, page: 1, pageSize: 100 },
+    })
+    : { items: [], total: 0 };
+  const items = [...invoiceData.items, ...cgpData.items, ...giftVoucherData.items]
     .sort((left, right) => {
       const dateOrder = String(right.createdAt || right.documentDate || "").localeCompare(String(left.createdAt || left.documentDate || ""));
       if (dateOrder !== 0) return dateOrder;
@@ -1034,8 +1388,8 @@ async function listSummaries({ companyId, branchId, filters = {} }) {
     items: paged,
     page,
     pageSize,
-    total: invoiceData.total + cgpData.total,
-    totalPages: Math.max(Math.ceil((invoiceData.total + cgpData.total) / pageSize), 1),
+    total: invoiceData.total + cgpData.total + giftVoucherData.total,
+    totalPages: Math.max(Math.ceil((invoiceData.total + cgpData.total + giftVoucherData.total) / pageSize), 1),
     filterContract: {
       sourceTypes: types,
       supportsEmployeeFilter: true,
@@ -1052,16 +1406,22 @@ module.exports = {
   ACTIVE_INVOICE_TYPES,
   ACTIVE_PROJECTION_SOURCE_TYPES,
   CGP_SOURCE_TYPE,
+  GIFT_VOUCHER_SOURCE_TYPE,
   PROJECTION_ERROR_CODES,
   SOURCE_REGISTRY,
   assertActiveSourceType,
   buildCgpProjection,
+  buildGiftVoucherProjection,
   buildInvoiceProjection,
   cgpDisplayStatus,
+  giftVoucherDisplayStatus,
   getCgpDetail,
   getDetail,
+  getGiftVoucherDetail,
   getSourceEntry,
   listCgpSummaries,
+  listGiftVoucherSummaries,
+  giftVoucherIsInBranchScope,
   listSummaries,
   mapCgpLine,
   mapCgpSummary,

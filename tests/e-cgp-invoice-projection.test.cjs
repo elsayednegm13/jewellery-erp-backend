@@ -59,12 +59,13 @@ function cgpFixture() {
   };
 }
 
-test("E activates exactly CGP while preserving future adapter boundaries", () => {
+test("E activates CGP and the authorized read-only Gift Voucher adapter while preserving future boundaries", () => {
   assert.ok(ACTIVE_PROJECTION_SOURCE_TYPES.includes("customer_gold_purchase"));
   assert.equal(SOURCE_REGISTRY.customer_gold_purchase.status, "SUPPORTED_NOW");
   assert.equal(SOURCE_REGISTRY.customer_gold_purchase.adapter, "customer_gold_purchase");
-  assert.equal(SOURCE_REGISTRY.gift_voucher.status, "SUPPORTED_LATER");
-  assert.equal(SOURCE_REGISTRY.gift_voucher.adapter, null);
+  assert.ok(ACTIVE_PROJECTION_SOURCE_TYPES.includes("gift_voucher"));
+  assert.equal(SOURCE_REGISTRY.gift_voucher.status, "SUPPORTED_NOW");
+  assert.equal(SOURCE_REGISTRY.gift_voucher.adapter, "gift_voucher");
   assert.equal(SOURCE_REGISTRY.purchase_order.status, "NOT_AN_INVOICE");
   assert.equal(SOURCE_REGISTRY.repair.adapter, null);
 });
