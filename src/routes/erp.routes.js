@@ -26,6 +26,7 @@ const idempotencyService = require("../services/idempotency.service");
 const customerCreditService = require("../services/customer-credit.service");
 const customerPosSummaryService = require("../services/customer-pos-summary.service");
 const { normalizePhone } = require("../services/customer-phone.service");
+const customerDuplicateDetection = require("../services/customer-duplicate-detection.service");
 const { buildCustomerContactSnapshot, copyInvoiceContactSnapshot } = require("../services/invoice-contact-snapshot.service");
 const installmentOverpaymentReclassificationService = require("../services/installment-overpayment-reclassification.service");
 const installmentPrecisionRemediationService = require("../services/installment-precision-remediation.service");
@@ -5293,7 +5294,32 @@ router.get("/pos/customer-lookup", authMiddleware, requireAnyBusinessPermission(
     return next(error);
   }
 });
-setupCrud("customers", models.Customer, ["name", "phone", "email"]);
+
+// Read-only pre-create duplicate review. It is intentionally registered before
+// the generic /customers/:id route so "duplicate-check" cannot be interpreted
+// as a customer ID. The query is company-wide, while branch membership remains
+// a relationship summary and never creates a second Customer identity.
+router.get("/customers/duplicate-check", authMiddleware, requireAnyBusinessPermission(["customers.view", "customers.create"]), async (req, res, next) => {
+  try {
+    const result = await customerDuplicateDetection.findPotentialDuplicates({
+      models,
+      companyId: req.companyId,
+      input: { name: req.query.name, phone: req.query.phone },
+    });
+    return res.status(200).json({
+      success: true,
+      data: {
+        candidates: result.candidates,
+        signalsEvaluated: result.signalsEvaluated,
+        hardMatchPresent: result.hardDuplicateCandidates.length > 0,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+setupCrud("customers", models.Customer, ["id", "name", "phone", "email"]);
 
 // One selected-Customer projection only. Do not enrich every /customers list
 // row with customer-credit work, and do not own any financial calculation here.

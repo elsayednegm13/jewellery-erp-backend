@@ -5,6 +5,7 @@ const { emitEntityChanged } = require("../services/realtime-helper.service");
 const models = require("../models");
 const { AppError } = require("../utils/errors");
 const { sanitizeCustomerMutation } = require("../services/customer-address.service");
+const customerDuplicateDetection = require("../services/customer-duplicate-detection.service");
 
 // Sentinel values used by front-end filter dropdowns to mean "no filter"
 // (e.g. an "All" option, or an empty selection). They must never reach the
@@ -191,6 +192,38 @@ function isUniqueConstraintError(error) {
   return error?.name === "SequelizeUniqueConstraintError";
 }
 
+const CUSTOMER_PHONE_UNIQUE_INDEX = "customers_company_id_canonical_phone_uq";
+
+function uniqueConstraintName(error) {
+  return [
+    error?.constraint,
+    error?.parent?.constraint,
+    error?.original?.constraint,
+  ].find((value) => value) || null;
+}
+
+function isCustomerPhoneUniqueConstraintError(error) {
+  const constraint = uniqueConstraintName(error);
+  const postgresUniqueViolation = [error?.code, error?.parent?.code, error?.original?.code]
+    .some((value) => value === "23505");
+  return (isUniqueConstraintError(error) || postgresUniqueViolation)
+    && constraint === CUSTOMER_PHONE_UNIQUE_INDEX;
+}
+
+function customerPhoneConflictError(source = "DATABASE_UNIQUE_INDEX") {
+  const conflict = new AppError(
+    "A customer with this phone number already exists. Review the existing customer before creating another identity.",
+    409,
+    "CUSTOMER_DUPLICATE_PHONE_REVIEW_REQUIRED",
+    { phone: ["A customer with this phone number already exists."] },
+  );
+  conflict.details = {
+    matchType: "EXACT_NORMALIZED_PHONE_MATCH",
+    source,
+  };
+  return conflict;
+}
+
 async function generateScopedSequentialId(model, companyId) {
   const format = GENERATED_ID_FORMATS[model.name];
   if (!format) {
@@ -263,11 +296,48 @@ class ErpController {
   createCustomerWithContract = async (req, res, next) => {
     let transaction = null;
     try {
-      transaction = await models.sequelize.transaction();
       const payload = sanitizeCustomerMutation({ ...(req.body || {}), companyId: req.companyId });
       payload.companyId = req.companyId;
+      // The existing local repository already treats an exact normalized phone
+      // match as a duplicate. Keep that proven signal server-authoritative and
+      // reject before opening a transaction or writing any business row. Name
+      // matches remain review-only because the Owner has not approved a hard
+      // name uniqueness rule.
+      const duplicateResult = await customerDuplicateDetection.findPotentialDuplicates({
+        models,
+        companyId: req.companyId,
+        input: payload,
+      });
+      if (duplicateResult.hardDuplicateCandidates.length > 0) {
+        const conflict = new AppError(
+          "A customer with this phone number already exists. Review the existing customer before creating another identity.",
+          409,
+          "CUSTOMER_DUPLICATE_PHONE_REVIEW_REQUIRED",
+          { phone: ["A customer with this phone number already exists."] },
+        );
+        conflict.details = {
+          candidateCount: duplicateResult.hardDuplicateCandidates.length,
+          matchType: "EXACT_NORMALIZED_PHONE_MATCH",
+        };
+        throw conflict;
+      }
+
+      transaction = await models.sequelize.transaction();
       const effectiveBranchId = applyBranchWriteScope(this.model, req, payload);
       const shouldGenerateStringId = !payload.id && this.model.rawAttributes.id && this.model.rawAttributes.id.type.constructor.name === "STRING";
+      if (this.model.name === "Customer" && shouldGenerateStringId) {
+        // Customer IDs are server-generated from a company-scoped sequential
+        // scan rather than a database sequence. Serialize that scan on the
+        // tenant row so concurrent creates cannot collide on the ID first and
+        // abort the transaction before the phone uniqueness invariant reports
+        // the intended stable duplicate contract.
+        await models.Company.findOne({
+          where: { id: req.companyId },
+          attributes: ["id"],
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        });
+      }
       const attempts = shouldGenerateStringId ? GENERATED_ID_CREATE_ATTEMPTS : 1;
       let newItem;
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -276,6 +346,9 @@ class ErpController {
           newItem = await this.model.create(payload, { transaction });
           break;
         } catch (error) {
+          if (isCustomerPhoneUniqueConstraintError(error)) {
+            throw customerPhoneConflictError("DATABASE_UNIQUE_INDEX");
+          }
           if (!shouldGenerateStringId || !isUniqueConstraintError(error) || attempt === attempts) throw error;
           delete payload.id;
         }
@@ -298,6 +371,9 @@ class ErpController {
       return res.status(201).json({ success: true, data: newItem });
     } catch (error) {
       if (transaction) await transaction.rollback().catch(() => {});
+      if (isCustomerPhoneUniqueConstraintError(error)) {
+        return next(customerPhoneConflictError("DATABASE_UNIQUE_INDEX"));
+      }
       return next(error);
     }
   };
@@ -305,6 +381,20 @@ class ErpController {
   updateCustomerWithContract = async (req, res, next) => {
     let transaction = null;
     try {
+      const updateBody = sanitizeCustomerMutation(req.body || {});
+      applyBranchWriteScope(this.model, req, updateBody);
+      if (Object.prototype.hasOwnProperty.call(updateBody, "phone")) {
+        const duplicateResult = await customerDuplicateDetection.findPotentialDuplicates({
+          models,
+          companyId: req.companyId,
+          input: updateBody,
+          excludeCustomerId: req.params.id,
+        });
+        if (duplicateResult.hardDuplicateCandidates.length > 0) {
+          throw customerPhoneConflictError("APPLICATION_PRECHECK");
+        }
+      }
+
       const where = {
         id: req.params.id,
         ...(this.model.rawAttributes.companyId ? { companyId: req.companyId } : {}),
@@ -325,8 +415,6 @@ class ErpController {
       }
 
       const originalState = item.toJSON();
-      const updateBody = sanitizeCustomerMutation(req.body || {});
-      applyBranchWriteScope(this.model, req, updateBody);
       await item.update(updateBody, { transaction });
       const updatedState = item.toJSON();
       await this.logAudit(req, "UPDATE", item.id, originalState, updatedState, transaction);
@@ -337,6 +425,9 @@ class ErpController {
       return res.status(200).json({ success: true, data: item });
     } catch (error) {
       if (transaction) await transaction.rollback().catch(() => {});
+      if (isCustomerPhoneUniqueConstraintError(error)) {
+        return next(customerPhoneConflictError("DATABASE_UNIQUE_INDEX"));
+      }
       return next(error);
     }
   };
