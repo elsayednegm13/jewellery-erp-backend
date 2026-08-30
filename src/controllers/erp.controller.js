@@ -5,6 +5,7 @@ const { emitEntityChanged } = require("../services/realtime-helper.service");
 const models = require("../models");
 const { AppError } = require("../utils/errors");
 const { sanitizeCustomerMutation } = require("../services/customer-address.service");
+const { assertCanonicalCustomerPhone } = require("../services/customer-phone.service");
 const customerDuplicateDetection = require("../services/customer-duplicate-detection.service");
 
 // Sentinel values used by front-end filter dropdowns to mean "no filter"
@@ -298,6 +299,10 @@ class ErpController {
     try {
       const payload = sanitizeCustomerMutation({ ...(req.body || {}), companyId: req.companyId });
       payload.companyId = req.companyId;
+      const phone = assertCanonicalCustomerPhone(payload.phone, payload.phoneCountry);
+      payload.phone = phone.rawPhone;
+      payload.phoneCountry = phone.phoneCountry;
+      payload.canonicalPhone = phone.canonicalPhone;
       // The existing local repository already treats an exact normalized phone
       // match as a duplicate. Keep that proven signal server-authoritative and
       // reject before opening a transaction or writing any business row. Name
@@ -306,7 +311,7 @@ class ErpController {
       const duplicateResult = await customerDuplicateDetection.findPotentialDuplicates({
         models,
         companyId: req.companyId,
-        input: payload,
+        input: { ...payload, canonicalPhone: phone.canonicalPhone },
       });
       if (duplicateResult.hardDuplicateCandidates.length > 0) {
         const conflict = new AppError(
@@ -383,11 +388,31 @@ class ErpController {
     try {
       const updateBody = sanitizeCustomerMutation(req.body || {});
       applyBranchWriteScope(this.model, req, updateBody);
-      if (Object.prototype.hasOwnProperty.call(updateBody, "phone")) {
+      const hasPhoneInput = Object.prototype.hasOwnProperty.call(updateBody, "phone");
+      const hasPhoneCountryInput = Object.prototype.hasOwnProperty.call(updateBody, "phoneCountry");
+      if (hasPhoneInput || hasPhoneCountryInput) {
+        const existingWhere = {
+          id: req.params.id,
+          ...(this.model.rawAttributes.companyId ? { companyId: req.companyId } : {}),
+        };
+        await applyBranchReadScope(this.model, req, existingWhere);
+        const existing = await this.model.findOne({
+          where: existingWhere,
+          attributes: ["id", "phone", "phoneCountry", "canonicalPhone"],
+        });
+        if (!existing) throw new NotFoundError(`${this.model.name} record not found.`);
+
+        const phone = assertCanonicalCustomerPhone(
+          hasPhoneInput ? updateBody.phone : existing.phone,
+          hasPhoneCountryInput ? updateBody.phoneCountry : existing.phoneCountry,
+        );
+        updateBody.phone = phone.rawPhone;
+        updateBody.phoneCountry = phone.phoneCountry;
+        updateBody.canonicalPhone = phone.canonicalPhone;
         const duplicateResult = await customerDuplicateDetection.findPotentialDuplicates({
           models,
           companyId: req.companyId,
-          input: updateBody,
+          input: { ...updateBody, canonicalPhone: phone.canonicalPhone },
           excludeCustomerId: req.params.id,
         });
         if (duplicateResult.hardDuplicateCandidates.length > 0) {

@@ -25,7 +25,7 @@ const notificationService = require("../services/notification.service");
 const idempotencyService = require("../services/idempotency.service");
 const customerCreditService = require("../services/customer-credit.service");
 const customerPosSummaryService = require("../services/customer-pos-summary.service");
-const { normalizePhone } = require("../services/customer-phone.service");
+const { assertCanonicalCustomerPhone, normalizePhoneCountry } = require("../services/customer-phone.service");
 const customerDuplicateDetection = require("../services/customer-duplicate-detection.service");
 const { buildCustomerContactSnapshot, copyInvoiceContactSnapshot } = require("../services/invoice-contact-snapshot.service");
 const installmentOverpaymentReclassificationService = require("../services/installment-overpayment-reclassification.service");
@@ -5259,10 +5259,10 @@ router.post("/employees/:id/reactivate", authMiddleware, requireAnyPermission(em
 // but it never creates or mutates a customer at transaction time.
 router.get("/pos/customer-lookup", authMiddleware, requireAnyBusinessPermission(["pos.view", "pos.sell"]), async (req, res, next) => {
   try {
-    const normalizedPhone = normalizePhone(req.query.phone);
-    if (!normalizedPhone) {
+    if (!req.query.phone || !String(req.query.phone).trim()) {
       throw new AppError("Customer phone is required.", 422, "CUSTOMER_PHONE_REQUIRED");
     }
+    const phone = assertCanonicalCustomerPhone(req.query.phone, req.query.phoneCountry);
 
     const rows = await models.sequelize.query(`
       SELECT id, name, phone, email, tier, status
@@ -5270,11 +5270,11 @@ router.get("/pos/customer-lookup", authMiddleware, requireAnyBusinessPermission(
       WHERE company_id = :companyId
         AND status = 'active'
         AND deleted_at IS NULL
-        AND ltrim(regexp_replace(phone, '[^0-9]', '', 'g'), '0') = :normalizedPhone
+        AND canonical_phone = :canonicalPhone
       ORDER BY created_at ASC, id ASC
       LIMIT 2
     `, {
-      replacements: { companyId: req.companyId, normalizedPhone },
+      replacements: { companyId: req.companyId, canonicalPhone: phone.canonicalPhone },
       type: require("sequelize").QueryTypes.SELECT,
     });
 
@@ -5301,10 +5301,17 @@ router.get("/pos/customer-lookup", authMiddleware, requireAnyBusinessPermission(
 // a relationship summary and never creates a second Customer identity.
 router.get("/customers/duplicate-check", authMiddleware, requireAnyBusinessPermission(["customers.view", "customers.create"]), async (req, res, next) => {
   try {
+    const input = { name: req.query.name };
+    if (req.query.phone !== undefined) {
+      const phone = assertCanonicalCustomerPhone(req.query.phone, req.query.phoneCountry);
+      input.phone = phone.rawPhone;
+      input.phoneCountry = phone.phoneCountry;
+      input.canonicalPhone = phone.canonicalPhone;
+    }
     const result = await customerDuplicateDetection.findPotentialDuplicates({
       models,
       companyId: req.companyId,
-      input: { name: req.query.name, phone: req.query.phone },
+      input,
     });
     return res.status(200).json({
       success: true,
@@ -10092,6 +10099,13 @@ router.patch("/settings", authMiddleware, authorizeSettingsUpdate, async (req, r
       return reject("goldCostOverridePermission must be a non-empty string");
     }
 
+    if (body.defaultPhoneCountry !== undefined) {
+      const normalizedDefaultPhoneCountry = normalizePhoneCountry(body.defaultPhoneCountry);
+      if (body.defaultPhoneCountry !== "" && !normalizedDefaultPhoneCountry) {
+        return reject("defaultPhoneCountry must be a supported two-letter country code or empty");
+      }
+    }
+
     if (body.reservationExpiryWarningHours !== undefined) {
       const n = Number(body.reservationExpiryWarningHours);
       if (body.reservationExpiryWarningHours === "" || body.reservationExpiryWarningHours === null || !Number.isInteger(n) || n <= 0 || n > 8760) {
@@ -10100,8 +10114,11 @@ router.patch("/settings", authMiddleware, authorizeSettingsUpdate, async (req, r
     }
 
     const companyUpdates = {};
-    for (const key of ["businessName", "logo", "currency", "branchName", "taxNumber", "phone", "email", "website", "country", "city", "region", "address1", "address2", "postalCode", "commercialRegister"]) {
+    for (const key of ["businessName", "logo", "currency", "branchName", "taxNumber", "phone", "email", "website", "country", "defaultPhoneCountry", "city", "region", "address1", "address2", "postalCode", "commercialRegister"]) {
       if (body[key] !== undefined) companyUpdates[key] = body[key];
+    }
+    if (companyUpdates.defaultPhoneCountry !== undefined) {
+      companyUpdates.defaultPhoneCountry = normalizePhoneCountry(companyUpdates.defaultPhoneCountry) || null;
     }
     if (companyUpdates.currency !== undefined) {
       const { normalizeCurrencyCode } = require("../utils/currency");

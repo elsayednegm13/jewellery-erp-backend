@@ -147,7 +147,8 @@ test("customer create UI performs review before create and exposes an explicit r
 test("phone uniqueness migration preflights invalid/colliding data and creates a deterministic functional unique index", () => {
   assert.match(migrationSource, /CUSTOMER_PHONE_CANONICALIZATION_INVALID_DATA/);
   assert.match(migrationSource, /CUSTOMER_PHONE_CANONICALIZATION_DUPLICATES_EXIST/);
-  assert.match(migrationSource, /CREATE UNIQUE INDEX IF NOT EXISTS/);
+  assert.match(migrationSource, /CREATE UNIQUE INDEX/);
+  assert.doesNotMatch(migrationSource, /CREATE UNIQUE INDEX IF NOT EXISTS/);
   assert.match(migrationSource, /customers_company_id_canonical_phone_uq/);
   assert.match(migrationSource, /ltrim\(regexp_replace\(phone, '\[\^0-9\]', '', 'g'\), '0'\)/);
   assert.match(migrationSource, /DROP INDEX IF EXISTS/);

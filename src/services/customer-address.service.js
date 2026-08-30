@@ -3,7 +3,7 @@ const { AppError } = require("../utils/errors");
 const ADDRESS_KEYS = new Set(["line1", "line2", "city", "country", "postalCode", "isPrimary"]);
 const ADDRESS_TEXT_KEYS = ["line1", "line2", "city", "country", "postalCode"];
 const PROFILE_MUTATION_FIELDS = new Set([
-  "name", "phone", "email", "tier", "notes", "nationality", "addresses",
+  "name", "phone", "phoneCountry", "email", "tier", "notes", "nationality", "addresses",
 ]);
 
 function addressError(message, fieldErrors = null, code = "INVALID_CUSTOMER_ADDRESS") {

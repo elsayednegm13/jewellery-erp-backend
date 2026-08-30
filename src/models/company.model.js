@@ -23,6 +23,11 @@ const Company = sequelize.define("Company", {
   country: {
     type: DataTypes.STRING
   },
+  defaultPhoneCountry: {
+    type: DataTypes.STRING(2),
+    allowNull: true,
+    field: "default_phone_country"
+  },
   currency: {
     type: DataTypes.STRING,
     defaultValue: "AED"

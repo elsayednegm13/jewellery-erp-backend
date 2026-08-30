@@ -13,17 +13,26 @@ function normalizeName(value) {
 }
 
 function buildDuplicateSignals(input = {}) {
-  const phone = normalizePhone(input.phone);
+  const canonicalPhone = input.canonicalPhone ? String(input.canonicalPhone).trim() : "";
+  const phone = canonicalPhone ? "" : normalizePhone(input.phone);
   const name = normalizeName(input.name);
   const signalsEvaluated = [];
-  if (phone) signalsEvaluated.push("PHONE_NORMALIZED");
+  if (canonicalPhone) signalsEvaluated.push("PHONE_CANONICAL");
+  else if (phone) signalsEvaluated.push("PHONE_NORMALIZED");
   if (name) signalsEvaluated.push("NAME_CASEFOLDED");
-  return { phone, name, signalsEvaluated };
+  return {
+    ...(canonicalPhone ? { canonicalPhone } : {}),
+    phone,
+    name,
+    signalsEvaluated,
+  };
 }
 
 function classifyCandidate(row, signals) {
   const matchReasons = [];
-  if (signals.phone && normalizePhone(row.phone) === signals.phone) {
+  if (signals.canonicalPhone && String(row.canonicalPhone || "") === signals.canonicalPhone) {
+    matchReasons.push(PHONE_MATCH);
+  } else if (signals.phone && normalizePhone(row.phone) === signals.phone) {
     matchReasons.push(PHONE_MATCH);
   }
   if (signals.name && normalizeName(row.name) === signals.name) {
@@ -80,7 +89,12 @@ async function findPotentialDuplicates({ models, companyId, input = {}, excludeC
   const replacements = { companyId };
   const exclusion = excludeCustomerId ? "AND c.id <> :excludeCustomerId" : "";
   if (excludeCustomerId) replacements.excludeCustomerId = String(excludeCustomerId);
-  if (signals.phone) {
+  if (signals.canonicalPhone) {
+    predicates.push("c.canonical_phone = :canonicalPhone");
+    replacements.canonicalPhone = signals.canonicalPhone;
+  } else if (signals.phone) {
+    // Compatibility branch for old callers/tests only. All current customer
+    // create/update/duplicate-check production callers pass canonicalPhone.
     predicates.push("ltrim(regexp_replace(c.phone, '[^0-9]', '', 'g'), '0') = :normalizedPhone");
     replacements.normalizedPhone = signals.phone;
   }
@@ -94,6 +108,7 @@ async function findPotentialDuplicates({ models, companyId, input = {}, excludeC
       c.id,
       c.name,
       c.phone,
+      c.canonical_phone AS "canonicalPhone",
       c.email,
       c.status,
       c.tier,
@@ -112,7 +127,7 @@ async function findPotentialDuplicates({ models, companyId, input = {}, excludeC
       AND c.deleted_at IS NULL
       ${exclusion}
       AND (${predicates.join(" OR ")})
-    GROUP BY c.id, c.name, c.phone, c.email, c.status, c.tier
+    GROUP BY c.id, c.name, c.phone, c.canonical_phone, c.email, c.status, c.tier
     ORDER BY c.id ASC
     LIMIT ${MAX_CANDIDATES}
   `, { replacements, type: QueryTypes.SELECT });

@@ -45,6 +45,7 @@ const serializeCompany = (company) => company ? {
   workspace: company.workspace,
   companySize: company.companySize || "",
   country: company.country || "",
+  defaultPhoneCountry: company.defaultPhoneCountry || "",
   currency: company.currency || "AED",
   city: company.city || "",
   region: company.region || "",

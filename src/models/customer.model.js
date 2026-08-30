@@ -19,6 +19,16 @@ const Customer = sequelize.define("Customer", {
     type: DataTypes.STRING,
     allowNull: false
   },
+  phoneCountry: {
+    type: DataTypes.STRING(2),
+    allowNull: true,
+    field: "phone_country"
+  },
+  canonicalPhone: {
+    type: DataTypes.STRING(32),
+    allowNull: true,
+    field: "canonical_phone"
+  },
   email: {
     type: DataTypes.STRING
   },

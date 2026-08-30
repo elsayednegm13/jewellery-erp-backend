@@ -34,7 +34,7 @@ module.exports = {
 
       await queryInterface.sequelize.query(
         `
-          CREATE UNIQUE INDEX IF NOT EXISTS "${INDEX_NAME}"
+          CREATE UNIQUE INDEX "${INDEX_NAME}"
           ON customers (company_id, (${CANONICAL_PHONE_SQL}))
         `,
         { transaction },
@@ -46,4 +46,3 @@ module.exports = {
     await queryInterface.sequelize.query(`DROP INDEX IF EXISTS "${INDEX_NAME}"`);
   },
 };
-
