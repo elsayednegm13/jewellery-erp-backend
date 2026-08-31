@@ -25,7 +25,11 @@ const notificationService = require("../services/notification.service");
 const idempotencyService = require("../services/idempotency.service");
 const customerCreditService = require("../services/customer-credit.service");
 const customerPosSummaryService = require("../services/customer-pos-summary.service");
-const { assertCanonicalCustomerPhone, normalizePhoneCountry } = require("../services/customer-phone.service");
+const {
+  assertCanonicalCustomerPhone,
+  normalizePhoneCountry,
+  normalizeCustomerPhoneSearchInput,
+} = require("../services/customer-phone.service");
 const customerDuplicateDetection = require("../services/customer-duplicate-detection.service");
 const { buildCustomerContactSnapshot, copyInvoiceContactSnapshot } = require("../services/invoice-contact-snapshot.service");
 const installmentOverpaymentReclassificationService = require("../services/installment-overpayment-reclassification.service");
@@ -5320,6 +5324,126 @@ router.get("/customers/duplicate-check", authMiddleware, requireAnyBusinessPermi
         signalsEvaluated: result.signalsEvaluated,
         hardMatchPresent: result.hardDuplicateCandidates.length > 0,
       },
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+function escapeCustomerSearchLike(value) {
+  return String(value).replace(/[\\%_]/g, "\\$&");
+}
+
+// Bounded, read-only POS customer selection projection. Customer identity and
+// phone authority stay in the Customer model; this route only searches active
+// customers already related to the authenticated company/branch.
+router.get("/pos/customers/search", authMiddleware, requireAnyBusinessPermission(["pos.view", "pos.sell"]), async (req, res, next) => {
+  try {
+    const branchId = await resolveAuthorizedBranchId(
+      req,
+      req.query.branchId || req.headers["x-branch-id"],
+      { required: true },
+    );
+    const query = String(req.query.query || req.query.search || "").trim();
+    const requestedLimit = Number(req.query.limit || 20);
+    const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? Math.trunc(requestedLimit) : 20, 1), 20);
+    const emptyResult = () => ({ success: true, items: [], data: { items: [], total: 0, limit, query, branchId } });
+
+    // Do not turn an empty/short query into a customer data dump.
+    if (query.length < 2) return res.status(200).json(emptyResult());
+
+    const phoneInput = normalizeCustomerPhoneSearchInput(query);
+    const likePattern = `%${escapeCustomerSearchLike(query)}%`;
+    const replacements = {
+      companyId: req.companyId,
+      branchId,
+      query,
+      likePattern,
+      canonicalPhone: phoneInput.canonicalPhone,
+    };
+    const matchClauses = [
+      "c.name ILIKE :likePattern ESCAPE '\\'",
+      "CAST(c.id AS TEXT) ILIKE :likePattern ESCAPE '\\'",
+      "COALESCE(c.phone, '') ILIKE :likePattern ESCAPE '\\'",
+      "COALESCE(c.canonical_phone, '') ILIKE :likePattern ESCAPE '\\'",
+    ];
+    if (phoneInput.digits.length >= 2) {
+      replacements.digitsPattern = `%${escapeCustomerSearchLike(phoneInput.digits)}%`;
+      matchClauses.push("regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g') ILIKE :digitsPattern ESCAPE '\\'");
+      matchClauses.push("regexp_replace(COALESCE(c.canonical_phone, ''), '[^0-9]', '', 'g') ILIKE :digitsPattern ESCAPE '\\'");
+    }
+    if (phoneInput.canonicalPhone) matchClauses.push("c.canonical_phone = :canonicalPhone");
+
+    // An exact canonical phone must remain unambiguous at company scope even
+    // when only one of the matching rows is related to the selected branch.
+    if (phoneInput.isExactCanonical) {
+      const exactCompanyRows = await models.sequelize.query(`
+        SELECT id
+        FROM customers
+        WHERE company_id = :companyId
+          AND status = 'active'
+          AND deleted_at IS NULL
+          AND canonical_phone = :canonicalPhone
+        LIMIT 2
+      `, {
+        replacements,
+        type: require("sequelize").QueryTypes.SELECT,
+      });
+      if (exactCompanyRows.length > 1) {
+        throw new AppError("More than one active customer matches this phone number.", 409, "CUSTOMER_PHONE_AMBIGUOUS");
+      }
+    }
+
+    const rows = await models.sequelize.query(`
+      SELECT
+        c.id,
+        c.name,
+        c.phone,
+        c.phone_country AS "phoneCountry",
+        CAST(:branchId AS VARCHAR) AS "branchId"
+      FROM customers c
+      WHERE c.company_id = :companyId
+        AND c.status = 'active'
+        AND c.deleted_at IS NULL
+        AND EXISTS (
+          SELECT 1
+          FROM branch_customers bc
+          WHERE bc.customer_id = c.id
+            AND bc.company_id = c.company_id
+            AND bc.branch_id = :branchId
+            AND bc.is_active = TRUE
+        )
+        AND (${matchClauses.join(" OR ")})
+      ORDER BY
+        CASE
+          WHEN c.canonical_phone = :canonicalPhone THEN 0
+          WHEN c.id = :query THEN 1
+          WHEN LOWER(c.name) = LOWER(:query) THEN 2
+          ELSE 3
+        END,
+        c.name ASC,
+        c.id ASC
+      LIMIT ${phoneInput.isExactCanonical ? 2 : limit}
+    `, {
+      replacements,
+      type: require("sequelize").QueryTypes.SELECT,
+    });
+
+    if (phoneInput.isExactCanonical && rows.length > 1) {
+      throw new AppError("More than one active customer matches this phone number.", 409, "CUSTOMER_PHONE_AMBIGUOUS");
+    }
+
+    const items = rows.slice(0, limit).map((row) => ({
+      id: row.id,
+      name: row.name,
+      phone: row.phone,
+      phoneCountry: row.phoneCountry || null,
+      branchId: row.branchId,
+    }));
+    return res.status(200).json({
+      success: true,
+      items,
+      data: { items, total: items.length, limit, query, branchId, hasMore: items.length >= limit },
     });
   } catch (error) {
     return next(error);

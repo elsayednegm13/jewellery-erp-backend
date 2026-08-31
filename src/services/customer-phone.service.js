@@ -55,6 +55,39 @@ function canonicalizeCustomerPhone(rawPhone, phoneCountry) {
   };
 }
 
+/**
+ * Read-only POS search interpretation. This deliberately does not infer a
+ * country, persist anything, or replace the explicit phone authority used by
+ * customer create/edit. An international-looking query is canonicalized only
+ * when it is already self-contained (+... or 00...) and valid.
+ */
+function normalizeCustomerPhoneSearchInput(rawPhone) {
+  const raw = rawPhone === null || rawPhone === undefined ? "" : String(rawPhone);
+  const trimmed = raw.trim();
+  const normalizedInternational = trimmed.replace(/^00/, "+");
+  const digits = trimmed.replace(/[^0-9]/g, "");
+  const hasInternationalPrefix = normalizedInternational.startsWith("+");
+
+  if (hasInternationalPrefix) {
+    const parsed = parsePhoneNumberFromString(normalizedInternational, { extract: false });
+    if (parsed && !parsed.ext && parsed.isValid()) {
+      return {
+        raw,
+        digits,
+        canonicalPhone: parsed.number,
+        isExactCanonical: true,
+      };
+    }
+  }
+
+  return {
+    raw,
+    digits,
+    canonicalPhone: null,
+    isExactCanonical: false,
+  };
+}
+
 function assertCanonicalCustomerPhone(rawPhone, phoneCountry) {
   const result = canonicalizeCustomerPhone(rawPhone, phoneCountry);
   if (result.isValid) return result;
@@ -84,5 +117,6 @@ module.exports = {
   normalizePhone,
   normalizePhoneCountry,
   canonicalizeCustomerPhone,
+  normalizeCustomerPhoneSearchInput,
   assertCanonicalCustomerPhone,
 };
