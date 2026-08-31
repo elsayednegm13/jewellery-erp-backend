@@ -10,6 +10,7 @@ const DEFAULT_BARCODE_INVENTORY_CODES = Object.freeze([
   { code: "DD", displayName: "Diamond", assetType: "diamond", description: "Client-approved Diamond inventory code", isActive: true, isClientApproved: true, isProvisional: false, requiresKarat: true, defaultKaratCode: null, defaultItemCode: null, sortOrder: 30 },
   { code: "GS", displayName: "Gem Stone", assetType: "gemstone", description: "Client-approved Gem Stone inventory code", isActive: true, isClientApproved: true, isProvisional: false, requiresKarat: true, defaultKaratCode: null, defaultItemCode: null, sortOrder: 40 },
   { code: "PL", displayName: "Pearl", assetType: "pearl", description: "Client-approved Pearl inventory code", isActive: true, isClientApproved: true, isProvisional: false, requiresKarat: true, defaultKaratCode: null, defaultItemCode: null, sortOrder: 50 },
+  { code: "WT", displayName: "Watch", assetType: "watch", description: "Owner-approved provisional system extension pending client confirmation", isActive: true, isClientApproved: false, isProvisional: true, requiresKarat: false, defaultKaratCode: "00", defaultItemCode: "WCH", sortOrder: 60 },
 ]);
 
 const CLIENT_ITEM_CODES = Object.freeze([
@@ -19,7 +20,6 @@ const CLIENT_ITEM_CODES = Object.freeze([
   ["ERG", "Earrings"], ["FST", "Full Set"], ["LOS", "Loose Stone"],
   ["NCK", "Necklace"], ["PND", "Pendant"], ["PCH", "Pendant Chain"],
   ["RNG", "Ring"], ["TRN", "Twins Ring"], ["WRN", "Wedding Band"],
-  ["ROS", "Gold Rosary"], ["CSD", "Custom Design"],
 ]);
 
 const DEFAULT_BARCODE_ITEM_CODES = Object.freeze([
@@ -33,6 +33,16 @@ const DEFAULT_BARCODE_ITEM_CODES = Object.freeze([
     allowedInventoryCodes: CLIENT_INVENTORY_CODES,
     sortOrder: (index + 1) * 10,
   })),
+  {
+    code: "WCH",
+    displayName: "Watch",
+    description: "Owner-approved provisional system extension pending client confirmation",
+    isActive: true,
+    isClientApproved: false,
+    isProvisional: true,
+    allowedInventoryCodes: ["WT"],
+    sortOrder: 190,
+  },
 ]);
 
 module.exports = {
