@@ -112,9 +112,17 @@ test("Customer and POS UI expose the same explicit country selector without chan
   const customerDetail = fs.readFileSync(path.join(__dirname, "../../app/[locale]/(dashboard)/customers/[id]/page.tsx"), "utf8");
   const pos = fs.readFileSync(path.join(__dirname, "../../app/[locale]/(dashboard)/pos/page.tsx"), "utf8");
   const selector = fs.readFileSync(path.join(__dirname, "../../features/customers/components/PhoneCountrySelect.tsx"), "utf8");
-  for (const source of [customerList, customerDetail, pos]) assert.match(source, /PhoneCountrySelect/);
+  for (const source of [customerList, customerDetail]) assert.match(source, /PhoneCountrySelect/);
+  assert.doesNotMatch(pos, /PhoneCountrySelect/);
   assert.match(selector, /PHONE_COUNTRY_OPTIONS/);
   assert.match(selector, /Select country/);
   assert.match(selector, /اختر الدولة/);
   assert.doesNotMatch(customerList, /nationality.*phoneCountry|phoneCountry.*nationality/);
+});
+
+test("customer duplicate preflight preserves the explicit phone country", () => {
+  const hook = fs.readFileSync(path.join(__dirname, "../../hooks/use-customers.ts"), "utf8");
+  const repository = fs.readFileSync(path.join(__dirname, "../../lib/repositories/api-impl.ts"), "utf8");
+  assert.match(hook, /findPotentialDuplicates\(\{\s*name: input\.name,\s*phone: input\.phone,\s*phoneCountry: input\.phoneCountry,\s*\}\)/s);
+  assert.match(repository, /if \(input\.phoneCountry\) params\.set\("phoneCountry", input\.phoneCountry\)/);
 });
